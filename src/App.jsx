@@ -827,7 +827,7 @@ function MagicMoment({ onComplete }) {
   );
 }
 
-
+function Login({ onLogin }) {
   const [email, setEmail] = useState("");
   const [pass, setPass] = useState("");
   const [err, setErr] = useState("");
