@@ -704,7 +704,7 @@ function MagicMoment({ onComplete }) {
 
         {/* Live feed */}
         <div className="mm-feed-list">
-          {[...visibleFeed].reverse().slice(0, 7).map((item, i) => (
+          {[...visibleFeed].filter(Boolean).reverse().slice(0, 7).map((item, i) => (
             <div key={i} className="mm-feed-item" style={{ animationDelay: `${i * 0.02}s` }}>
               <div className={`mm-feed-dot ${item.status}`} />
               <span className="mm-feed-ref">{item.ref}</span>
@@ -727,6 +727,8 @@ function MagicMoment({ onComplete }) {
   );
 
   // ── RESULTS ──
+  if (phase !== "results") return null;
+
   const pendingCount = REVIEW_ITEMS.filter((_, i) => reviewed[i] === undefined).length;
 
   return (
