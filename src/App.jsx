@@ -391,6 +391,93 @@ const CSS = `
   .send-btn:hover { background: var(--navy2); }
   @keyframes fadeUp{from{opacity:0;transform:translateY(8px)}to{opacity:1;transform:translateY(0)}}
   .fade-up{animation:fadeUp 0.32s ease forwards}
+  /* ── MAGIC MOMENT ── */
+  .mm-wrap { min-height: 100vh; background: var(--navy); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px 20px; position: relative; overflow: hidden; }
+  .mm-grid { position: absolute; inset: 0; background-image: linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px); background-size: 48px 48px; pointer-events: none; }
+  .mm-glow { position: absolute; width: 600px; height: 600px; border-radius: 50%; background: radial-gradient(circle, rgba(29,107,114,0.18) 0%, transparent 70%); top: 50%; left: 50%; transform: translate(-50%,-50%); pointer-events: none; }
+  .mm-card { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: 16px; width: 100%; max-width: 640px; padding: 40px; position: relative; z-index: 10; backdrop-filter: blur(8px); }
+  /* idle state */
+  .mm-idle-logo { font-family: 'Playfair Display', serif; font-size: 32px; font-weight: 700; color: white; margin-bottom: 6px; }
+  .mm-idle-logo span { color: var(--gold2); }
+  .mm-idle-sub { font-size: 12px; font-family: 'Source Code Pro', monospace; color: rgba(255,255,255,0.3); letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 40px; }
+  .mm-company { font-family: 'Playfair Display', serif; font-size: 22px; font-weight: 600; color: white; margin-bottom: 6px; }
+  .mm-period { font-size: 12px; font-family: 'Source Code Pro', monospace; color: var(--gold2); margin-bottom: 48px; }
+  .mm-btn { width: 100%; background: linear-gradient(135deg, var(--teal) 0%, #15555c 100%); border: none; border-radius: 10px; padding: 20px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 14px; transition: all 0.2s; position: relative; overflow: hidden; }
+  .mm-btn::before { content: ''; position: absolute; inset: 0; background: linear-gradient(135deg, rgba(255,255,255,0.06), transparent); }
+  .mm-btn:hover { transform: translateY(-2px); box-shadow: 0 12px 40px rgba(29,107,114,0.5); }
+  .mm-btn:active { transform: translateY(0); }
+  .mm-btn-icon { font-size: 28px; }
+  .mm-btn-text { text-align: left; }
+  .mm-btn-label { font-family: 'Playfair Display', serif; font-size: 18px; font-weight: 700; color: white; }
+  .mm-btn-hint { font-size: 11px; font-family: 'Source Code Pro', monospace; color: rgba(255,255,255,0.5); margin-top: 3px; }
+  .mm-features { display: flex; gap: 8px; margin-top: 28px; flex-wrap: wrap; }
+  .mm-feat { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08); border-radius: 6px; padding: 6px 12px; font-size: 10px; font-family: 'Source Code Pro', monospace; color: rgba(255,255,255,0.4); letter-spacing: 0.06em; }
+  /* processing state */
+  .mm-processing { display: flex; flex-direction: column; gap: 0; }
+  .mm-proc-header { display: flex; align-items: center; justify-content: space-between; margin-bottom: 28px; }
+  .mm-proc-title { font-family: 'Playfair Display', serif; font-size: 18px; font-weight: 600; color: white; }
+  .mm-proc-pct { font-family: 'Source Code Pro', monospace; font-size: 28px; font-weight: 700; color: var(--teal2); }
+  .mm-arc-wrap { display: flex; justify-content: center; margin-bottom: 24px; }
+  .mm-arc { transform: rotate(-90deg); }
+  .mm-arc-bg { fill: none; stroke: rgba(255,255,255,0.07); stroke-width: 6; }
+  .mm-arc-fill { fill: none; stroke: var(--teal2); stroke-width: 6; stroke-linecap: round; transition: stroke-dashoffset 0.4s ease; }
+  .mm-arc-text { transform: rotate(90deg); }
+  .mm-feed-list { display: flex; flex-direction: column; gap: 6px; max-height: 220px; overflow: hidden; }
+  .mm-feed-item { display: flex; align-items: center; gap: 10px; padding: 8px 12px; border-radius: 6px; background: rgba(255,255,255,0.04); border: 1px solid rgba(255,255,255,0.06); animation: feedIn 0.3s ease forwards; opacity: 0; }
+  @keyframes feedIn { from { opacity:0; transform: translateX(-8px); } to { opacity:1; transform: translateX(0); } }
+  .mm-feed-dot { width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0; }
+  .mm-feed-dot.auto { background: var(--teal2); box-shadow: 0 0 6px var(--teal2); }
+  .mm-feed-dot.review { background: var(--gold2); box-shadow: 0 0 6px var(--gold2); }
+  .mm-feed-dot.proc { background: rgba(255,255,255,0.25); animation: pulse-dot 1s infinite; }
+  @keyframes pulse-dot { 0%,100%{opacity:0.3} 50%{opacity:1} }
+  .mm-feed-ref { font-family: 'Source Code Pro', monospace; font-size: 10px; color: rgba(255,255,255,0.35); width: 72px; flex-shrink: 0; }
+  .mm-feed-narr { font-size: 12px; color: rgba(255,255,255,0.65); flex: 1; }
+  .mm-feed-badge { font-size: 9px; font-family: 'Source Code Pro', monospace; padding: 2px 7px; border-radius: 2px; flex-shrink: 0; }
+  .mm-feed-badge.auto { background: rgba(29,107,114,0.2); color: var(--teal2); }
+  .mm-feed-badge.review { background: rgba(184,134,11,0.2); color: var(--gold2); }
+  .mm-sources { display: flex; gap: 8px; margin-bottom: 20px; flex-wrap: wrap; }
+  .mm-src { display: flex; align-items: center; gap: 6px; background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.1); border-radius: 6px; padding: 5px 10px; font-size: 10px; font-family: 'Source Code Pro', monospace; color: rgba(255,255,255,0.5); }
+  .mm-src-dot { width: 6px; height: 6px; border-radius: 50%; background: var(--teal2); animation: pulse-dot 1.5s infinite; }
+  .mm-src-dot.done { background: var(--teal2); animation: none; }
+  /* results state */
+  .mm-results { display: flex; flex-direction: column; gap: 0; }
+  .mm-score-row { display: flex; align-items: center; gap: 20px; margin-bottom: 28px; }
+  .mm-score-circle { width: 90px; height: 90px; flex-shrink: 0; }
+  .mm-score-arc-bg { fill: none; stroke: rgba(255,255,255,0.07); stroke-width: 7; }
+  .mm-score-arc { fill: none; stroke: var(--teal2); stroke-width: 7; stroke-linecap: round; stroke-dasharray: 245; stroke-dashoffset: 25; transition: stroke-dashoffset 1s ease; }
+  .mm-score-pct { font-family: 'Playfair Display', serif; font-size: 28px; font-weight: 700; color: white; }
+  .mm-score-label { font-size: 11px; font-family: 'Source Code Pro', monospace; color: rgba(255,255,255,0.4); margin-top: 3px; }
+  .mm-score-detail { font-family: 'Playfair Display', serif; font-size: 20px; font-weight: 600; color: white; }
+  .mm-score-sub { font-size: 12px; color: rgba(255,255,255,0.45); margin-top: 5px; font-family: 'Source Code Pro', monospace; }
+  .mm-auto-posted { background: rgba(29,107,114,0.08); border: 1px solid rgba(29,107,114,0.2); border-radius: 10px; padding: 14px 16px; margin-bottom: 16px; }
+  .mm-auto-hdr { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .mm-auto-title { font-size: 11px; font-family: 'Source Code Pro', monospace; color: var(--teal2); text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600; }
+  .mm-auto-count { font-family: 'Source Code Pro', monospace; font-size: 11px; color: rgba(255,255,255,0.3); }
+  .mm-auto-item { display: flex; align-items: center; gap: 8px; padding: 5px 0; border-bottom: 1px solid rgba(255,255,255,0.04); font-size: 12px; color: rgba(255,255,255,0.55); }
+  .mm-auto-item:last-child { border-bottom: none; }
+  .mm-auto-check { color: var(--teal2); font-size: 12px; flex-shrink: 0; }
+  .mm-review-section { margin-bottom: 20px; }
+  .mm-review-hdr { display: flex; align-items: center; justify-content: space-between; margin-bottom: 10px; }
+  .mm-review-title { font-size: 11px; font-family: 'Source Code Pro', monospace; color: var(--gold2); text-transform: uppercase; letter-spacing: 0.1em; font-weight: 600; }
+  .mm-review-item { background: rgba(184,134,11,0.06); border: 1px solid rgba(184,134,11,0.18); border-radius: 8px; padding: 12px 14px; margin-bottom: 8px; display: flex; align-items: flex-start; gap: 12px; }
+  .mm-review-icon { font-size: 16px; flex-shrink: 0; margin-top: 1px; }
+  .mm-review-body { flex: 1; }
+  .mm-review-ref { font-family: 'Source Code Pro', monospace; font-size: 10px; color: var(--gold2); margin-bottom: 3px; }
+  .mm-review-narr { font-size: 13px; color: rgba(255,255,255,0.75); margin-bottom: 4px; }
+  .mm-review-reason { font-size: 11px; color: rgba(255,255,255,0.35); font-style: italic; }
+  .mm-review-actions { display: flex; gap: 6px; flex-shrink: 0; }
+  .mm-approve { background: rgba(29,107,114,0.15); border: 1px solid rgba(29,107,114,0.3); color: var(--teal2); border-radius: 5px; padding: 5px 11px; font-size: 11px; font-family: 'Source Code Pro', monospace; cursor: pointer; transition: all 0.15s; }
+  .mm-approve:hover { background: rgba(29,107,114,0.3); }
+  .mm-reject { background: rgba(139,32,32,0.1); border: 1px solid rgba(139,32,32,0.25); color: #e07070; border-radius: 5px; padding: 5px 11px; font-size: 11px; font-family: 'Source Code Pro', monospace; cursor: pointer; transition: all 0.15s; }
+  .mm-reject:hover { background: rgba(139,32,32,0.2); }
+  .mm-approved-badge { background: rgba(29,107,114,0.15); border: 1px solid rgba(29,107,114,0.3); color: var(--teal2); border-radius: 5px; padding: 5px 11px; font-size: 11px; font-family: 'Source Code Pro', monospace; }
+  .mm-cta { width: 100%; background: linear-gradient(135deg, var(--navy2) 0%, var(--navy) 100%); border: 1px solid rgba(255,255,255,0.12); border-radius: 10px; padding: 16px; color: white; font-family: 'Playfair Display', serif; font-size: 16px; font-weight: 600; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 10px; }
+  .mm-cta:hover { border-color: var(--gold2); box-shadow: 0 8px 32px rgba(0,0,0,0.4); }
+  .mm-cta-disabled { opacity: 0.4; pointer-events: none; }
+  .mm-stat-pills { display: flex; gap: 8px; margin-bottom: 24px; flex-wrap: wrap; }
+  .mm-stat { background: rgba(255,255,255,0.05); border: 1px solid rgba(255,255,255,0.08); border-radius: 8px; padding: 10px 14px; flex: 1; min-width: 100px; }
+  .mm-stat-val { font-family: 'Source Code Pro', monospace; font-size: 18px; font-weight: 700; color: white; }
+  .mm-stat-lbl { font-size: 10px; font-family: 'Source Code Pro', monospace; color: rgba(255,255,255,0.35); margin-top: 3px; text-transform: uppercase; letter-spacing: 0.06em; }
   /* ── LOGIN ── */
   .login-wrap { min-height: 100vh; background: var(--navy); display: flex; align-items: center; justify-content: center; }
   .login-card { background: var(--surface); width: 380px; border-radius: 4px; overflow: hidden; box-shadow: 0 24px 64px rgba(0,0,0,0.35); }
@@ -467,8 +554,280 @@ const CSS = `
   .gl-no-data { padding: 40px; text-align: center; color: var(--dim); font-size: 13px; }
 `;
 
-// ─── LOGIN ────────────────────────────────────────────────────────────────────
-function Login({ onLogin }) {
+// ─── MAGIC MOMENT ─────────────────────────────────────────────────────────────
+const FEED_ITEMS = [
+  { ref: "RCP-041", narr: "Murphy Retail — receipt on account", status: "auto", amount: "€12,000" },
+  { ref: "PAY-019", narr: "Payroll run — April gross salaries", status: "auto", amount: "€32,000" },
+  { ref: "INV-0089", narr: "Sales invoice — Murphy Retail", status: "auto", amount: "€4,800" },
+  { ref: "RCP-042", narr: "Clancy Engineering — INV-0082", status: "auto", amount: "€5,600" },
+  { ref: "PAY-020", narr: "PAYE/PRSI — March P30 payment", status: "auto", amount: "€4,880" },
+  { ref: "JNL-001", narr: "Depreciation — Plant & Machinery", status: "auto", amount: "€8,500" },
+  { ref: "INV-0091", narr: "Sales invoice — Clancy Engineering", status: "auto", amount: "€2,200" },
+  { ref: "PAY-021", narr: "VAT3 payment — Feb/Mar period", status: "auto", amount: "€5,820" },
+  { ref: "JNL-002", narr: "Accrual — legal fees outstanding", status: "auto", amount: "€3,200" },
+  { ref: "RCP-043", narr: "West Cork Meats — INV-0088", status: "auto", amount: "€3,200" },
+  { ref: "PAY-022", narr: "Office lease — April payment", status: "auto", amount: "€2,400" },
+  { ref: "INV-0092", narr: "Sales invoice — West Cork Meats", status: "auto", amount: "€960" },
+  { ref: "JNL-003", narr: "Prepayment — annual insurance", status: "auto", amount: "€4,200" },
+  { ref: "RCP-044", narr: "Aoife Design — part payment", status: "auto", amount: "€8,620" },
+  { ref: "INV-0094", narr: "Sales invoice — O'Brien Logistics", status: "auto", amount: "€14,390" },
+];
+
+const REVIEW_ITEMS = [
+  { ref: "PAY-023/024", narr: "Limerick Supplies — two payments same amount", reason: "Possible duplicate · €340 each · 27 & 28 Apr", icon: "⚠" },
+  { ref: "PUR-031", narr: "Arthur Cox — legal invoice unmatched PO", reason: "No purchase order on file · €1,800 · recommend approval", icon: "❓" },
+  { ref: "JNL-EXT", narr: "Contractor cost up 34% vs last quarter", reason: "AI flagged variance · review before sign-off", icon: "📊" },
+];
+
+const AUTO_POSTED_SUMMARY = [
+  "47 bank transactions categorised and matched",
+  "12 sales invoices posted to debtors ledger",
+  "8 supplier payments allocated to creditors",
+  "3 month-end journals posted (depreciation, accrual, prepayment)",
+  "VAT T1/T2 workings auto-prepared from transactions",
+  "Trial balance confirmed — debits equal credits ✓",
+];
+
+const SOURCES = ["AIB Open Banking", "Invoice OCR", "Payroll feed", "Manual journals"];
+
+function MagicMoment({ onComplete }) {
+  const [phase, setPhase] = useState("idle"); // idle → processing → results
+  const [progress, setProgress] = useState(0);
+  const [visibleFeed, setVisibleFeed] = useState([]);
+  const [srcDone, setSrcDone] = useState([false, false, false, false]);
+  const [reviewed, setReviewed] = useState({});
+  const [allApproved, setAllApproved] = useState(false);
+
+  const circumference = 2 * Math.PI * 52;
+
+  useEffect(() => {
+    if (phase !== "processing") return;
+    // Progress ticker
+    let prog = 0;
+    const ticker = setInterval(() => {
+      prog += Math.random() * 4 + 1;
+      if (prog >= 100) { prog = 100; clearInterval(ticker); }
+      setProgress(Math.min(Math.round(prog), 100));
+    }, 120);
+    // Feed items appear one by one
+    let idx = 0;
+    const feeder = setInterval(() => {
+      if (idx < FEED_ITEMS.length) {
+        setVisibleFeed(v => [...v, FEED_ITEMS[idx]]);
+        idx++;
+      } else {
+        clearInterval(feeder);
+      }
+    }, 220);
+    // Source pills go done progressively
+    [800, 1600, 2800, 4000].forEach((ms, i) => {
+      setTimeout(() => setSrcDone(s => { const n=[...s]; n[i]=true; return n; }), ms);
+    });
+    // Transition to results
+    const done = setTimeout(() => setPhase("results"), 5200);
+    return () => { clearInterval(ticker); clearInterval(feeder); clearTimeout(done); };
+  }, [phase]);
+
+  useEffect(() => {
+    const allDone = REVIEW_ITEMS.every((_, i) => reviewed[i] !== undefined);
+    setAllApproved(allDone);
+  }, [reviewed]);
+
+  const dashOffset = circumference - (progress / 100) * circumference;
+
+  // ── IDLE ──
+  if (phase === "idle") return (
+    <div className="mm-wrap">
+      <div className="mm-grid" />
+      <div className="mm-glow" />
+      <div className="mm-card" style={{ animation: "fadeUp 0.5s ease forwards" }}>
+        <div className="mm-idle-logo">Fin<span>flow</span></div>
+        <div className="mm-idle-sub">Finance OS · Ireland · {PERIOD}</div>
+        <div className="mm-company">{COMPANY}</div>
+        <div className="mm-period">▸ Month end close ready · {PERIOD}</div>
+        <button className="mm-btn" onClick={() => setPhase("processing")}>
+          <span className="mm-btn-icon">⚡</span>
+          <div className="mm-btn-text">
+            <div className="mm-btn-label">Run Month End Close</div>
+            <div className="mm-btn-hint">AI will process all transactions · takes ~10 seconds</div>
+          </div>
+          <span style={{ color: "rgba(255,255,255,0.3)", fontSize: 20 }}>→</span>
+        </button>
+        <div className="mm-features">
+          {["AIB Open Banking", "Invoice OCR", "Auto-reconciliation", "ROS prep", "AI categorisation"].map(f => (
+            <span key={f} className="mm-feat">{f}</span>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+
+  // ── PROCESSING ──
+  if (phase === "processing") return (
+    <div className="mm-wrap">
+      <div className="mm-grid" />
+      <div className="mm-glow" />
+      <div className="mm-card">
+        <div className="mm-proc-header">
+          <div>
+            <div className="mm-proc-title">AI processing month end…</div>
+            <div style={{ fontSize: 11, fontFamily: "'Source Code Pro', monospace", color: "rgba(255,255,255,0.3)", marginTop: 4 }}>
+              {COMPANY} · {PERIOD}
+            </div>
+          </div>
+          <div className="mm-proc-pct">{progress}%</div>
+        </div>
+
+        {/* Arc progress */}
+        <div className="mm-arc-wrap">
+          <svg className="mm-arc" width="120" height="120" viewBox="0 0 120 120">
+            <circle className="mm-arc-bg" cx="60" cy="60" r="52" />
+            <circle className="mm-arc-fill" cx="60" cy="60" r="52"
+              strokeDasharray={circumference}
+              strokeDashoffset={dashOffset} />
+            <text className="mm-arc-text" x="60" y="60" textAnchor="middle" dominantBaseline="central"
+              style={{ fill: "white", fontSize: 11, fontFamily: "'Source Code Pro', monospace", fontWeight: 700 }}>
+              {visibleFeed.length} posted
+            </text>
+          </svg>
+        </div>
+
+        {/* Source pills */}
+        <div className="mm-sources">
+          {SOURCES.map((s, i) => (
+            <div key={s} className="mm-src">
+              <div className={`mm-src-dot ${srcDone[i] ? "done" : ""}`} />
+              {s} {srcDone[i] ? "✓" : ""}
+            </div>
+          ))}
+        </div>
+
+        {/* Live feed */}
+        <div className="mm-feed-list">
+          {[...visibleFeed].reverse().slice(0, 7).map((item, i) => (
+            <div key={i} className="mm-feed-item" style={{ animationDelay: `${i * 0.02}s` }}>
+              <div className={`mm-feed-dot ${item.status}`} />
+              <span className="mm-feed-ref">{item.ref}</span>
+              <span className="mm-feed-narr">{item.narr}</span>
+              <span style={{ fontFamily: "'Source Code Pro', monospace", fontSize: 11, color: "rgba(255,255,255,0.4)" }}>{item.amount}</span>
+              <span className={`mm-feed-badge ${item.status}`}>
+                {item.status === "auto" ? "AUTO" : "REVIEW"}
+              </span>
+            </div>
+          ))}
+          {progress < 100 && (
+            <div className="mm-feed-item">
+              <div className="mm-feed-dot proc" />
+              <span className="mm-feed-narr" style={{ color: "rgba(255,255,255,0.3)", fontStyle: "italic" }}>Analysing transactions…</span>
+            </div>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+
+  // ── RESULTS ──
+  const pendingCount = REVIEW_ITEMS.filter((_, i) => reviewed[i] === undefined).length;
+
+  return (
+    <div className="mm-wrap">
+      <div className="mm-grid" />
+      <div className="mm-glow" style={{ background: "radial-gradient(circle, rgba(29,107,114,0.25) 0%, transparent 70%)" }} />
+      <div className="mm-card" style={{ animation: "fadeUp 0.4s ease forwards" }}>
+
+        {/* Score */}
+        <div className="mm-score-row">
+          <svg className="mm-score-circle" viewBox="0 0 100 100">
+            <circle className="mm-score-arc-bg" cx="50" cy="50" r="39" />
+            <circle className="mm-score-arc" cx="50" cy="50" r="39"
+              style={{ transform: "rotate(-90deg)", transformOrigin: "50% 50%" }} />
+            <text x="50" y="47" textAnchor="middle" dominantBaseline="central"
+              style={{ fill: "white", fontSize: 18, fontFamily: "'Playfair Display', serif", fontWeight: 700 }}>
+              90%
+            </text>
+            <text x="50" y="62" textAnchor="middle" dominantBaseline="central"
+              style={{ fill: "rgba(255,255,255,0.35)", fontSize: 8, fontFamily: "'Source Code Pro', monospace" }}>
+              AUTO
+            </text>
+          </svg>
+          <div>
+            <div className="mm-score-detail">Month end 90% complete</div>
+            <div className="mm-score-sub">47 of 50 entries posted automatically · 3 need your review</div>
+          </div>
+        </div>
+
+        {/* Stat pills */}
+        <div className="mm-stat-pills">
+          {[
+            { val: "47", lbl: "Auto-posted" },
+            { val: "3", lbl: "Need review" },
+            { val: "€0", lbl: "Discrepancies" },
+            { val: "✓", lbl: "TB balanced" },
+          ].map(s => (
+            <div key={s.lbl} className="mm-stat">
+              <div className="mm-stat-val">{s.val}</div>
+              <div className="mm-stat-lbl">{s.lbl}</div>
+            </div>
+          ))}
+        </div>
+
+        {/* Auto-posted summary */}
+        <div className="mm-auto-posted">
+          <div className="mm-auto-hdr">
+            <span className="mm-auto-title">⚡ Auto-posted by AI</span>
+            <span className="mm-auto-count">47 entries</span>
+          </div>
+          {AUTO_POSTED_SUMMARY.map((item, i) => (
+            <div key={i} className="mm-auto-item">
+              <span className="mm-auto-check">✓</span>
+              <span>{item}</span>
+            </div>
+          ))}
+        </div>
+
+        {/* Review items */}
+        <div className="mm-review-section">
+          <div className="mm-review-hdr">
+            <span className="mm-review-title">⚠ Needs your review ({pendingCount} remaining)</span>
+          </div>
+          {REVIEW_ITEMS.map((item, i) => (
+            <div key={i} className="mm-review-item"
+              style={{ opacity: reviewed[i] !== undefined ? 0.55 : 1, transition: "opacity 0.3s" }}>
+              <span className="mm-review-icon">{reviewed[i] === "approved" ? "✓" : item.icon}</span>
+              <div className="mm-review-body">
+                <div className="mm-review-ref">{item.ref}</div>
+                <div className="mm-review-narr">{item.narr}</div>
+                <div className="mm-review-reason">{item.reason}</div>
+              </div>
+              {reviewed[i] === undefined ? (
+                <div className="mm-review-actions">
+                  <button className="mm-approve" onClick={() => setReviewed(r => ({ ...r, [i]: "approved" }))}>Approve</button>
+                  <button className="mm-reject" onClick={() => setReviewed(r => ({ ...r, [i]: "rejected" }))}>Flag</button>
+                </div>
+              ) : (
+                <span className="mm-approved-badge">{reviewed[i] === "approved" ? "Approved" : "Flagged"}</span>
+              )}
+            </div>
+          ))}
+        </div>
+
+        {/* CTA */}
+        <button
+          className={`mm-cta ${!allApproved ? "mm-cta-disabled" : ""}`}
+          onClick={onComplete}>
+          {allApproved ? "Open Dashboard →" : `Review ${pendingCount} remaining item${pendingCount !== 1 ? "s" : ""} to continue`}
+        </button>
+        {!allApproved && (
+          <div style={{ textAlign: "center", marginTop: 10, fontSize: 10, fontFamily: "'Source Code Pro', monospace", color: "rgba(255,255,255,0.25)" }}>
+            Approve or flag all items above to unlock the dashboard
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+
   const [email, setEmail] = useState("");
   const [pass, setPass] = useState("");
   const [err, setErr] = useState("");
@@ -1095,9 +1454,9 @@ function Journals() {
   const suggest = async () => {
     setAiOpen(true); setAiLoading(true); setAiText("");
     try {
-      const res = await fetch("/api/chat", {
+      const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1000,
+        body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000,
           system: `You are an expert Irish chartered accountant. For ${COMPANY} April 2026 month end, suggest outstanding journal entries. Available accounts: ${GL_ACCOUNTS.map(a => `${a.code} ${a.name}`).join(", ")}. Already posted: Depreciation JNL-001, Accrual for legal fees JNL-002, Prepayment for insurance JNL-003. Suggest 2-3 journals with account codes, amounts and brief rationale. Be concise and professional.`,
           messages: [{ role: "user", content: "What journal entries should I post for April month end?" }] })
       });
@@ -1244,8 +1603,8 @@ function Chat({ page }) {
     const msg = text || inp; if (!msg.trim()) return;
     setInp(""); setMsgs(p => [...p, { role: "user", text: msg }]); setTyping(true);
     try {
-      const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1000,
+      const res = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000,
           system: `You are Finflow AI — a sharp, concise finance assistant built into Finflow, an Irish SME ERP. You are currently assisting the financial controller of ${COMPANY}.
 
 COMPANY FINANCIALS (${PERIOD}):
@@ -1311,6 +1670,7 @@ const TITLES = {
 
 export default function App() {
   const [loggedIn, setLoggedIn] = useState(false);
+  const [magicDone, setMagicDone] = useState(false);
   const [page, setPage] = useState("overview");
   const allItems = CHECKLIST_SECTIONS.flatMap(s => s.items);
   const [title, subtitle] = TITLES[page] || ["", ""];
@@ -1319,6 +1679,13 @@ export default function App() {
     <>
       <style>{CSS}</style>
       <Login onLogin={() => setLoggedIn(true)} />
+    </>
+  );
+
+  if (!magicDone) return (
+    <>
+      <style>{CSS}</style>
+      <MagicMoment onComplete={() => setMagicDone(true)} />
     </>
   );
 
