@@ -1458,7 +1458,7 @@ function Journals() {
     try {
       const res = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000,
+        body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1000,
           system: `You are an expert Irish chartered accountant. For ${COMPANY} April 2026 month end, suggest outstanding journal entries. Available accounts: ${GL_ACCOUNTS.map(a => `${a.code} ${a.name}`).join(", ")}. Already posted: Depreciation JNL-001, Accrual for legal fees JNL-002, Prepayment for insurance JNL-003. Suggest 2-3 journals with account codes, amounts and brief rationale. Be concise and professional.`,
           messages: [{ role: "user", content: "What journal entries should I post for April month end?" }] })
       });
@@ -1606,7 +1606,7 @@ function Chat({ page }) {
     setInp(""); setMsgs(p => [...p, { role: "user", text: msg }]); setTyping(true);
     try {
       const res = await fetch("https://api.anthropic.com/v1/messages", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "claude-sonnet-4-20250514", max_tokens: 1000,
+        body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1000,
           system: `You are Finflow AI — a sharp, concise finance assistant built into Finflow, an Irish SME ERP. You are currently assisting the financial controller of ${COMPANY}.
 
 COMPANY FINANCIALS (${PERIOD}):
