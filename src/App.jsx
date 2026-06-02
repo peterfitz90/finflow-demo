@@ -1,5 +1,5 @@
-import { useState, useEffect, useRef } from "react";
-import { useUser } from "@clerk/clerk-react";
+import { useState, useEffect, useRef, useMemo } from "react";
+import { useUser, useOrganizationList } from "@clerk/clerk-react";
 import { AuthGate, UserChip } from "./auth.jsx"
 import { supabase, getCompanyClient } from "./supabase.js"
 
@@ -544,6 +544,28 @@ const CSS = `
   .print-only { display: none; padding-bottom: 14px; border-bottom: 2px solid var(--text); margin-bottom: 16px; }
   .print-title { font-family: 'Playfair Display', serif; font-size: 18px; font-weight: 700; color: var(--text); margin-bottom: 3px; }
   .print-meta { font-size: 11px; color: var(--muted); font-family: 'Source Code Pro', monospace; }
+  /* ── COMPANY SWITCHER ── */
+  .co-switcher { position: relative; }
+  .co-switcher-btn { display: flex; align-items: center; gap: 8px; background: none; border: none; cursor: pointer; width: 100%; text-align: left; padding: 0; }
+  .co-switcher-btn .co-name { flex: 1; }
+  .co-switcher-btn .co-caret { font-size: 9px; color: rgba(255,255,255,0.3); }
+  .co-menu { position: absolute; bottom: calc(100% + 6px); left: 0; right: 0; background: var(--sidebar2); border: 1px solid rgba(255,255,255,0.12); border-radius: 8px; overflow: hidden; z-index: 300; box-shadow: 0 8px 24px rgba(0,0,0,0.4); }
+  .co-menu-item { display: block; width: 100%; padding: 9px 13px; background: none; border: none; font-size: 12px; font-family: 'Inter', system-ui, sans-serif; color: rgba(255,255,255,0.55); cursor: pointer; text-align: left; transition: background 0.1s; }
+  .co-menu-item:hover { background: rgba(255,255,255,0.08); color: rgba(255,255,255,0.9); }
+  .co-menu-item.active { color: white; font-weight: 600; }
+  .co-menu-item.practice { color: var(--gold2); border-bottom: 1px solid rgba(255,255,255,0.08); font-family: 'Source Code Pro', monospace; font-size: 11px; letter-spacing: 0.04em; }
+  .co-menu-item.practice:hover { background: rgba(212,160,23,0.08); }
+  /* ── PRACTICE DASHBOARD ── */
+  .prac-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 14px; }
+  .prac-card { background: var(--white); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px 18px; box-shadow: var(--shadow-sm); cursor: pointer; transition: box-shadow 0.15s, border-color 0.15s; }
+  .prac-card:hover { box-shadow: var(--shadow); border-color: var(--teal); }
+  .prac-card-name { font-family: 'Playfair Display', serif; font-size: 15px; font-weight: 700; color: var(--text); margin-bottom: 10px; }
+  .prac-stat { display: flex; justify-content: space-between; align-items: center; padding: 6px 0; border-bottom: 1px solid var(--border); font-size: 12px; }
+  .prac-stat:last-child { border-bottom: none; }
+  .prac-stat-label { color: var(--muted); }
+  .prac-stat-val { font-family: 'Source Code Pro', monospace; font-weight: 600; }
+  /* ── READ-ONLY BADGE ── */
+  .ro-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 9px; font-family: 'Source Code Pro', monospace; color: var(--gold); background: rgba(184,134,11,0.08); padding: 2px 8px; border-radius: 20px; border: 1px solid rgba(184,134,11,0.2); letter-spacing: 0.06em; text-transform: uppercase; }
 `;
 
 // ─── MAGIC MOMENT ─────────────────────────────────────────────────────────────
@@ -897,12 +919,31 @@ function Onboarding({ user, onComplete }) {
       clerk_user_id: user.id,
       name: form.name.trim(),
       company_type: form.companyType,
+
       vat_registered: form.vatRegistered,
       vat_number: form.vatRegistered ? form.vatNumber.trim() || null : null,
       period_start: form.periodStart,
       currency: form.currency,
     }).select().single();
     if (err) { setError(`Could not save: ${err.message}`); setSaving(false); return; }
+
+    // Attempt to create Clerk organisation for team access (non-blocking)
+    try {
+      const orgRes = await fetch('/api/create-org', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ companyId: data.id, companyName: data.name, userId: user.id }),
+      });
+      if (orgRes.ok) {
+        const { orgId } = await orgRes.json();
+        if (orgId) {
+          await supabase.from("companies").update({ clerk_org_id: orgId }).eq("id", data.id);
+          onComplete({ ...data, clerk_org_id: orgId });
+          return;
+        }
+      }
+    } catch (_) {}
+
     onComplete(data);
   };
 
@@ -2482,7 +2523,7 @@ function GLExtract({ period, glLines, glAccounts, noJournals, companyName = "Com
 }
 
 
-function Journals({ period, companyName }) {
+function Journals({ period, companyName, companyId: propCompanyId, readOnly = false }) {
   const { user } = useUser();
   const now = new Date();
   const propYYYYMM = (() => {
@@ -2548,11 +2589,12 @@ function Journals({ period, companyName }) {
     return created.id;
   };
 
-  // Resolve companyId once on mount
+  // Resolve companyId: use prop if provided, otherwise derive from user
   useEffect(() => {
+    if (propCompanyId) { setCompanyId(propCompanyId); return; }
     if (!user) return;
     resolveCompanyId().then(setCompanyId).catch(err => console.error("[journals] resolveCompanyId:", err.message));
-  }, [user]);
+  }, [user, propCompanyId]);
 
   // Fetch journals filtered to selected period
   useEffect(() => {
@@ -2653,8 +2695,9 @@ function Journals({ period, companyName }) {
             {periodOptions.map(o => <option key={o.val} value={o.val}>{o.label}</option>)}
           </select>
           {periodLoading && <span style={{ fontSize: 11, color: "var(--dim)", fontFamily: "Source Code Pro, monospace" }}>…</span>}
-          <button className="btn btn-s" onClick={suggest}>⚡ AI Suggest</button>
-          <button className="btn btn-p" onClick={() => { setShowForm(true); setAiOpen(false); }}>+ New Journal</button>
+          {readOnly && <span className="ro-badge">Read-only</span>}
+          {!readOnly && <button className="btn btn-s" onClick={suggest}>⚡ AI Suggest</button>}
+          {!readOnly && <button className="btn btn-p" onClick={() => { setShowForm(true); setAiOpen(false); }}>+ New Journal</button>}
         </div>
       </div>
 
@@ -2672,7 +2715,7 @@ function Journals({ period, companyName }) {
         </div>
       )}
 
-      {showForm && (
+      {showForm && !readOnly && (
         <div className="jnl-form">
           <div className="jnl-fh"><span className="jnl-ft">New Journal Entry</span><button className="btn btn-s btn-sm" onClick={() => setShowForm(false)}>Cancel</button></div>
           <div className="jnl-fb">
@@ -3751,6 +3794,7 @@ const SETTINGS_TYPES     = ["Limited Company","Sole Trader","Partnership","LLP"]
 const SETTINGS_CURRENCIES = ["EUR","GBP","USD"];
 
 function Settings({ company, onUpdate }) {
+  const { user } = useUser();
   const blank = () => ({
     name:           company?.name           || "",
     company_type:   company?.company_type   || "Limited Company",
@@ -3766,6 +3810,60 @@ function Settings({ company, onUpdate }) {
   const [saving, setSaving] = useState(false);
   const [saved,  setSaved]  = useState(false);
   const [error,  setError]  = useState(null);
+
+  // ── Team state ──
+  const [members,        setMembers]        = useState([]);
+  const [membersLoading, setMembersLoading] = useState(false);
+  const [inviteEmail,    setInviteEmail]    = useState("");
+  const [inviteRole,     setInviteRole]     = useState("member");
+  const [inviting,       setInviting]       = useState(false);
+  const [inviteMsg,      setInviteMsg]      = useState(null);
+  const [creatingOrg,    setCreatingOrg]    = useState(false);
+
+  useEffect(() => {
+    if (!company?.clerk_org_id) return;
+    setMembersLoading(true);
+    fetch(`/api/org-members?orgId=${company.clerk_org_id}`)
+      .then(r => r.json())
+      .then(d => { setMembers(d.members || []); setMembersLoading(false); })
+      .catch(() => setMembersLoading(false));
+  }, [company?.clerk_org_id]);
+
+  const enableTeam = async () => {
+    if (!company?.id || !user) return;
+    setCreatingOrg(true);
+    try {
+      const res = await fetch('/api/create-org', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ companyId: company.id, companyName: company.name, userId: user.id }),
+      });
+      const d = await res.json();
+      if (d.orgId) {
+        await getCompanyClient(company.id).from("companies").update({ clerk_org_id: d.orgId }).eq("id", company.id);
+        onUpdate({ ...company, clerk_org_id: d.orgId });
+      }
+    } catch (_) {}
+    setCreatingOrg(false);
+  };
+
+  const sendInvite = async () => {
+    if (!inviteEmail.trim() || !company?.clerk_org_id) return;
+    setInviting(true); setInviteMsg(null);
+    try {
+      const res = await fetch('/api/invite-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ orgId: company.clerk_org_id, emailAddress: inviteEmail.trim(), role: inviteRole }),
+      });
+      const d = await res.json();
+      if (!res.ok) setInviteMsg({ ok: false, text: d.error || "Invitation failed" });
+      else { setInviteMsg({ ok: true, text: `Invitation sent to ${inviteEmail}` }); setInviteEmail(""); }
+    } catch (e) {
+      setInviteMsg({ ok: false, text: e.message });
+    }
+    setInviting(false);
+  };
 
   const valid = form.name.trim().length > 0 &&
     (!form.vat_registered || form.vat_number.trim().length > 0);
@@ -3910,6 +4008,87 @@ function Settings({ company, onUpdate }) {
               </div>
             </div>
           </div>
+        </div>
+      </div>
+
+      {/* ── Team Members ── */}
+      <div className="card" style={{ marginBottom: 13 }}>
+        <div className="card-header">
+          <span className="card-title">Team Access</span>
+          {company?.clerk_org_id && (
+            <span style={{ fontSize: 10, fontFamily: "Source Code Pro, monospace", color: "var(--teal)", background: "rgba(29,107,114,0.08)", padding: "2px 8px", borderRadius: 20, border: "1px solid rgba(29,107,114,0.2)" }}>
+              Multi-user enabled
+            </span>
+          )}
+        </div>
+        <div style={{ padding: "16px 15px" }}>
+          {!company?.clerk_org_id ? (
+            <div>
+              <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 12, lineHeight: 1.6 }}>
+                Enable team access to invite colleagues to this workspace. Admins have full access; members can view all reports and add invoices and bank imports, but cannot post journals.
+              </div>
+              <button className="btn btn-p btn-sm" onClick={enableTeam} disabled={creatingOrg || !company?.id}>
+                {creatingOrg ? "Setting up…" : "Enable Team Access"}
+              </button>
+            </div>
+          ) : (
+            <div>
+              <div style={{ marginBottom: 16 }}>
+                <div className="f-label" style={{ marginBottom: 7 }}>Invite colleague by email</div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <input className="f-input" style={{ flex: 1, minWidth: 200 }} placeholder="colleague@company.ie"
+                    value={inviteEmail} onChange={e => setInviteEmail(e.target.value)}
+                    onKeyDown={e => e.key === "Enter" && sendInvite()} />
+                  <select className="f-input" style={{ width: 130 }} value={inviteRole} onChange={e => setInviteRole(e.target.value)}>
+                    <option value="member">Member</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                  <button className="btn btn-p btn-sm" onClick={sendInvite} disabled={inviting || !inviteEmail.trim()}>
+                    {inviting ? "Sending…" : "Send Invite"}
+                  </button>
+                </div>
+                {inviteMsg && (
+                  <div style={{ marginTop: 8, fontSize: 12, color: inviteMsg.ok ? "var(--green)" : "var(--red)" }}>
+                    {inviteMsg.ok ? "✓ " : "✗ "}{inviteMsg.text}
+                  </div>
+                )}
+                <div style={{ marginTop: 7, fontSize: 11, color: "var(--dim)", lineHeight: 1.5 }}>
+                  <strong>Admin</strong> — full access including posting journals. <strong>Member</strong> — read-only journals and GL reports; can add invoices and import bank transactions.
+                </div>
+              </div>
+              <div className="f-label" style={{ marginBottom: 8 }}>Current Members</div>
+              {membersLoading ? (
+                <div style={{ fontSize: 12, color: "var(--dim)" }}>Loading members…</div>
+              ) : members.length === 0 ? (
+                <div style={{ fontSize: 12, color: "var(--dim)" }}>No team members yet. Send an invitation above.</div>
+              ) : (
+                <div>
+                  {members.map((m, i) => {
+                    const name = m.public_user_data?.first_name
+                      ? `${m.public_user_data.first_name} ${m.public_user_data.last_name || ''}`.trim()
+                      : m.public_user_data?.identifier || "—";
+                    const email = m.public_user_data?.identifier || "";
+                    const initials = name[0]?.toUpperCase() || "?";
+                    const isAdmin = m.role === 'org:admin';
+                    return (
+                      <div key={i} style={{ display: "flex", alignItems: "center", padding: "9px 0", borderBottom: "1px solid var(--border)", gap: 10 }}>
+                        <div style={{ width: 30, height: 30, borderRadius: 6, background: "rgba(29,107,114,0.1)", border: "1px solid rgba(29,107,114,0.2)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 12, fontWeight: 700, color: "var(--teal)", flexShrink: 0 }}>
+                          {initials}
+                        </div>
+                        <div style={{ flex: 1 }}>
+                          <div style={{ fontSize: 13, color: "var(--text)", fontWeight: 500 }}>{name}</div>
+                          {email && email !== name && <div style={{ fontSize: 10, fontFamily: "Source Code Pro, monospace", color: "var(--dim)" }}>{email}</div>}
+                        </div>
+                        <span style={{ fontSize: 10, fontFamily: "Source Code Pro, monospace", color: isAdmin ? "var(--teal)" : "var(--muted)", background: isAdmin ? "rgba(29,107,114,0.08)" : "var(--surface2)", padding: "2px 9px", borderRadius: 20, border: "1px solid var(--border)", textTransform: "uppercase", letterSpacing: "0.06em" }}>
+                          {isAdmin ? "Admin" : "Member"}
+                        </span>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+          )}
         </div>
       </div>
 
@@ -4250,6 +4429,120 @@ function FinancialStatements({ company, companyName }) {
   );
 }
 
+// ─── COMPANY SWITCHER ─────────────────────────────────────────────────────────
+function CompanySwitcher({ companies, company, onSwitch, onPractice }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef(null);
+  useEffect(() => {
+    const h = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    document.addEventListener("mousedown", h);
+    return () => document.removeEventListener("mousedown", h);
+  }, []);
+
+  if (companies.length <= 1) {
+    return <div className="co-pill"><div className="co-dot" /><span className="co-name">{company?.name || "Your Company"}</span></div>;
+  }
+
+  return (
+    <div className="co-switcher" ref={ref}>
+      <button className="co-switcher-btn" onClick={() => setOpen(v => !v)}>
+        <div className="co-dot" />
+        <span className="co-name">{company?.name || "Your Company"}</span>
+        <span className="co-caret">▾</span>
+      </button>
+      {open && (
+        <div className="co-menu">
+          {companies.length >= 3 && (
+            <button className="co-menu-item practice" onClick={() => { onPractice(); setOpen(false); }}>
+              ⊞ Practice Dashboard
+            </button>
+          )}
+          {companies.map(c => (
+            <button
+              key={c.id}
+              className={`co-menu-item ${c.id === company?.id ? "active" : ""}`}
+              onClick={() => { onSwitch(c); setOpen(false); }}
+            >
+              {c.id === company?.id ? "✓ " : "  "}{c.name}
+            </button>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── PRACTICE DASHBOARD ───────────────────────────────────────────────────────
+function PracticeDashboard({ companies, onSelectCompany }) {
+  const [data, setData] = useState({});
+
+  useEffect(() => {
+    companies.forEach(async c => {
+      try {
+        const db = getCompanyClient(c.id);
+        const today = new Date().toISOString().slice(0, 10);
+        const [balRes, overdueRes] = await Promise.all([
+          db.from('bank_transactions').select('balance').eq('company_id', c.id).order('date', { ascending: false }).limit(1),
+          db.from('invoices').select('id', { count: 'exact', head: true }).eq('company_id', c.id).lt('due_date', today).neq('status', 'paid'),
+        ]);
+        setData(prev => ({
+          ...prev,
+          [c.id]: {
+            balance: balRes.data?.[0] ? Number(balRes.data[0].balance) : null,
+            overdueCount: overdueRes.count || 0,
+          },
+        }));
+      } catch (_) {}
+    });
+  }, [companies.length]);
+
+  const nextDeadline = c => {
+    if (c.year_end_month) {
+      const months = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+      return `Year end: ${months[(c.year_end_month - 1) % 12]}`;
+    }
+    return "—";
+  };
+
+  const fmtBal = v => v === null ? "No data" : `${v < 0 ? '-' : ''}€${Math.abs(v).toLocaleString("en-IE", { minimumFractionDigits: 0, maximumFractionDigits: 0 })}`;
+
+  return (
+    <div className="fade-up">
+      <div style={{ marginBottom: 18 }}>
+        <div style={{ fontFamily: "Playfair Display, serif", fontSize: 17, fontWeight: 700, color: "var(--navy)", marginBottom: 2 }}>Practice Dashboard</div>
+        <div style={{ fontSize: 12, color: "var(--muted)" }}>Overview across all {companies.length} workspaces. Click a company to open it.</div>
+      </div>
+      <div className="prac-grid">
+        {companies.map(c => {
+          const d = data[c.id];
+          const bal = d ? fmtBal(d.balance) : "Loading…";
+          const overdue = d ? (d.overdueCount === 0 ? "None" : `${d.overdueCount} overdue`) : "…";
+          return (
+            <div key={c.id} className="prac-card" onClick={() => onSelectCompany(c)}>
+              <div className="prac-card-name">{c.name}</div>
+              <div className="prac-stat">
+                <span className="prac-stat-label">Cash position</span>
+                <span className="prac-stat-val" style={{ color: d?.balance < 0 ? "var(--red)" : "var(--teal)" }}>{bal}</span>
+              </div>
+              <div className="prac-stat">
+                <span className="prac-stat-label">Overdue invoices</span>
+                <span className="prac-stat-val" style={{ color: d?.overdueCount > 0 ? "var(--red)" : "var(--green)" }}>{overdue}</span>
+              </div>
+              <div className="prac-stat">
+                <span className="prac-stat-label">Next deadline</span>
+                <span className="prac-stat-val">{nextDeadline(c)}</span>
+              </div>
+              <div style={{ marginTop: 10, fontSize: 11, fontFamily: "Source Code Pro, monospace", color: "var(--teal)", opacity: 0.7 }}>
+                {c.company_type || "Company"} · {c.currency || "EUR"}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </div>
+  );
+}
+
 const NAV = [
   { id: "overview",    icon: "◈", label: "Overview" },
   { id: "cashflow",    icon: "⟁", label: "Cash Flow" },
@@ -4265,10 +4558,16 @@ const NAV = [
 
 export default function App() {
   const { user, isLoaded } = useUser();
+  const { isLoaded: orgsLoaded, userMemberships } = useOrganizationList({
+    userMemberships: { pageSize: 50 },
+  });
+
   const [page, setPage] = useState("overview");
+  const [companies, setCompanies] = useState([]);
   const [company, setCompany] = useState(null);
   const [onboarding, setOnboarding] = useState(false);
   const [companyLoading, setCompanyLoading] = useState(true);
+  const [showPractice, setShowPractice] = useState(false);
 
   // Derive the current accounting period (previous completed month)
   const period = (() => {
@@ -4279,23 +4578,49 @@ export default function App() {
 
   const companyName = company?.name || "Your Company";
 
+  // Compute user's role in active company's org
+  const userRole = useMemo(() => {
+    if (!company?.clerk_org_id) return 'owner';
+    if (company.clerk_user_id === user?.id) return 'owner';
+    const membership = (userMemberships?.data || []).find(
+      m => m.organization.id === company.clerk_org_id
+    );
+    return membership?.role || 'org:member';
+  }, [company, user, userMemberships?.data]);
+
+  const isReadOnly = userRole === 'org:member';
+
   useEffect(() => {
-    if (!isLoaded) return;
+    if (!isLoaded || !orgsLoaded) return;
     if (!user) { setCompanyLoading(false); return; }
     setCompanyLoading(true);
-    supabase.from("companies").select("*").eq("clerk_user_id", user.id).limit(1)
-      .then(({ data }) => {
-        if (!data || data.length === 0) setOnboarding(true);
-        else { setCompany(data[0]); setOnboarding(false); }
-        setCompanyLoading(false);
-      });
-  }, [user, isLoaded]);
+
+    const orgIds = (userMemberships?.data || []).map(m => m.organization.id).filter(Boolean);
+
+    let query = supabase.from("companies").select("*");
+    if (orgIds.length > 0) {
+      query = query.or(`clerk_user_id.eq.${user.id},clerk_org_id.in.(${orgIds.join(',')})`);
+    } else {
+      query = query.eq("clerk_user_id", user.id);
+    }
+
+    query.then(({ data }) => {
+      if (!data || data.length === 0) {
+        setOnboarding(true);
+      } else {
+        setCompanies(data);
+        setCompany(prev => prev ? (data.find(c => c.id === prev.id) || data[0]) : data[0]);
+        setOnboarding(false);
+      }
+      setCompanyLoading(false);
+    });
+  }, [user, isLoaded, orgsLoaded, userMemberships?.data?.length]);
 
   // Signed-in user with no company yet → show onboarding
   if (isLoaded && user && onboarding) return (
     <>
       <style>{CSS}</style>
-      <Onboarding user={user} onComplete={(c) => { setCompany(c); setOnboarding(false); }} />
+      <Onboarding user={user} onComplete={(c) => { setCompany(c); setCompanies([c]); setOnboarding(false); }} />
     </>
   );
 
@@ -4316,7 +4641,9 @@ export default function App() {
     settings:          ["Settings",              "Company settings · tax · compliance"],
   };
 
-  const [title, subtitle] = titles[page] || ["", ""];
+  const [title, subtitle] = showPractice
+    ? ["Practice Dashboard", `${companies.length} workspaces`]
+    : (titles[page] || ["", ""]);
 
   return (
     <AuthGate>
@@ -4331,14 +4658,19 @@ export default function App() {
             <div className="nav">
               <div className="nav-label">Workspace</div>
               {NAV.map(item => (
-                <button key={item.id} className={`nav-item ${page === item.id ? "active" : ""}`} onClick={() => setPage(item.id)}>
+                <button key={item.id} className={`nav-item ${page === item.id && !showPractice ? "active" : ""}`} onClick={() => { setPage(item.id); setShowPractice(false); }}>
                   <span className="nav-icon">{item.icon}</span>{item.label}
                   {item.badge && <span className="nav-badge">!</span>}
                 </button>
               ))}
             </div>
             <div className="sidebar-footer">
-              <div className="co-pill"><div className="co-dot" /><span className="co-name">{companyName}</span></div>
+              <CompanySwitcher
+                companies={companies}
+                company={company}
+                onSwitch={c => { setCompany(c); setShowPractice(false); setPage("overview"); }}
+                onPractice={() => { setShowPractice(true); }}
+              />
             </div>
           </div>
           <div className="main">
@@ -4351,16 +4683,25 @@ export default function App() {
               </div>
             </div>
             <div className="content">
-              {page === "overview"     && <Overview period={period} companyId={company?.id} company={company} />}
-              {page === "cashflow"     && <CashFlow onNavigate={setPage} companyId={company?.id} />}
-              {page === "invoices"     && <Invoices companyName={companyName} />}
-              {page === "checklist"    && <Checklist period={period} companyId={company?.id} />}
-              {page === "journals"     && <Journals period={period} companyName={companyName} />}
-              {page === "gl"           && <GLReport period={period} companyId={company?.id} companyName={companyName} company={company} />}
-              {page === "bank-import"  && <BankImport companyId={company?.id} />}
-              {page === "compliance"      && <Compliance company={company} />}
-              {page === "fin-statements" && <FinancialStatements company={company} companyName={companyName} />}
-              {page === "settings"       && <Settings company={company} onUpdate={c => setCompany(c)} />}
+              {showPractice ? (
+                <PracticeDashboard
+                  companies={companies}
+                  onSelectCompany={c => { setCompany(c); setShowPractice(false); setPage("overview"); }}
+                />
+              ) : (
+                <>
+                  {page === "overview"     && <Overview period={period} companyId={company?.id} company={company} />}
+                  {page === "cashflow"     && <CashFlow onNavigate={setPage} companyId={company?.id} />}
+                  {page === "invoices"     && <Invoices companyName={companyName} />}
+                  {page === "checklist"    && <Checklist period={period} companyId={company?.id} />}
+                  {page === "journals"     && <Journals period={period} companyName={companyName} companyId={company?.id} readOnly={isReadOnly} />}
+                  {page === "gl"           && <GLReport period={period} companyId={company?.id} companyName={companyName} company={company} readOnly={isReadOnly} />}
+                  {page === "bank-import"  && <BankImport companyId={company?.id} />}
+                  {page === "compliance"      && <Compliance company={company} />}
+                  {page === "fin-statements" && <FinancialStatements company={company} companyName={companyName} />}
+                  {page === "settings"       && <Settings company={company} onUpdate={c => { setCompany(c); setCompanies(prev => prev.map(x => x.id === c.id ? c : x)); }} />}
+                </>
+              )}
             </div>
           </div>
           <Chat page={title} companyName={companyName} period={period} companyId={company?.id} company={company} />
