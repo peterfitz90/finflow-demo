@@ -1,5 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
-import { buildInvoicePDF, renderPDF } from "./_invoice-pdf-doc.js";
+import { renderInvoicePDF } from "./_invoice-pdf-doc.js";
 
 export const config = { api: { bodyParser: { sizeLimit: "16kb" } } };
 
@@ -39,8 +39,7 @@ export default async function handler(req, res) {
     customer = data;
   }
 
-  const doc    = buildInvoicePDF(inv, lines, customer, settings, companyName);
-  const buffer = await renderPDF(doc);
+  const buffer = await renderInvoicePDF(inv, lines, customer, settings, companyName);
 
   const filename = `${inv.invoice_number || "invoice"}.pdf`;
   res.setHeader("Content-Type", "application/pdf");

@@ -1,21 +1,11 @@
 // React-PDF invoice/credit-note document.
 // Uses React.createElement throughout (no JSX) so it works as a plain .js module.
 // Statutory VAT wording is verbatim — never paraphrase.
+//
+// @react-pdf/renderer is ESM-only; top-level require() would crash in the CJS build
+// Vercel produces. Load it via dynamic import() inside the async function instead.
 
-import React from 'react';
-import { Document, Page, View, Text, Image, pdf } from '@react-pdf/renderer';
-
-// toBuffer() returns Promise<PDFDocument> — PDFDocument is a PDFKit Readable stream.
-// Collect chunks via events to produce a standard Node.js Buffer.
-export async function renderPDF(element) {
-  const stream = await pdf(element).toBuffer();
-  const chunks = [];
-  return new Promise((resolve, reject) => {
-    stream.on('data',  chunk => chunks.push(Buffer.from(chunk)));
-    stream.on('end',   () => resolve(Buffer.concat(chunks)));
-    stream.on('error', reject);
-  });
-}
+import React from 'react'; // react has a CJS build — safe to keep at top level
 
 // ── Constants (kept in sync with _invoice-html.js) ───────────────────────────
 const INV_VAT_PCT = { STD23: 23, RED13: 13.5, RED9: 9, ZERO: 0, EXEMPT: 0, RCT: 0, RC_EU: 0 };
@@ -44,8 +34,12 @@ const dim  = (sz, extra = {}) => ({ fontSize: sz, color: '#888', ...extra });
 
 const TH = { fontSize: 9, fontFamily: 'Helvetica-Bold', color: '#888', textTransform: 'uppercase', letterSpacing: 0.4 };
 
-// ── Document builder ──────────────────────────────────────────────────────────
-export function buildInvoicePDF(inv, lines, customer, settings, companyName) {
+// ── Document builder + renderer (single async function) ───────────────────────
+// @react-pdf/renderer loaded via dynamic import so Vercel's ESM→CJS compiler
+// does not convert it to require(), which would throw ERR_REQUIRE_ESM.
+export async function renderInvoicePDF(inv, lines, customer, settings, companyName) {
+  const { Document, Page, View, Text, Image, pdf } = await import('@react-pdf/renderer');
+
   const isCN    = inv.type === 'credit_note';
   const accent  = isCN ? '#b91c1c' : '#1d6b72';
   const docNoun = isCN ? 'credit note' : 'invoice';
@@ -166,7 +160,7 @@ export function buildInvoicePDF(inv, lines, customer, settings, companyName) {
     ] : []),
   ];
 
-  return e(Document, {},
+  const element = e(Document, {},
     e(Page, { size: 'A4', style: { padding: 40, fontFamily: 'Helvetica', fontSize: 12, color: '#1a1a2e' } },
 
       // Header
@@ -257,4 +251,13 @@ export function buildInvoicePDF(inv, lines, customer, settings, companyName) {
 
     ),
   );
+
+  // toBuffer() returns a PDFKit Readable stream — collect chunks into a Buffer.
+  const stream = await pdf(element).toBuffer();
+  const chunks = [];
+  return new Promise((resolve, reject) => {
+    stream.on('data',  chunk => chunks.push(Buffer.from(chunk)));
+    stream.on('end',   () => resolve(Buffer.concat(chunks)));
+    stream.on('error', reject);
+  });
 }

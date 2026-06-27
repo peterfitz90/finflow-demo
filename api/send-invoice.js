@@ -1,5 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
-import { buildInvoicePDF, renderPDF } from "./_invoice-pdf-doc.js";
+import { renderInvoicePDF } from "./_invoice-pdf-doc.js";
 import { buildInvoiceHTML } from "./_invoice-html.js";
 
 export const config = { api: { bodyParser: { sizeLimit: "16kb" } } };
@@ -56,8 +56,7 @@ export default async function handler(req, res) {
   const html = buildInvoiceHTML(inv, lines, customer, settings, companyName);
 
   // PDF attachment — pure JS, no Puppeteer, ~100–300ms
-  const doc       = buildInvoicePDF(inv, lines, customer, settings, companyName);
-  const pdfBuf    = await renderPDF(doc);
+  const pdfBuf    = await renderInvoicePDF(inv, lines, customer, settings, companyName);
   const pdfBase64 = pdfBuf.toString("base64");
 
   const pmRes = await fetch("https://api.postmarkapp.com/email", {
