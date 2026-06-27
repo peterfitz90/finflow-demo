@@ -1,0 +1,18 @@
+{
+  "functions": {
+    "api/categorise.js":      { "maxDuration": 60 },
+    "api/chat.js":            { "maxDuration": 60 },
+    "api/inbound-email.js":   { "maxDuration": 60 },
+    "api/stripe-webhook.js":  { "maxDuration": 30 },
+    "api/stripe-connect.js":  { "maxDuration": 30 },
+    "api/send-invoice.js":    { "maxDuration": 60 },
+    "api/invoice-pdf.js":     { "maxDuration": 60 },
+    "api/refresh-stats.js":   { "maxDuration": 30 }
+  },
+  "crons": [
+    { "path": "/api/refresh-stats", "schedule": "0 * * * *" }
+  ],
+  "rewrites": [
+    { "source": "/(.*)", "destination": "/index.html" }
+  ]
+}

@@ -7,7 +7,7 @@ export default async function handler(req, res) {
   }
 
   const secretKey = process.env.CLERK_SECRET_KEY?.trim();
-  if (!secretKey) return res.status(500).json({ error: 'CLERK_SECRET_KEY not configured' });
+  if (!secretKey) return res.status(500).json({ error: 'CLERK_SECRET_KEY not configured — organisation features require server configuration' });
 
   const headers = {
     'Authorization': `Bearer ${secretKey}`,
