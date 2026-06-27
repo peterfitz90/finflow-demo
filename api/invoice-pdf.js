@@ -26,7 +26,10 @@ export default async function handler(req, res) {
     supabase.from("companies").select("name").eq("id", company_id).single(),
   ]);
 
-  if (!invRes.data) return res.status(404).json({ error: "Invoice not found" });
+  if (!invRes.data) {
+    console.error('invoice-pdf 404: invoice_id=%s company_id=%s error=%j', invoice_id, company_id, invRes.error);
+    return res.status(404).json({ error: "Invoice not found", invoice_id, company_id, supabase_error: invRes.error });
+  }
 
   const inv         = invRes.data;
   const lines       = linesRes.data || [];
