@@ -8623,7 +8623,13 @@ function Journals({ period, selPeriod, companyName, companyId: propCompanyId, re
 
     // Period-lock check before writing
     const dateStr = sanitiseDate(form.date);
-    const lockCheck = await isPeriodLocked(cid, dateStr);
+    let lockCheck;
+    try {
+      lockCheck = await isPeriodLocked(cid, dateStr);
+    } catch (e) {
+      setPostError(`Couldn't verify period lock — ${e.message}. Try again.`);
+      return;
+    }
     if (lockCheck.locked) {
       const filedOn = lockCheck.filedAt
         ? new Date(lockCheck.filedAt).toLocaleDateString('en-IE')
