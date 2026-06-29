@@ -8,6 +8,10 @@ import { recScoreCandidate } from './shared/recScore.js';
 import { computeDeadlines } from './shared/computeDeadlines.js';
 import { useHealthy } from './shared/useHealthy.js';
 import { AutomationHero, HealthPulseDot } from './shared/AutomationHero.jsx';
+import {
+  INV_VAT_LABELS, calcLineAmounts, calcInvTotals, vatCodeForRate,
+  createInvoiceDraft, finaliseInvoice,
+} from './shared/invoice.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
@@ -159,6 +163,28 @@ const M_CSS = `
   .c-green { color: var(--green); }
   .c-teal  { color: var(--teal2); }
   .c-dim   { color: var(--mm); }
+
+  /* ── QuickInvoice tab ───────────────────────────────────────────── */
+  .qi-line-card { margin: 0 16px 8px; background: var(--mc); border: 1px solid var(--mbd); border-radius: var(--r); padding: 12px 14px; }
+  .qi-line-del { background: none; border: none; color: var(--md); font-size: 18px; cursor: pointer; padding: 2px 6px; line-height: 1; flex-shrink: 0; }
+  .qi-line-del:active { color: var(--red); }
+  .qi-line-gross { font-family: 'Source Code Pro', monospace; font-size: 13px; font-weight: 600; color: var(--teal2); white-space: nowrap; padding-left: 8px; flex-shrink: 0; }
+  .qi-add-line { display: block; width: calc(100% - 32px); margin: 0 16px 10px; background: none; border: 1px dashed var(--mbd); border-radius: var(--r); padding: 12px; font-size: 13px; font-weight: 600; color: var(--mm); font-family: 'Inter', system-ui, sans-serif; cursor: pointer; text-align: center; }
+  .qi-add-line:active { background: rgba(29,138,147,0.06); border-color: var(--teal); color: var(--teal2); }
+  .qi-total-bar { margin: 0 16px 14px; padding: 14px 18px; background: rgba(29,138,147,0.07); border: 1px solid rgba(29,138,147,0.25); border-radius: var(--r); display: flex; justify-content: space-between; align-items: center; }
+  .qi-total-lbl { font-size: 11px; font-family: 'Source Code Pro', monospace; text-transform: uppercase; letter-spacing: 0.08em; color: var(--mm); }
+  .qi-total-sub { font-size: 10px; color: var(--mm); font-family: 'Source Code Pro', monospace; margin-top: 3px; }
+  .qi-total-val { font-family: 'Playfair Display', serif; font-size: 30px; font-weight: 700; color: var(--teal2); letter-spacing: -0.01em; }
+  .qi-done-card { margin: 0 16px 14px; padding: 24px 20px; background: rgba(52,211,153,0.06); border: 1px solid rgba(52,211,153,0.2); border-radius: var(--r); text-align: center; }
+  .qi-done-num { font-family: 'Playfair Display', serif; font-size: 36px; font-weight: 700; color: var(--green); letter-spacing: -0.02em; }
+  .qi-done-who { font-size: 14px; color: var(--mtx); font-weight: 500; margin-top: 6px; }
+  .qi-done-sub { font-size: 11px; color: var(--mm); font-family: 'Source Code Pro', monospace; margin-top: 4px; letter-spacing: 0.03em; }
+  .qi-cust-row { display: flex; gap: 8px; align-items: stretch; }
+  .qi-cust-sel { flex: 1; background: var(--ms); border: 1px solid var(--mbd); border-radius: var(--rsm); padding: 11px 13px; font-size: 14px; color: var(--mtx); outline: none; -webkit-appearance: none; min-height: 46px; }
+  .qi-cust-sel:focus { border-color: var(--teal); }
+  .qi-new-btn { background: var(--mc); border: 1px solid var(--teal); border-radius: var(--rsm); padding: 11px 14px; font-size: 12px; font-weight: 700; color: var(--teal2); cursor: pointer; font-family: 'Inter', system-ui, sans-serif; white-space: nowrap; flex-shrink: 0; min-height: 46px; }
+  .qi-err { margin: 0 16px 12px; padding: 12px 14px; background: rgba(224,85,85,0.08); border: 1px solid rgba(224,85,85,0.2); border-radius: 10px; font-size: 12px; color: var(--red); line-height: 1.5; }
+  .qi-ok  { margin: 0 16px 10px; padding: 10px 14px; background: rgba(52,211,153,0.08); border: 1px solid rgba(52,211,153,0.2); border-radius: 10px; font-size: 12px; color: var(--green); }
 `;
 
 // ─── Auth screen ──────────────────────────────────────────────────────────────
@@ -181,7 +207,7 @@ function BottomNav({ tab, setTab }) {
     { id: 'approvals',  icon: '⊛',  label: 'Approvals' },
     { id: 'cash',       icon: '◎',  label: 'Cash' },
     { id: 'compliance', icon: '⊙',  label: 'Compliance' },
-    { id: 'askai',      icon: '✦',  label: 'Ask AI' },
+    { id: 'invoice',    icon: '◨',  label: 'Invoice' },
   ];
   return (
     <nav className="m-nav">
@@ -854,6 +880,292 @@ function ComplianceTab({ company }) {
   );
 }
 
+// ─── QuickInvoice tab ─────────────────────────────────────────────────────────
+function QuickInvoiceTab({ companyId, company }) {
+  const defaultVc = vatCodeForRate(company?.sales_vat_rate) || 'STD23';
+
+  function mkBlank(vc) {
+    return { _id: Math.random().toString(36).slice(2), description: '', quantity: 1, unit_price: '', vat_code: vc || 'STD23', line_total: 0, vat_amount: 0, gross_total: 0 };
+  }
+
+  // ── Data ──────────────────────────────────────────────────────────────────
+  const [customers,   setCustomers]   = useState([]);
+  const [invSettings, setInvSettings] = useState(null);
+  const [loadingData, setLoadingData] = useState(true);
+
+  // ── Form ──────────────────────────────────────────────────────────────────
+  const [selectedCustId, setSelectedCustId] = useState('');
+  const [addingCust,     setAddingCust]     = useState(false);
+  const [newName,        setNewName]        = useState('');
+  const [newEmail,       setNewEmail]       = useState('');
+  const [custSaving,     setCustSaving]     = useState(false);
+  const [lines,          setLines]          = useState([mkBlank('STD23')]);
+
+  // ── Submission ────────────────────────────────────────────────────────────
+  const [saving,       setSaving]       = useState(false);
+  const [err,          setErr]          = useState(null);
+  const [result,       setResult]       = useState(null); // { id, numStr } after finalise
+  const [sending,      setSending]      = useState(false);
+  const [sentTo,       setSentTo]       = useState(null);
+  const [downloading,  setDownloading]  = useState(false);
+
+  useEffect(() => {
+    if (!companyId) return;
+    Promise.all([
+      supabase.from('customers').select('id,name,email').eq('company_id', companyId).eq('is_active', true).order('name'),
+      supabase.from('invoice_settings').select('*').eq('company_id', companyId).maybeSingle(),
+    ]).then(([custRes, setRes]) => {
+      if (custRes.data) setCustomers(custRes.data);
+      if (setRes.data)  setInvSettings(setRes.data);
+      setLoadingData(false);
+    });
+  }, [companyId]);
+
+  // ── Line helpers ──────────────────────────────────────────────────────────
+  const updateLine = (idx, field, val) => setLines(prev => {
+    const next = [...prev];
+    next[idx] = calcLineAmounts({ ...next[idx], [field]: val });
+    return next;
+  });
+
+  const computedLines = lines.map(l => calcLineAmounts(l));
+  const totals = calcInvTotals(computedLines);
+  const fmtE   = v => `€${Number(v || 0).toFixed(2)}`;
+
+  // ── Add customer inline ───────────────────────────────────────────────────
+  const addCustomer = async () => {
+    if (!newName.trim()) return;
+    setCustSaving(true);
+    const { data, error } = await supabase.from('customers')
+      .insert({ company_id: companyId, name: newName.trim(), email: newEmail.trim() || null, is_active: true })
+      .select('id,name,email').single();
+    if (!error && data) {
+      setCustomers(prev => [...prev, data].sort((a, b) => a.name.localeCompare(b.name)));
+      setSelectedCustId(data.id);
+      setAddingCust(false); setNewName(''); setNewEmail('');
+    }
+    setCustSaving(false);
+  };
+
+  // ── Finalise ──────────────────────────────────────────────────────────────
+  const canFinalise = !!selectedCustId && computedLines.some(l => l.description.trim()) && !saving;
+
+  const handleFinalise = async () => {
+    if (!canFinalise || !companyId) return;
+    setSaving(true); setErr(null);
+    try {
+      const todayStr = new Date().toISOString().slice(0, 10);
+      const currency = company?.base_currency || 'EUR';
+      const inv = {
+        type: 'invoice',
+        customer_id: selectedCustId,
+        issue_date: todayStr,
+        payment_terms: Number(invSettings?.payment_terms ?? 30),
+        credit_note_for: null,
+        reference: null,
+        notes: null,
+      };
+      // Step 1: create draft (finaliseInvoice requires inv.id)
+      const draftId = await createInvoiceDraft(supabase, companyId, inv, computedLines, customers, invSettings, currency);
+      // Step 2: claim number → upsert lines → post journals → stamp sent
+      const { numStr } = await finaliseInvoice(supabase, companyId, { ...inv, id: draftId }, computedLines, customers, invSettings);
+      setResult({ id: draftId, numStr });
+    } catch (e) {
+      setErr(e.message);
+    }
+    setSaving(false);
+  };
+
+  // ── Send / PDF ────────────────────────────────────────────────────────────
+  const handleSend = async () => {
+    if (!result) return;
+    setSending(true); setErr(null);
+    try {
+      const r = await fetch('/api/send-invoice', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invoice_id: result.id, company_id: companyId }),
+      });
+      const d = await r.json();
+      if (!r.ok) throw new Error(d.error || 'Send failed');
+      setSentTo(d.to);
+    } catch (e) { setErr(e.message); }
+    setSending(false);
+  };
+
+  const handleDownload = async () => {
+    if (!result) return;
+    setDownloading(true); setErr(null);
+    try {
+      const r = await fetch('/api/invoice-pdf', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ invoice_id: result.id, company_id: companyId }),
+      });
+      if (!r.ok) throw new Error('PDF generation failed');
+      const blob = await r.blob();
+      const url  = URL.createObjectURL(blob);
+      const a = Object.assign(document.createElement('a'), { href: url, download: `${result.numStr}.pdf` });
+      document.body.appendChild(a); a.click(); document.body.removeChild(a);
+      setTimeout(() => URL.revokeObjectURL(url), 5000);
+    } catch (e) { setErr(e.message); }
+    setDownloading(false);
+  };
+
+  const reset = () => {
+    setResult(null); setSelectedCustId(''); setLines([mkBlank(defaultVc)]);
+    setErr(null); setSentTo(null); setAddingCust(false); setNewName(''); setNewEmail('');
+  };
+
+  // ── Success screen ────────────────────────────────────────────────────────
+  if (result) {
+    const cust = customers.find(c => c.id === selectedCustId);
+    return (
+      <div>
+        <div className="m-page-hdr">
+          <div className="m-company-name">Invoice</div>
+          <div className="m-date-str">Finalised · Journal posted</div>
+        </div>
+
+        <div className="qi-done-card">
+          <div className="qi-done-num">{result.numStr}</div>
+          <div className="qi-done-who">{cust?.name}</div>
+          <div className="qi-done-sub">{fmtE(totals.total)} · DR 1100 / CR 4000</div>
+        </div>
+
+        {err    && <div className="qi-err">{err} <span style={{float:'right',cursor:'pointer'}} onClick={() => setErr(null)}>✕</span></div>}
+        {sentTo && <div className="qi-ok">✓ Sent to {sentTo}</div>}
+
+        <div className="m-form">
+          {cust?.email && !sentTo ? (
+            <button className="m-btn m-btn-p" onClick={handleSend} disabled={sending}>
+              {sending ? 'Sending…' : `Email to ${cust.email}`}
+            </button>
+          ) : !cust?.email ? (
+            <div style={{ padding:'10px 0', fontSize:13, color:'var(--mm)', textAlign:'center' }}>
+              No email on file — add one in the web app to send
+            </div>
+          ) : null}
+          <button className="m-btn m-btn-s" onClick={handleDownload} disabled={downloading}>
+            {downloading ? 'Generating PDF…' : '↓  Download PDF'}
+          </button>
+          <button className="m-btn m-btn-s" style={{ marginTop: 8 }} onClick={reset}>
+            + New Invoice
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // ── Form ──────────────────────────────────────────────────────────────────
+  return (
+    <div>
+      <div className="m-page-hdr">
+        <div className="m-company-name">Quick Invoice</div>
+        <div className="m-date-str">{new Date().toLocaleDateString('en-IE', { day:'numeric', month:'long', year:'numeric' })}</div>
+      </div>
+
+      {err && <div className="qi-err" onClick={() => setErr(null)}>{err} ✕</div>}
+
+      {/* Customer */}
+      <div className="m-form">
+        <div className="m-fgroup">
+          <label className="m-flabel">Customer</label>
+          {!addingCust ? (
+            <div className="qi-cust-row">
+              <select className="qi-cust-sel" value={selectedCustId}
+                onChange={e => setSelectedCustId(e.target.value)} disabled={loadingData}>
+                <option value="">{loadingData ? 'Loading…' : '— select customer —'}</option>
+                {customers.map(c => <option key={c.id} value={c.id}>{c.name}</option>)}
+              </select>
+              <button className="qi-new-btn" onClick={() => setAddingCust(true)}>+ New</button>
+            </div>
+          ) : (
+            <div className="m-card" style={{ margin: 0, marginBottom: 8 }}>
+              <div className="m-fgroup">
+                <label className="m-flabel">Name</label>
+                <input className="m-finput" value={newName} onChange={e => setNewName(e.target.value)}
+                  placeholder="Customer name" autoFocus />
+              </div>
+              <div className="m-fgroup" style={{ marginBottom: 12 }}>
+                <label className="m-flabel">Email</label>
+                <input className="m-finput" type="email" inputMode="email" value={newEmail}
+                  onChange={e => setNewEmail(e.target.value)} placeholder="email@example.com" />
+              </div>
+              <div style={{ display:'flex', gap:8 }}>
+                <button className="m-btn m-btn-p" style={{ flex:2, padding:'12px', fontSize:14, minHeight:46 }}
+                  onClick={addCustomer} disabled={!newName.trim() || custSaving}>
+                  {custSaving ? 'Saving…' : 'Add Customer'}
+                </button>
+                <button style={{ flex:1, padding:'12px', background:'var(--ms)', border:'1px solid var(--mbd)', borderRadius:'var(--rsm)', fontSize:13, color:'var(--mm)', cursor:'pointer', fontFamily:'Inter,system-ui,sans-serif', minHeight:46 }}
+                  onClick={() => { setAddingCust(false); setNewName(''); setNewEmail(''); }}>
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Line items */}
+      {lines.map((line, idx) => (
+        <div key={line._id} className="qi-line-card">
+          <div style={{ display:'flex', alignItems:'center', gap:6, marginBottom:9 }}>
+            <input className="m-finput" style={{ flex:1 }} value={line.description}
+              onChange={e => updateLine(idx, 'description', e.target.value)}
+              placeholder={`Line ${idx + 1} description`} />
+            {lines.length > 1 && (
+              <button className="qi-line-del" onClick={() => setLines(prev => prev.filter((_, i) => i !== idx))}>✕</button>
+            )}
+          </div>
+          <div className="m-frow" style={{ marginBottom: 9 }}>
+            <div>
+              <label className="m-flabel">Qty</label>
+              <input className="m-finput" type="number" inputMode="decimal" min="0" step="any"
+                value={line.quantity} onChange={e => updateLine(idx, 'quantity', e.target.value)} />
+            </div>
+            <div>
+              <label className="m-flabel">Unit Price (€)</label>
+              <input className="m-finput" type="number" inputMode="decimal" min="0" step="0.01"
+                value={line.unit_price} onChange={e => updateLine(idx, 'unit_price', e.target.value)}
+                placeholder="0.00" />
+            </div>
+          </div>
+          <div style={{ display:'flex', alignItems:'center', gap:8 }}>
+            <select className="m-fselect" style={{ flex:1 }} value={line.vat_code}
+              onChange={e => updateLine(idx, 'vat_code', e.target.value)}>
+              {Object.entries(INV_VAT_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+            </select>
+            <span className="qi-line-gross">{fmtE(line.gross_total)}</span>
+          </div>
+        </div>
+      ))}
+
+      <button className="qi-add-line" onClick={() => setLines(prev => [...prev, mkBlank(defaultVc)])}>
+        + Add Line
+      </button>
+
+      {/* Running total */}
+      <div className="qi-total-bar">
+        <div>
+          <div className="qi-total-lbl">Gross Total</div>
+          {totals.vat_total > 0 && (
+            <div className="qi-total-sub">incl. {fmtE(totals.vat_total)} VAT</div>
+          )}
+        </div>
+        <div className="qi-total-val">{fmtE(totals.total)}</div>
+      </div>
+
+      <div className="m-form">
+        <button className="m-btn m-btn-p" onClick={handleFinalise} disabled={!canFinalise}>
+          {saving ? 'Finalising…' : 'Finalise Invoice'}
+        </button>
+        {!selectedCustId && (
+          <div style={{ textAlign:'center', fontSize:12, color:'var(--mm)', marginTop:8 }}>Select a customer to continue</div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 // ─── Ask AI tab ───────────────────────────────────────────────────────────────
 function AskAiTab() {
   return (
@@ -910,11 +1222,11 @@ export default function Mobile() {
       <style>{M_CSS}</style>
       <div className="m-wrap">
         <div className="m-content">
-          {tab === 'home'       && <HomeTab       companyId={companyId} company={company} setTab={setTab} />}
-          {tab === 'approvals'  && <ApprovalsTab  companyId={companyId} user={user} />}
-          {tab === 'cash'       && <CashTab       companyId={companyId} />}
-          {tab === 'compliance' && <ComplianceTab company={company} />}
-          {tab === 'askai'      && <AskAiTab />}
+          {tab === 'home'       && <HomeTab          companyId={companyId} company={company} setTab={setTab} />}
+          {tab === 'approvals'  && <ApprovalsTab     companyId={companyId} user={user} />}
+          {tab === 'cash'       && <CashTab          companyId={companyId} />}
+          {tab === 'compliance' && <ComplianceTab    company={company} />}
+          {tab === 'invoice'    && <QuickInvoiceTab  companyId={companyId} company={company} />}
         </div>
         <BottomNav tab={tab} setTab={setTab} />
       </div>
