@@ -1532,9 +1532,13 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
 
   const doStep3 = async () => {
     if (!wCo?.id) return;
-    const steps = { ...(wCo.onboarding_steps || {}), chart_of_accounts: true };
-    const { data } = await supabase.from('companies').update({ onboarding_steps: steps }).eq('id', wCo.id).select().single();
-    advance(4, data || { ...wCo, onboarding_steps: steps });
+    setErr(null);
+    try {
+      const steps = { ...(wCo.onboarding_steps || {}), chart_of_accounts: true };
+      const { data, error } = await supabase.from('companies').update({ onboarding_steps: steps }).eq('id', wCo.id).select().single();
+      if (error) throw error;
+      advance(4, data);
+    } catch (e) { setErr(e.message); }
   };
 
   const doStep4 = async () => {
@@ -1556,8 +1560,9 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
         await supabase.from('checklists').insert(rows);
       }
       const steps = { ...(wCo.onboarding_steps || {}), checklist: true };
-      const { data } = await supabase.from('companies').update({ onboarding_steps: steps }).eq('id', wCo.id).select().single();
-      advance(5, data || { ...wCo, onboarding_steps: steps });
+      const { data, error: stepErr } = await supabase.from('companies').update({ onboarding_steps: steps }).eq('id', wCo.id).select().single();
+      if (stepErr) throw stepErr;
+      advance(5, data);
     } catch (e) { setErr(e.message); }
     setChkLoading(false);
   };
@@ -4123,6 +4128,7 @@ function VATReport({ company, onClose }) {
   const vatPeriods = getVATPeriods(company?.vat_period || 'bimonthly');
   const [loading, setLoading]                   = useState(true);
   const [journals, setJournals]                 = useState([]);
+  const [loadErr, setLoadErr]                   = useState(null);
   const [selectedVal, setSelectedVal]           = useState(vatPeriods[0]?.val);
   const [periodLoading, setPeriodLoading]       = useState(false);
 
@@ -4131,11 +4137,12 @@ function VATReport({ company, onClose }) {
   useEffect(() => {
     if (!company?.id || !vatPeriod) { setLoading(false); return; }
     (async () => {
-      setLoading(true);
-      const { data } = await supabase.from('journals')
+      setLoading(true); setLoadErr(null);
+      const { data, error } = await supabase.from('journals')
         .select('*').eq('company_id', company.id)
         .gte('date', vatPeriod.start).lte('date', vatPeriod.end).order('date');
-      if (data) setJournals(data);
+      if (error) { setLoadErr(error.message); setLoading(false); setPeriodLoading(false); return; }
+      setJournals(data || []);
       setLoading(false);
       setPeriodLoading(false);
     })();
@@ -4211,6 +4218,7 @@ function VATReport({ company, onClose }) {
         <div className="print-meta">Period: {vatPeriod.label} · Due: {vatPeriod.due} · Exported: {exportDate}</div>
       </div>
       <div className="card-body">
+        {loadErr && <div style={{ marginBottom: 12, fontSize: 12, color: 'var(--danger)', background: 'rgba(220,38,38,0.06)', border: '1px solid rgba(220,38,38,0.2)', borderRadius: 4, padding: '8px 12px' }}>Failed to load journals: {loadErr}</div>}
         {loading ? (
           <div style={{ fontSize: 13, color: "var(--dim)", padding: "16px 0" }}>Loading VAT data…</div>
         ) : (
@@ -4565,13 +4573,16 @@ function Contracts({ companyName = "Company", companyId }) {
       auto_renews: editForm.auto_renews === true || editForm.auto_renews === "true",
       notes: editForm.notes,
     }).eq("id", editId).select().single();
-    if (!error && upd) { setContracts(p => sortedByRenewal(p.map(c => c.id === editId ? upd : c))); setEditId(null); }
+    if (error) { setSaveError(error.message); return; }
+    if (upd) { setContracts(p => sortedByRenewal(p.map(c => c.id === editId ? upd : c))); setEditId(null); }
   };
 
   const terminate = async (id, e) => {
     e.stopPropagation();
     const { error } = await supabase.from("contracts").update({ status: "terminated" }).eq("id", id);
-    if (!error) { setContracts(p => p.map(c => c.id === id ? { ...c, status: "terminated" } : c)); if (selected === id) setSelected(null); }
+    if (error) { setSaveError(error.message); return; }
+    setContracts(p => p.map(c => c.id === id ? { ...c, status: "terminated" } : c));
+    if (selected === id) setSelected(null);
   };
 
   const exportCSV = () => {
@@ -4616,6 +4627,7 @@ function Contracts({ companyName = "Company", companyId }) {
 
   return (
     <div className="fade-up">
+      {saveError && <div style={{marginBottom:12,fontSize:12,color:"var(--danger)",background:"rgba(220,38,38,0.06)",border:"1px solid rgba(220,38,38,0.2)",borderRadius:4,padding:"8px 12px"}} onClick={()=>setSaveError(null)}>{saveError} ✕</div>}
       {/* KPIs */}
       <div className="kpi-grid">
         {[
@@ -4793,11 +4805,12 @@ function SPill({ status }) {
 // Fetches all filed VAT return periods for a company (cheap — at most ~24 rows/year).
 // Returns array of { period_start, period_end, filed_at }.
 async function getLockedPeriods(companyId) {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('vat_returns')
     .select('period_start, period_end, filed_at')
     .eq('company_id', companyId)
     .eq('status', 'filed');
+  if (error) throw new Error(`Could not load locked periods: ${error.message}`);
   return data || [];
 }
 
@@ -4808,7 +4821,7 @@ function isDateLocked(date, lockedPeriods) {
 
 // Single-date check used by the manual journal form.
 async function isPeriodLocked(companyId, date) {
-  const { data } = await supabase
+  const { data, error } = await supabase
     .from('vat_returns')
     .select('filed_at')
     .eq('company_id', companyId)
@@ -4816,6 +4829,7 @@ async function isPeriodLocked(companyId, date) {
     .lte('period_start', date)
     .gte('period_end', date)
     .limit(1);
+  if (error) throw new Error(`Could not check period lock: ${error.message}`);
   if (data?.length) return { locked: true, filedAt: data[0].filed_at };
   return { locked: false, filedAt: null };
 }
@@ -6674,10 +6688,10 @@ function SuggestedJournals({ period, companyId, company }) {
   useEffect(() => {
     if (!companyId) { setLoadingInit(false); return; }
     (async () => {
-      const { data } = await supabase.from('suggested_journals')
+      const { data, error } = await supabase.from('suggested_journals')
         .select('*').eq('company_id', companyId).eq('period', period)
         .order('created_at', { ascending: false });
-      setSuggestions(data || []);
+      if (error) { setSgError(error.message); } else { setSuggestions(data || []); }
       setLoadingInit(false);
     })();
   }, [companyId, period]); // eslint-disable-line
@@ -6963,7 +6977,8 @@ function SuggestedJournals({ period, companyId, company }) {
         }
       }
 
-      await supabase.from('suggested_journals').update({ status: 'approved' }).eq('id', sg.id);
+      const { error: approveErr } = await supabase.from('suggested_journals').update({ status: 'approved' }).eq('id', sg.id);
+      if (approveErr) throw approveErr;
       setSuggestions(prev => prev.map(s => s.id === sg.id ? { ...s, status: 'approved' } : s));
     } catch (e) { setSgError(e.message); }
     setApprovingId(null);
@@ -6971,7 +6986,9 @@ function SuggestedJournals({ period, companyId, company }) {
 
   // ── Reject ────────────────────────────────────────────────────────────────────
   const rejectSuggestion = async (id) => {
-    await supabase.from('suggested_journals').update({ status: 'rejected' }).eq('id', id);
+    setSgError(null);
+    const { error } = await supabase.from('suggested_journals').update({ status: 'rejected' }).eq('id', id);
+    if (error) { setSgError(error.message); return; }
     setSuggestions(prev => prev.map(s => s.id === id ? { ...s, status: 'rejected' } : s));
   };
 
@@ -8181,7 +8198,8 @@ function RecurringTab({ companyId, coaAccounts, readOnly }) {
 
   const toggleActive = async (tpl) => {
     const { error } = await supabase.from('recurring_journals').update({ active: !tpl.active }).eq('id', tpl.id);
-    if (!error) setTemplates(prev => prev.map(t => t.id === tpl.id ? { ...t, active: !t.active } : t));
+    if (error) { setFormErr(error.message); return; }
+    setTemplates(prev => prev.map(t => t.id === tpl.id ? { ...t, active: !t.active } : t));
   };
 
   const acctOptions = (coaAccounts?.filter(a => a.is_active !== false).length > 0
@@ -11036,6 +11054,7 @@ function Settings({ company, onUpdate }) {
   const [invSetForm,    setInvSetForm]    = useState({ logo_url: '', trading_name: '', address: '', vat_number: '', reg_number: '', payment_terms: 30, bank_details: '', footer_notes: '', stmt_rct: 'This invoice is subject to Relevant Contracts Tax (RCT). VAT is to be accounted for by the principal contractor under the reverse charge mechanism in accordance with Section 16(3) of the VAT Consolidation Act 2010.', stmt_rc_eu: 'Reverse charge applies – VAT to be accounted for by the recipient under Articles 44 and 196 of the EU VAT Directive', stmt_exempt: 'VAT exempt supply under Section 34 of the VAT Consolidation Act 2010' });
   const [invSetSaving,  setInvSetSaving]  = useState(false);
   const [invSetSaved,   setInvSetSaved]   = useState(false);
+  const [invSetErr,     setInvSetErr]     = useState(null);
   const [logoUploading, setLogoUploading] = useState(false);
 
   useEffect(() => {
@@ -11047,8 +11066,9 @@ function Settings({ company, onUpdate }) {
 
   const saveInvSettings = async () => {
     if (!company?.id || invSetSaving) return;
-    setInvSetSaving(true);
-    await supabase.from('invoice_settings').upsert({ company_id: company.id, ...invSetForm, payment_terms: Number(invSetForm.payment_terms) || 30, updated_at: new Date().toISOString() }, { onConflict: 'company_id' });
+    setInvSetSaving(true); setInvSetErr(null);
+    const { error } = await supabase.from('invoice_settings').upsert({ company_id: company.id, ...invSetForm, payment_terms: Number(invSetForm.payment_terms) || 30, updated_at: new Date().toISOString() }, { onConflict: 'company_id' });
+    if (error) { setInvSetErr(error.message); setInvSetSaving(false); return; }
     setInvSetSaved(true); setTimeout(() => setInvSetSaved(false), 2500); setInvSetSaving(false);
   };
 
@@ -11058,10 +11078,9 @@ function Settings({ company, onUpdate }) {
     const ext  = file.name.split('.').pop().toLowerCase();
     const path = `logos/${company.id}.${ext}`;
     const { error } = await supabase.storage.from('journal-attachments').upload(path, file, { upsert: true, contentType: file.type });
-    if (!error) {
-      const { data: { publicUrl } } = supabase.storage.from('journal-attachments').getPublicUrl(path);
-      setInvSetForm(p => ({ ...p, logo_url: publicUrl }));
-    }
+    if (error) { setInvSetErr(`Logo upload failed: ${error.message}`); setLogoUploading(false); return; }
+    const { data: { publicUrl } } = supabase.storage.from('journal-attachments').getPublicUrl(path);
+    setInvSetForm(p => ({ ...p, logo_url: publicUrl }));
     setLogoUploading(false);
   };
 
@@ -11456,9 +11475,12 @@ function Settings({ company, onUpdate }) {
       <div className="card" style={{ marginBottom: 13 }}>
         <div className="card-header" style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
           <span className="card-title">Invoice & Credit Note Settings</span>
-          <button className="btn btn-s btn-sm" onClick={saveInvSettings} disabled={invSetSaving}>
-            {invSetSaved ? 'Saved ✓' : invSetSaving ? 'Saving…' : 'Save'}
-          </button>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            {invSetErr && <span style={{ fontSize: 12, color: 'var(--danger)' }}>{invSetErr}</span>}
+            <button className="btn btn-s btn-sm" onClick={saveInvSettings} disabled={invSetSaving}>
+              {invSetSaved ? 'Saved ✓' : invSetSaving ? 'Saving…' : 'Save'}
+            </button>
+          </div>
         </div>
         <div style={{ padding: '16px 15px' }}>
           {/* Logo */}
@@ -14509,9 +14531,10 @@ export default function App() {
 
   const dismissGettingStarted = async () => {
     if (!company?.id) return;
-    const { data } = await supabase.from('companies')
+    const { data, error } = await supabase.from('companies')
       .update({ onboarding_completed: true })
       .eq('id', company.id).select().single();
+    if (error) { console.error('dismissGettingStarted:', error.message); return; }
     if (data) {
       setCompany(data);
       setCompanies(prev => prev.map(x => x.id === data.id ? data : x));
