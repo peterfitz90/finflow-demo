@@ -1,9 +1,10 @@
 import { createClient } from "@supabase/supabase-js";
 import { renderInvoicePDF } from "./_invoice-pdf-doc.js";
+import { withSentry } from './_sentry.js';
 
 export const config = { api: { bodyParser: { sizeLimit: "16kb" } } };
 
-export default async function handler(req, res) {
+export default withSentry(async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
   const { invoice_id, company_id } = req.body ?? {};
@@ -47,4 +48,4 @@ export default async function handler(req, res) {
   res.setHeader("Content-Length", buffer.length);
   res.setHeader("Cache-Control", "no-store");
   res.send(buffer);
-}
+});

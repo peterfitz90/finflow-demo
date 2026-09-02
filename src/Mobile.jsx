@@ -26,8 +26,8 @@ const M_CSS = `
   :root {
     --mb: #070d1a; --ms: #0d1526; --mc: #111d30; --mbd: #192338;
     --mt: var(--mb); --mtx: #e4eaf4; --mm: #6d7f9c; --md: #3d506a;
-    --teal: #1d8a93; --teal2: #26a9b3; --gold: #d4a017; --red: #e05555;
-    --green: #34d399; --r: 14px; --rsm: 10px;
+    --teal: #10b981; --teal2: #34d399; --gold: #d4a017; --red: #e05555;
+    --green: #10b981; --r: 14px; --rsm: 10px;
   }
   html, body { background: var(--mb); min-height: 100%; -webkit-font-smoothing: antialiased; }
   .m-wrap { max-width: 430px; margin: 0 auto; min-height: 100svh; min-height: 100vh; background: var(--mb); display: flex; flex-direction: column; font-family: 'Inter', system-ui, sans-serif; color: var(--mtx); position: relative; }
@@ -36,8 +36,8 @@ const M_CSS = `
 
   /* Auth */
   .m-auth { min-height: 100svh; min-height: 100vh; background: var(--mb); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 32px 20px; gap: 28px; }
-  .m-auth-logo { font-family: 'Playfair Display', serif; font-size: 32px; font-weight: 700; color: var(--mtx); letter-spacing: -0.02em; }
-  .m-auth-logo span { color: var(--teal2); }
+  .m-auth-logo-wrap { display: flex; align-items: center; gap: 12px; }
+  .m-auth-logo { font-family: 'Inter', system-ui, sans-serif; font-size: 26px; font-weight: 700; color: var(--mtx); letter-spacing: -0.02em; }
   .m-auth-sub { font-size: 11px; color: var(--mm); font-family: 'Source Code Pro', monospace; letter-spacing: 0.12em; text-transform: uppercase; margin-top: -16px; }
   .m-auth-hint { font-size: 13px; color: var(--mm); text-align: center; line-height: 1.6; }
   .m-auth-link { color: var(--teal2); text-decoration: none; font-weight: 600; }
@@ -46,7 +46,7 @@ const M_CSS = `
   .m-nav { position: fixed; bottom: 0; left: 50%; transform: translateX(-50%); width: 100%; max-width: 430px; background: var(--ms); border-top: 1px solid var(--mbd); display: flex; padding-bottom: env(safe-area-inset-bottom, 0px); z-index: 100; box-shadow: 0 -4px 20px rgba(0,0,0,0.4); }
   .m-nav-btn { flex: 1; display: flex; flex-direction: column; align-items: center; gap: 3px; padding: 9px 2px; border: none; background: none; cursor: pointer; color: var(--md); transition: color 0.14s; min-height: 54px; }
   .m-nav-btn.active { color: var(--teal2); }
-  .m-nav-btn.active .m-nav-icon { filter: drop-shadow(0 0 8px rgba(38,169,179,0.5)); }
+  .m-nav-btn.active .m-nav-icon { filter: drop-shadow(0 0 8px rgba(16,185,129,0.5)); }
   .m-nav-icon { font-size: 18px; line-height: 1; }
   .m-nav-label { font-size: 9px; font-family: 'Source Code Pro', monospace; letter-spacing: 0.04em; }
 
@@ -191,10 +191,18 @@ const M_CSS = `
 function MobileAuth() {
   return (
     <div className="m-auth">
-      <div className="m-auth-logo">Ledgr<span>ly</span></div>
+      <div className="m-auth-logo-wrap">
+        <svg width="36" height="36" viewBox="0 0 100 100" fill="none">
+          <rect x="22" y="12" width="16" height="76" rx="8" fill="#e8edeb"/>
+          <rect x="22" y="72" width="56" height="16" rx="8" fill="#e8edeb"/>
+          <rect x="46" y="24" width="13" height="46" rx="6.5" fill="#10b981"/>
+          <rect x="46" y="57" width="32" height="13" rx="6.5" fill="#10b981"/>
+        </svg>
+        <div className="m-auth-logo">Ledgrly</div>
+      </div>
       <div className="m-auth-sub">Mobile · Finance OS</div>
       <p className="m-auth-hint">Sign in to access your dashboard, deadlines, and expense capture on the go.</p>
-      <SignIn routing="hash" appearance={{ variables: { colorBackground: '#0d1526', colorText: '#e4eaf4', colorInputBackground: '#111d30', colorInputText: '#e4eaf4' } }} />
+      <SignIn routing="hash" afterSignInUrl="/mobile" afterSignUpUrl="/mobile" appearance={{ variables: { colorBackground: '#0d1526', colorText: '#e4eaf4', colorInputBackground: '#111d30', colorInputText: '#e4eaf4' } }} />
       <a className="m-auth-link" href="/">← Back to full app</a>
     </div>
   );

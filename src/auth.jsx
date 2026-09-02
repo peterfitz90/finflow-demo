@@ -6,8 +6,8 @@ const CSS_AUTH = `
     display: flex;
     align-items: center;
     justify-content: center;
-    background: #1a2744;
-    font-family: 'Source Sans 3', sans-serif;
+    background: #0c1210;
+    font-family: 'Inter', system-ui, sans-serif;
   }
   .auth-wrap {
     display: flex;
@@ -15,16 +15,21 @@ const CSS_AUTH = `
     align-items: center;
     gap: 2rem;
   }
-  .auth-logo {
-    font-family: 'Playfair Display', serif;
-    font-size: 2rem;
-    color: #faf9f7;
-    letter-spacing: -0.01em;
+  .auth-logo-lockup {
+    display: flex;
+    align-items: center;
+    gap: 12px;
   }
-  .auth-logo span { color: #1d6b72; }
+  .auth-logo {
+    font-family: 'Inter', system-ui, sans-serif;
+    font-size: 1.6rem;
+    font-weight: 700;
+    color: #e8edeb;
+    letter-spacing: -0.02em;
+  }
   .auth-tagline {
     font-size: 0.82rem;
-    color: #8899bb;
+    color: #5c6662;
     letter-spacing: 0.08em;
     text-transform: uppercase;
     margin-top: -1.5rem;
@@ -38,7 +43,15 @@ export function AuthScreen() {
       <style>{CSS_AUTH}</style>
       <div className="auth-screen">
         <div className="auth-wrap">
-          <div className="auth-logo">Fin<span>flow</span></div>
+          <div className="auth-logo-lockup">
+            <svg width="36" height="36" viewBox="0 0 100 100" fill="none">
+              <rect x="22" y="12" width="16" height="76" rx="8" fill="#e8edeb"/>
+              <rect x="22" y="72" width="56" height="16" rx="8" fill="#e8edeb"/>
+              <rect x="46" y="24" width="13" height="46" rx="6.5" fill="#10b981"/>
+              <rect x="46" y="57" width="32" height="13" rx="6.5" fill="#10b981"/>
+            </svg>
+            <div className="auth-logo">Ledgrly</div>
+          </div>
           <div className="auth-tagline">Finance OS · Ireland</div>
           <SignIn routing="hash" />
         </div>

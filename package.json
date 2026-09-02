@@ -10,6 +10,8 @@
   "dependencies": {
     "@clerk/clerk-react": "^5.61.6",
     "@react-pdf/renderer": "^4.5.1",
+    "@sentry/node": "^10.62.0",
+    "@sentry/react": "^10.62.0",
     "@supabase/supabase-js": "^2.106.1",
     "canvas-confetti": "^1.9.4",
     "react": "^18.2.0",

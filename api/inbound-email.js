@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { randomUUID } from "crypto";
+import { withSentry, captureError } from './_sentry.js';
 
 export const config = {
   api: { bodyParser: { sizeLimit: "15mb" } },
@@ -19,7 +20,7 @@ function extFromMime(mime) {
            "image/png": "png", "image/webp": "webp", "image/gif": "gif" }[mime] ?? "bin";
 }
 
-export default async function handler(req, res) {
+export default withSentry(async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
   // ── Auth: verify shared secret before touching anything ──────────────────────
@@ -65,7 +66,7 @@ export default async function handler(req, res) {
 
   const { data: company, error: coErr } = await supabase
     .from("companies")
-    .select("id, name, currency")
+    .select("id, name, currency, plan")
     .eq("mailbox_slug", slug)
     .maybeSingle();
 
@@ -77,6 +78,13 @@ export default async function handler(req, res) {
   }
 
   const companyId = company.id;
+
+  // ── Plan gate: ap_mailbox requires founder+ plan ──────────────────────────────
+  const MAILBOX_ALLOWED_PLANS = new Set(['founder', 'practice', 'enterprise']);
+  if (!MAILBOX_ALLOWED_PLANS.has(company.plan)) {
+    console.log('[inbound-email] plan_blocked — company', companyId, 'on plan:', company.plan);
+    return res.status(200).json({ skipped: 'plan_blocked' });
+  }
 
   // ── Idempotency: skip if we've already processed this email ──────────────────
   if (messageId) {
@@ -91,19 +99,71 @@ export default async function handler(req, res) {
     }
   }
 
-  // ── Upload first usable attachment to storage ─────────────────────────────────
+  // ── Select the real invoice attachment, ignoring inline/signature images ────────
+  // Postmark sets ContentID on inline images (cid: references in HTML body).
+  // Priority: non-inline PDF > non-inline image > 20 KB (scanned invoice).
+  // Tiny images (< 10 KB) are always skipped — they're logos, not invoices.
+  const INLINE_SIZE_SKIP = 10 * 1024;   // < 10 KB → always skip
+  const SCAN_SIZE_MIN    = 20 * 1024;   // image must be ≥ 20 KB to be a scan
+  const htmlBody         = body.HtmlBody ?? "";
+
+  function isInline(att) {
+    if (att.ContentID) return true;
+    // also catch cid: references embedded in the HTML body
+    if (att.ContentID === undefined && att.Name) {
+      const safeName = att.Name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      if (new RegExp(`cid:.*${safeName}`, 'i').test(htmlBody)) return true;
+    }
+    return false;
+  }
+
+  const rawAttachments = Array.isArray(body.Attachments) ? body.Attachments : [];
+  console.log("[inbound-email] attachments received:", rawAttachments.map(a =>
+    `${a.Name ?? '?'} mime=${a.ContentType} len=${a.ContentLength ?? '?'} cid=${a.ContentID ?? 'none'}`
+  ));
+
+  // Build candidate list — non-inline, known mime, not tiny
+  const candidates = rawAttachments.filter(att => {
+    const mime = (att.ContentType ?? "").toLowerCase().split(";")[0].trim();
+    if (!ALLOWED_MIME.has(mime)) return false;
+    if (isInline(att)) return false;
+    const bytes = att.ContentLength ?? (att.Content ? Buffer.byteLength(att.Content, 'base64') : 0);
+    if (mime.startsWith("image/") && bytes < INLINE_SIZE_SKIP) return false;
+    return true;
+  });
+
+  // Sort: PDFs first, then by size descending (largest = most likely the invoice)
+  candidates.sort((a, b) => {
+    const aPdf = (a.ContentType ?? "").includes("pdf") ? 1 : 0;
+    const bPdf = (b.ContentType ?? "").includes("pdf") ? 1 : 0;
+    if (bPdf !== aPdf) return bPdf - aPdf;
+    const aLen = a.ContentLength ?? 0;
+    const bLen = b.ContentLength ?? 0;
+    return bLen - aLen;
+  });
+
+  // Images additionally need to meet the scan size threshold
+  const chosen = candidates.find(att => {
+    const mime = (att.ContentType ?? "").toLowerCase().split(";")[0].trim();
+    if (mime === "application/pdf") return true;
+    const bytes = att.ContentLength ?? (att.Content ? Buffer.byteLength(att.Content, 'base64') : 0);
+    return bytes >= SCAN_SIZE_MIN;
+  }) ?? null;
+
+  console.log("[inbound-email] chosen attachment:", chosen
+    ? `${chosen.Name ?? '?'} (${chosen.ContentType})`
+    : "none — no valid invoice attachment found");
+
+  // ── Upload chosen attachment to storage ───────────────────────────────────────
   let storagePath  = null;
   let attachBase64 = null;
   let attachMime   = null;
 
-  const attachments = Array.isArray(body.Attachments) ? body.Attachments : [];
-  for (const att of attachments) {
-    const mime = (att.ContentType ?? "").toLowerCase().split(";")[0].trim();
-    if (!ALLOWED_MIME.has(mime)) continue;
-
-    const ext      = extFromMime(mime);
-    const key      = `ap/${companyId}/${randomUUID()}.${ext}`;
-    const buf      = Buffer.from(att.Content, "base64");
+  if (chosen) {
+    const mime = (chosen.ContentType ?? "").toLowerCase().split(";")[0].trim();
+    const ext  = extFromMime(mime);
+    const key  = `ap/${companyId}/${randomUUID()}.${ext}`;
+    const buf  = Buffer.from(chosen.Content, "base64");
 
     const { error: upErr } = await supabase.storage
       .from("journal-attachments")
@@ -111,13 +171,11 @@ export default async function handler(req, res) {
 
     if (upErr) {
       console.error("[inbound-email] storage upload failed:", upErr.message);
-      continue;
+    } else {
+      storagePath  = key;
+      attachBase64 = chosen.Content;
+      attachMime   = mime;
     }
-
-    storagePath  = key;
-    attachBase64 = att.Content;
-    attachMime   = mime;
-    break; // process the first usable attachment only
   }
 
   // ── Parse invoice with Claude ─────────────────────────────────────────────────
@@ -210,9 +268,18 @@ If a value is unknown, use null or 0. Return only the JSON object.`,
   }
 
   // ── Insert draft into ap_invoices ─────────────────────────────────────────────
-  const gross    = Number(parsed.gross ?? parsed.net ?? 0) || null;
-  const net      = Number(parsed.net   ?? 0)              || null;
-  const vat      = Number(parsed.vat   ?? 0)              || null;
+  // `Number(x) || null` was crashing when x=0 (Claude's "unknown" default): 0||null = null,
+  // violating the NOT NULL constraint on `amount`. Use 0 as the safe floor; flag for review.
+  const gross = Number(parsed.gross ?? parsed.net ?? 0) || 0;
+  const net   = Number(parsed.net ?? 0) || 0;
+  const vat   = Number(parsed.vat ?? 0) || 0;
+  const amountMissing = gross === 0 && !(Number(parsed.gross) > 0) && !(Number(parsed.net) > 0);
+  const noAttachment  = !chosen;
+  const draftNotes = noAttachment
+    ? "⚠ No invoice attachment found (email contained only inline/signature images or no attachment) — please attach the invoice and enter details manually."
+    : amountMissing
+      ? "⚠ Amount could not be extracted from this email/attachment — please enter manually before posting."
+      : "";
 
   const { error: insErr } = await supabase.from("ap_invoices").insert({
     company_id:        companyId,
@@ -234,7 +301,7 @@ If a value is unknown, use null or 0. Return only the JSON object.`,
     attachment_path:   storagePath,
     new_supplier_flag: newSupplierFlag,
     payment_method:    "bank transfer",
-    notes:             "",
+    notes:             draftNotes,
   });
 
   if (insErr) {
@@ -242,10 +309,11 @@ If a value is unknown, use null or 0. Return only the JSON object.`,
     if (insErr.code === "23505") {
       return res.status(200).json({ skipped: "duplicate" });
     }
+    captureError(insErr, { company_id: companyId, operation: 'inbound-email-insert', supplier: supplierName });
     console.error("[inbound-email] insert failed:", insErr.message);
     return res.status(500).json({ error: insErr.message });
   }
 
   console.log("[inbound-email] invoice queued for review | company:", companyId, "supplier:", supplierName);
   return res.status(200).json({ ok: true });
-}
+});

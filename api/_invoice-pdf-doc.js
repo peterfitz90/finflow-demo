@@ -41,7 +41,7 @@ export async function renderInvoicePDF(inv, lines, customer, settings, companyNa
   const { Document, Page, View, Text, Image, pdf } = await import('@react-pdf/renderer');
 
   const isCN    = inv.type === 'credit_note';
-  const accent  = isCN ? '#b91c1c' : '#1d6b72';
+  const accent  = isCN ? '#b91c1c' : '#059669';
   const docNoun = isCN ? 'credit note' : 'invoice';
 
   // VAT aggregation + special-code detection

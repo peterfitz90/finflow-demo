@@ -5,9 +5,11 @@
 //   (b) write a plain-English rationale.
 // It NEVER invents amounts, accounts, or journal entries.
 
+import { withSentry } from './_sentry.js';
+
 export const config = { api: { bodyParser: { sizeLimit: "256kb" } } };
 
-export default async function handler(req, res) {
+export default withSentry(async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
   const { candidates, period } = req.body ?? {};
@@ -107,4 +109,4 @@ Classification guide:
   } catch (_err) {
     return heuristicFallback();
   }
-}
+});

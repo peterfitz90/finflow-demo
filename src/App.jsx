@@ -3,6 +3,8 @@ import { createPortal } from "react-dom";
 import { useUser, useOrganizationList } from "@clerk/clerk-react";
 import { AuthGate, UserChip } from "./auth.jsx"
 import { supabase } from "./supabase.js"
+import { captureError } from "./sentry.js"
+import { can, limit, isPending, planLabel, planFor, FEATURE_LABELS, FEATURE_VALUE, PLAN_META } from './entitlements.js'
 import { InboxZeroCelebration } from './shared/InboxZeroCelebration.jsx';
 import { useHealthy } from './shared/useHealthy.js';
 import { AutomationHero, HealthPulseDot } from './shared/AutomationHero.jsx';
@@ -11,6 +13,7 @@ import { computeDeadlines } from './shared/computeDeadlines.js';
 import {
   INV_VAT_RATES, INV_VAT_LABELS,
   calcLineAmounts, calcInvTotals, vatCodeForRate,
+  upsertInvoiceLines, postJournals,
   createInvoiceDraft, finaliseInvoice,
 } from './shared/invoice.js';
 
@@ -22,12 +25,23 @@ const GL_ACCOUNTS = [
   { code: "1200", name: "Prepayments",              type: "Asset" },
   { code: "1300", name: "Stripe Clearing",          type: "Asset" },
   { code: "1500", name: "Fixed Assets",             type: "Asset" },
+  { code: "1501", name: "Accum Dep — Fixed Assets",           type: "Asset" },
+  { code: "1510", name: "Plant & Machinery",                  type: "Asset" },
+  { code: "1511", name: "Accum Dep — Plant & Machinery",      type: "Asset" },
+  { code: "1520", name: "Fixtures & Fittings",                type: "Asset" },
+  { code: "1521", name: "Accum Dep — Fixtures & Fittings",   type: "Asset" },
+  { code: "1530", name: "Computer Equipment",                 type: "Asset" },
+  { code: "1531", name: "Accum Dep — Computer Equipment",    type: "Asset" },
+  { code: "1540", name: "Motor Vehicles",                     type: "Asset" },
+  { code: "1541", name: "Accum Dep — Motor Vehicles",         type: "Asset" },
   { code: "1600", name: "VAT Receivable",           type: "Asset" },
   // Liabilities
   { code: "2000", name: "Trade Creditors",          type: "Liability" },
   { code: "2100", name: "VAT Control",              type: "Liability" },
   { code: "1250", name: "Supplier Prepayments",     type: "Asset" },
   { code: "2200", name: "PAYE & PRSI Payable",      type: "Liability" },
+  { code: "2250", name: "Net Wages Payable",        type: "Liability" },
+  { code: "2260", name: "Pension Payable",          type: "Liability" },
   { code: "2300", name: "Accruals",                 type: "Liability" },
   { code: "2350", name: "Customer Advance Payments",type: "Liability" },
   { code: "2400", name: "Directors Loan Account",   type: "Liability" },
@@ -57,6 +71,7 @@ const GL_ACCOUNTS = [
   { code: "6700", name: "Marketing & Advertising",  type: "Expense" },
   { code: "6800", name: "Insurance",                type: "Expense" },
   { code: "6900", name: "Repairs & Maintenance",    type: "Expense" },
+  { code: "6910", name: "Loss on Disposal of Assets", type: "Expense" },
   { code: "6950", name: "Depreciation",             type: "Expense" },
 ];
 
@@ -66,11 +81,22 @@ const COA_SEED = [
   { code: "1200", name: "Prepayments",              account_type: "asset",     category: "Current Assets",        is_system: true },
   { code: "1250", name: "Supplier Prepayments",     account_type: "asset",     category: "Current Assets",        is_system: true },
   { code: "1300", name: "Stripe Clearing",          account_type: "asset",     category: "Current Assets",        is_system: true },
-  { code: "1500", name: "Fixed Assets",             account_type: "asset",     category: "Fixed Assets",          is_system: true },
+  { code: "1500", name: "Fixed Assets",                          account_type: "asset",   category: "Fixed Assets", is_system: true },
+  { code: "1501", name: "Accum Dep — Fixed Assets",           account_type: "asset",   category: "Fixed Assets", is_system: true },
+  { code: "1510", name: "Plant & Machinery",                  account_type: "asset",   category: "Fixed Assets", is_system: true },
+  { code: "1511", name: "Accum Dep — Plant & Machinery",      account_type: "asset",   category: "Fixed Assets", is_system: true },
+  { code: "1520", name: "Fixtures & Fittings",                account_type: "asset",   category: "Fixed Assets", is_system: true },
+  { code: "1521", name: "Accum Dep — Fixtures & Fittings",   account_type: "asset",   category: "Fixed Assets", is_system: true },
+  { code: "1530", name: "Computer Equipment",                 account_type: "asset",   category: "Fixed Assets", is_system: true },
+  { code: "1531", name: "Accum Dep — Computer Equipment",    account_type: "asset",   category: "Fixed Assets", is_system: true },
+  { code: "1540", name: "Motor Vehicles",                     account_type: "asset",   category: "Fixed Assets", is_system: true },
+  { code: "1541", name: "Accum Dep — Motor Vehicles",         account_type: "asset",   category: "Fixed Assets", is_system: true },
   { code: "1600", name: "VAT Receivable",           account_type: "asset",     category: "Current Assets",        is_system: true },
   { code: "2000", name: "Trade Creditors",          account_type: "liability", category: "Current Liabilities",   is_system: true },
   { code: "2100", name: "VAT Control",              account_type: "liability", category: "Current Liabilities",   is_system: true },
   { code: "2200", name: "PAYE & PRSI Payable",      account_type: "liability", category: "Current Liabilities",   is_system: true },
+  { code: "2250", name: "Net Wages Payable",        account_type: "liability", category: "Current Liabilities",   is_system: true },
+  { code: "2260", name: "Pension Payable",          account_type: "liability", category: "Current Liabilities",   is_system: true },
   { code: "2300", name: "Accruals",                 account_type: "liability", category: "Current Liabilities",   is_system: true },
   { code: "2350", name: "Customer Advance Payments",account_type: "liability", category: "Current Liabilities",   is_system: true },
   { code: "2400", name: "Directors Loan Account",   account_type: "liability", category: "Current Liabilities",   is_system: true },
@@ -95,8 +121,9 @@ const COA_SEED = [
   { code: "6750", name: "Settlement Rounding",      account_type: "expense",   category: "Overheads",             is_system: true },
   { code: "6700", name: "Marketing & Advertising",  account_type: "expense",   category: "Overheads",             is_system: true },
   { code: "6800", name: "Insurance",                account_type: "expense",   category: "Overheads",             is_system: true },
-  { code: "6900", name: "Repairs & Maintenance",    account_type: "expense",   category: "Overheads",             is_system: true },
-  { code: "6950", name: "Depreciation",             account_type: "expense",   category: "Overheads",             is_system: true },
+  { code: "6900", name: "Repairs & Maintenance",       account_type: "expense",   category: "Overheads",  is_system: true },
+  { code: "6910", name: "Loss on Disposal of Assets", account_type: "expense",   category: "Overheads",  is_system: true },
+  { code: "6950", name: "Depreciation",                account_type: "expense",   category: "Overheads",  is_system: true },
 ];
 
 const COA_STATIC_FALLBACK = COA_SEED.map((a, i) => ({
@@ -340,6 +367,7 @@ const CONDITION_MAP = {
   "Complete bank reconciliation":                  "bank_recon_complete",
   "Confirm payroll journals posted":               "payroll_journals_posted",
   "Prepare VAT3 return (if bimonthly period end)": "vat3_return_prepared",
+  "Post depreciation for the period":              "depreciation_posted",
 };
 
 const CHECKLIST_ADVANCED = [
@@ -527,7 +555,7 @@ const CSS = `
     --bg: #0c1210; --surface: #141b18; --surface-2: #1a2320;
     --border: rgba(255,255,255,0.07);
     --text: #e8edeb; --text-muted: #8b9591; --text-faint: #5c6662;
-    --accent: #34d399; --accent-dim: rgba(52,211,153,0.12);
+    --accent: #10b981; --accent-dim: rgba(16,185,129,0.12);
     --warn: #fbbf24; --warn-dim: rgba(251,191,36,0.12);
     --danger: #f87171; --danger-dim: rgba(248,113,113,0.12);
     --info: #60a5fa;
@@ -536,9 +564,9 @@ const CSS = `
     --surface2: #1a2320; --surface3: #1f2a27;
     --border2: rgba(255,255,255,0.12);
     --sidebar: #0c1210; --sidebar2: #111916;
-    --teal: #34d399; --teal2: #5ee8b2;
+    --teal: #10b981; --teal2: #34d399;
     --gold: #fbbf24; --gold2: #fcd34d;
-    --red: #f87171; --green: #34d399; --white: #141b18;
+    --red: #f87171; --green: #10b981; --white: #141b18;
     --muted: #8b9591; --dim: #5c6662;
     --shadow-sm: 0 1px 4px rgba(0,0,0,0.3);
     --shadow: 0 4px 12px rgba(0,0,0,0.4);
@@ -575,6 +603,8 @@ const CSS = `
   .nav-item { display: flex; align-items: center; gap: 10px; padding: 8px 10px; border-radius: var(--radius-pill); cursor: pointer; font-size: 13px; font-weight: 500; color: var(--text-muted); transition: all 0.13s; margin-bottom: 1px; border: none; background: none; width: 100%; text-align: left; font-family: 'Inter', system-ui, sans-serif; }
   .nav-item:hover { background: var(--surface-2); color: var(--text); }
   .nav-item.active { background: var(--surface-2); color: var(--text); font-weight: 600; border: 1px solid var(--border); }
+  .nav-item.nav-item-locked { cursor: pointer; }
+  .nav-item.nav-item-locked:hover { background: rgba(255,255,255,0.03); color: var(--text-faint); }
   .nav-icon { font-size: 13px; width: 18px; text-align: center; flex-shrink: 0; opacity: 0.75; }
   .nav-item.active .nav-icon { opacity: 1; }
   .nav-badge { margin-left: auto; background: var(--danger); color: white; font-size: 9px; font-weight: 700; padding: 1px 5px; border-radius: var(--radius-pill); }
@@ -588,7 +618,7 @@ const CSS = `
   .sidebar-footer-btn { display: flex; align-items: center; gap: 10px; padding: 7px 10px; border-radius: var(--radius-pill); cursor: pointer; font-size: 12px; font-weight: 500; color: var(--text-muted); transition: all 0.13s; border: none; background: none; width: 100%; text-align: left; font-family: 'Inter', system-ui, sans-serif; }
   .sidebar-footer-btn:hover { background: var(--surface-2); color: var(--text); }
   .co-pill { display: flex; align-items: center; gap: 8px; }
-  .co-dot { width: 7px; height: 7px; border-radius: 50%; background: #34d399; animation: blink-d 2.5s infinite; }
+  .co-dot { width: 7px; height: 7px; border-radius: 50%; background: var(--teal); animation: blink-d 2.5s infinite; }
   @keyframes blink-d { 0%,100%{opacity:1} 50%{opacity:0.3} }
   .co-name { font-size: 12px; color: rgba(255,255,255,0.38); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
   .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
@@ -597,11 +627,11 @@ const CSS = `
   .topbar-sub { font-size: 12px; color: var(--text-muted); margin-top: 1px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 380px; }
   .topbar-right { display: flex; align-items: center; gap: 8px; flex-shrink: 0; }
   .bank-pill { display: flex; align-items: center; gap: 5px; border-radius: var(--radius-pill); padding: 5px 11px; font-size: 11px; font-weight: 600; border: 1px solid; cursor: default; white-space: nowrap; }
-  .bank-pill-ok { background: var(--accent-dim); border-color: rgba(52,211,153,0.25); color: var(--accent); }
+  .bank-pill-ok { background: var(--accent-dim); border-color: rgba(16,185,129,0.25); color: var(--accent); }
   .bank-pill-warn { background: var(--warn-dim); border-color: rgba(251,191,36,0.25); color: var(--warn); }
   .bank-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; animation: blink-d 2.5s infinite; flex-shrink: 0; }
   .period-pill { display: flex; align-items: center; gap: 6px; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-pill); padding: 5px 12px; font-size: 11px; font-weight: 500; color: var(--text-muted); cursor: pointer; white-space: nowrap; font-family: 'Inter', system-ui, sans-serif; transition: all 0.13s; }
-  .period-pill:hover { border-color: rgba(52,211,153,0.4); color: var(--accent); background: var(--accent-dim); }
+  .period-pill:hover { border-color: rgba(16,185,129,0.4); color: var(--accent); background: var(--accent-dim); }
   .notif-btn { position: relative; background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius-pill); width: 32px; height: 32px; display: flex; align-items: center; justify-content: center; cursor: pointer; font-size: 14px; color: var(--text-muted); transition: all 0.13s; }
   .notif-btn:hover { background: var(--surface); color: var(--text); border-color: var(--border2); }
   .notif-count { position: absolute; top: -3px; right: -3px; background: var(--danger); color: white; font-size: 9px; font-weight: 700; padding: 1px 4px; border-radius: var(--radius-pill); min-width: 15px; text-align: center; line-height: 1.4; }
@@ -781,7 +811,7 @@ const CSS = `
     font-size: 11px; font-weight: 600; font-family: 'Inter', system-ui, sans-serif;
     color: var(--text-muted); cursor: pointer; white-space: nowrap; transition: all 0.13s;
   }
-  .chat-dock-trigger:hover { border-color: rgba(52,211,153,0.4); color: var(--accent); background: var(--accent-dim); }
+  .chat-dock-trigger:hover { border-color: rgba(16,185,129,0.4); color: var(--accent); background: var(--accent-dim); }
   .chat-dock-close {
     margin-left: auto; background: none; border: none; cursor: pointer;
     color: var(--text-faint); font-size: 15px; padding: 2px 6px; border-radius: var(--radius-sm);
@@ -812,17 +842,16 @@ const CSS = `
   /* ── MAGIC MOMENT ── */
   .mm-wrap { min-height: 100vh; background: var(--sidebar); display: flex; flex-direction: column; align-items: center; justify-content: center; padding: 40px 20px; position: relative; overflow: hidden; }
   .mm-grid { position: absolute; inset: 0; background-image: linear-gradient(rgba(255,255,255,0.03) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,0.03) 1px, transparent 1px); background-size: 48px 48px; pointer-events: none; }
-  .mm-glow { position: absolute; width: 600px; height: 600px; border-radius: 50%; background: radial-gradient(circle, rgba(29,107,114,0.18) 0%, transparent 70%); top: 50%; left: 50%; transform: translate(-50%,-50%); pointer-events: none; }
+  .mm-glow { position: absolute; width: 600px; height: 600px; border-radius: 50%; background: radial-gradient(circle, rgba(16,185,129,0.14) 0%, transparent 70%); top: 50%; left: 50%; transform: translate(-50%,-50%); pointer-events: none; }
   .mm-card { background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.08); border-radius: var(--radius-lg); width: 100%; max-width: 640px; padding: 40px; position: relative; z-index: 10; backdrop-filter: blur(8px); }
   /* idle state */
-  .mm-idle-logo { font-family: 'Playfair Display', serif; font-size: 32px; font-weight: 700; color: white; margin-bottom: 6px; }
-  .mm-idle-logo span { color: var(--gold2); }
+  .mm-idle-logo { display: flex; align-items: center; gap: 12px; font-family: 'Inter', system-ui, sans-serif; font-size: 24px; font-weight: 700; color: white; margin-bottom: 6px; letter-spacing: -0.02em; }
   .mm-idle-sub { font-size: 12px; font-family: 'Source Code Pro', monospace; color: rgba(255,255,255,0.3); letter-spacing: 0.12em; text-transform: uppercase; margin-bottom: 40px; }
   .mm-company { font-family: 'Playfair Display', serif; font-size: 22px; font-weight: 600; color: white; margin-bottom: 6px; }
   .mm-period { font-size: 12px; font-family: 'Source Code Pro', monospace; color: var(--gold2); margin-bottom: 48px; }
-  .mm-btn { width: 100%; background: linear-gradient(135deg, var(--teal) 0%, #15555c 100%); border: none; border-radius: 10px; padding: 20px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 14px; transition: all 0.2s; position: relative; overflow: hidden; }
+  .mm-btn { width: 100%; background: linear-gradient(135deg, var(--teal) 0%, #065f46 100%); border: none; border-radius: 10px; padding: 20px; cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 14px; transition: all 0.2s; position: relative; overflow: hidden; }
   .mm-btn::before { content: ''; position: absolute; inset: 0; background: linear-gradient(135deg, rgba(255,255,255,0.06), transparent); }
-  .mm-btn:hover { transform: translateY(-2px); box-shadow: 0 12px 40px rgba(29,107,114,0.5); }
+  .mm-btn:hover { transform: translateY(-2px); box-shadow: 0 12px 40px rgba(16,185,129,0.4); }
   .mm-btn:active { transform: translateY(0); }
   .mm-btn-icon { font-size: 28px; }
   .mm-btn-text { text-align: left; }
@@ -900,8 +929,7 @@ const CSS = `
   .login-wrap { min-height: 100vh; background: var(--sidebar); display: flex; align-items: center; justify-content: center; }
   .login-card { background: var(--surface); width: 380px; border-radius: var(--radius-lg); overflow: hidden; box-shadow: 0 24px 64px rgba(0,0,0,0.35); }
   .login-hdr { background: var(--sidebar); padding: 28px 30px 24px; border-bottom: 3px solid var(--teal); }
-  .login-logo { font-family: 'Playfair Display', serif; font-size: 26px; font-weight: 700; color: white; }
-  .login-logo span { color: var(--gold2); }
+  .login-logo { display: flex; align-items: center; gap: 10px; font-family: 'Inter', system-ui, sans-serif; font-size: 20px; font-weight: 700; color: white; letter-spacing: -0.02em; }
   .login-tagline { font-size: 11px; color: rgba(255,255,255,0.35); font-family: 'Source Code Pro', monospace; letter-spacing: 0.12em; text-transform: uppercase; margin-top: 4px; }
   .login-body { padding: 28px 30px; }
   .login-title { font-family: 'Playfair Display', serif; font-size: 18px; font-weight: 600; color: var(--text); margin-bottom: 6px; }
@@ -909,7 +937,7 @@ const CSS = `
   .login-field { margin-bottom: 14px; }
   .login-label { display: block; font-size: 10px; font-family: 'Source Code Pro', monospace; text-transform: uppercase; letter-spacing: 0.1em; color: var(--muted); margin-bottom: 5px; font-weight: 600; }
   .login-input { width: 100%; background: var(--white); border: 1px solid var(--border2); border-radius: var(--radius-sm); padding: 10px 13px; font-size: 13px; font-family: 'Inter', system-ui, sans-serif; color: var(--text); outline: none; transition: border-color 0.14s; }
-  .login-input:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgba(29,107,114,0.1); }
+  .login-input:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgba(16,185,129,0.1); }
   .login-btn { width: 100%; background: var(--teal); color: white; border: none; border-radius: var(--radius-sm); padding: 11px; font-size: 14px; font-weight: 600; font-family: 'Inter', system-ui, sans-serif; cursor: pointer; margin-top: 6px; transition: background 0.14s; letter-spacing: 0.02em; }
   .login-btn:hover { background: var(--teal2); }
   .login-demo-hint { text-align: center; margin-top: 13px; font-size: 11px; color: var(--dim); }
@@ -974,8 +1002,7 @@ const CSS = `
   .ob-wrap { position: fixed; inset: 0; background: var(--sidebar); display: flex; align-items: center; justify-content: center; z-index: 9999; padding: 24px; }
   .ob-card { background: var(--surface); width: 100%; max-width: 560px; border-radius: var(--radius-lg); overflow: hidden; box-shadow: 0 32px 80px rgba(0,0,0,0.5); }
   .ob-header { background: var(--sidebar); padding: 28px 30px 24px; border-bottom: 3px solid var(--teal); }
-  .ob-logo { font-family: 'Playfair Display', serif; font-size: 26px; font-weight: 700; color: white; }
-  .ob-logo span { color: var(--gold2); }
+  .ob-logo { display: flex; align-items: center; gap: 10px; font-family: 'Inter', system-ui, sans-serif; font-size: 20px; font-weight: 700; color: white; letter-spacing: -0.02em; }
   .ob-tagline { font-size: 11px; color: rgba(255,255,255,0.35); font-family: 'Source Code Pro', monospace; letter-spacing: 0.12em; text-transform: uppercase; margin-top: 4px; }
   .ob-body { padding: 28px 30px 24px; }
   .ob-step { font-size: 9px; font-family: 'Source Code Pro', monospace; letter-spacing: 0.14em; text-transform: uppercase; color: var(--teal); margin-bottom: 18px; font-weight: 600; }
@@ -986,7 +1013,7 @@ const CSS = `
   .ob-group { display: flex; flex-direction: column; gap: 5px; }
   .ob-label { font-size: 10px; font-family: 'Source Code Pro', monospace; text-transform: uppercase; letter-spacing: 0.08em; color: var(--muted); font-weight: 600; }
   .ob-input { background: var(--white); border: 1px solid var(--border2); border-radius: var(--radius-sm); padding: 9px 11px; font-size: 13px; font-family: 'Inter', system-ui, sans-serif; color: var(--text); outline: none; transition: border-color 0.14s; }
-  .ob-input:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgba(29,107,114,0.1); }
+  .ob-input:focus { border-color: var(--teal); box-shadow: 0 0 0 3px rgba(16,185,129,0.1); }
   .ob-toggle { display: flex; border: 1px solid var(--border2); border-radius: var(--radius-sm); overflow: hidden; }
   .ob-toggle-btn { flex: 1; padding: 9px; font-size: 12px; font-weight: 600; font-family: 'Inter', system-ui, sans-serif; border: none; cursor: pointer; background: var(--white); color: var(--muted); transition: all 0.12s; }
   .ob-toggle-btn.active { background: var(--teal); color: white; }
@@ -1030,7 +1057,7 @@ const CSS = `
   .bi-categorising { display: inline-flex; align-items: center; gap: 5px; font-size: 11px; font-family: 'Source Code Pro', monospace; color: var(--teal); }
   .bi-categorising .dot { background: var(--teal); }
   @media print {
-    .sidebar, .topbar, .chat-panel, .gl-tabs, .btn, .btn-p, .btn-s, .btn-sm { display: none !important; }
+    .sidebar, .topbar, .chat-panel, .gl-tabs, .btn, .btn-p, .btn-s, .btn-sm, .no-print { display: none !important; }
     .app { display: block !important; }
     .main { width: 100% !important; overflow: visible !important; }
     .content { padding: 12px 20px !important; overflow: visible !important; }
@@ -1069,6 +1096,87 @@ const CSS = `
   @media (max-width: 680px) { .prac-table-wrap { display: none; } .prac-compact { display: block; } }
   /* ── READ-ONLY BADGE ── */
   .ro-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 9px; font-family: 'Source Code Pro', monospace; color: var(--gold); background: rgba(184,134,11,0.08); padding: 2px 8px; border-radius: 20px; border: 1px solid rgba(184,134,11,0.2); letter-spacing: 0.06em; text-transform: uppercase; }
+  /* ── BRIGHTPAY IMPORTER ── */
+  .bpi-wrap { max-width: 720px; }
+  .bpi-drop { border: 2px dashed var(--border2); border-radius: var(--radius); padding: 36px; text-align: center; cursor: pointer; transition: border-color 0.15s; }
+  .bpi-drop:hover, .bpi-drop.drag { border-color: var(--accent); }
+  .bpi-drop-icon { font-size: 28px; margin-bottom: 8px; color: var(--text-faint); }
+  .bpi-drop-text { font-size: 13px; color: var(--text-muted); }
+  .bpi-drop-hint { font-size: 11px; color: var(--text-faint); margin-top: 4px; }
+  .bpi-errors { background: rgba(220,38,38,0.07); border: 1px solid rgba(220,38,38,0.2); border-radius: var(--radius); padding: 12px 16px; margin: 14px 0; }
+  .bpi-errors-hdr { font-size: 11px; font-weight: 700; color: var(--danger); margin-bottom: 6px; text-transform: uppercase; letter-spacing: 0.05em; }
+  .bpi-errors li { font-size: 12px; color: var(--danger); margin: 3px 0 3px 14px; }
+  .bpi-warn { background: rgba(217,119,6,0.07); border: 1px solid rgba(217,119,6,0.22); border-radius: var(--radius); padding: 10px 14px; margin: 12px 0; font-size: 12px; color: #d97706; line-height: 1.6; }
+  .bpi-warn label { display: flex; align-items: center; gap: 7px; margin-top: 8px; cursor: pointer; font-size: 12px; }
+  .bpi-meta { display: flex; gap: 20px; flex-wrap: wrap; margin: 14px 0 10px; padding: 10px 14px; background: var(--surface-2); border-radius: var(--radius); border: 1px solid var(--border); }
+  .bpi-meta-item { font-size: 11px; color: var(--text-muted); }
+  .bpi-meta-item strong { color: var(--text); font-size: 12px; }
+  .bpi-preview-hdr { font-size: 10px; font-weight: 700; letter-spacing: 0.08em; color: var(--text-faint); text-transform: uppercase; margin: 14px 0 7px; }
+  .bpi-tbl { width: 100%; border-collapse: collapse; font-size: 13px; }
+  .bpi-tbl th { text-align: left; font-size: 10px; font-weight: 600; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.06em; padding: 4px 10px; border-bottom: 1px solid var(--border); }
+  .bpi-tbl td { padding: 7px 10px; border-bottom: 1px solid var(--border); vertical-align: middle; }
+  .bpi-tbl tr:last-child td { border-bottom: none; }
+  .bpi-badge-dr { font-size: 9px; font-weight: 700; font-family: 'Source Code Pro', monospace; background: rgba(52,211,153,0.1); color: var(--teal); padding: 1px 5px; border-radius: 3px; border: 1px solid rgba(52,211,153,0.25); }
+  .bpi-badge-cr { font-size: 9px; font-weight: 700; font-family: 'Source Code Pro', monospace; background: rgba(148,163,184,0.1); color: var(--text-muted); padding: 1px 5px; border-radius: 3px; border: 1px solid var(--border); }
+  .bpi-code { font-family: 'Source Code Pro', monospace; font-size: 12px; color: var(--accent); }
+  .bpi-amt { font-family: 'Source Code Pro', monospace; font-size: 12px; text-align: right; white-space: nowrap; }
+  .bpi-amt-dr { color: var(--teal); }
+  .bpi-amt-cr { color: var(--text-muted); }
+  .bpi-balance-bar { display: flex; align-items: center; gap: 8px; padding: 9px 12px; background: rgba(52,211,153,0.06); border-radius: var(--radius); border: 1px solid rgba(52,211,153,0.15); margin: 10px 0; font-size: 12px; color: var(--teal); font-weight: 600; }
+  .bpi-actions { display: flex; gap: 10px; align-items: center; margin-top: 16px; flex-wrap: wrap; }
+  .bpi-success { background: rgba(52,211,153,0.07); border: 1px solid rgba(52,211,153,0.2); border-radius: var(--radius); padding: 24px; text-align: center; margin-top: 16px; }
+  .bpi-success-icon { font-size: 28px; margin-bottom: 10px; }
+  .bpi-success-ref { font-family: 'Source Code Pro', monospace; font-size: 22px; font-weight: 700; color: var(--teal); }
+  .bpi-success-sub { font-size: 12px; color: var(--text-muted); margin-top: 6px; line-height: 1.7; }
+  .bpi-post-err { background: rgba(220,38,38,0.07); border: 1px solid rgba(220,38,38,0.2); border-radius: var(--radius); padding: 10px 14px; font-size: 12px; color: var(--danger); margin: 10px 0; }
+
+  /* ── OPENING BALANCES ── */
+  .obal-wrap { max-width: 960px; }
+  .ob-stepper { display: flex; border-bottom: 1px solid var(--border); margin-bottom: 20px; }
+  .ob-stp { flex: 1; padding: 10px 6px 11px; font-size: 10px; font-weight: 600; color: var(--text-faint); border-bottom: 2px solid transparent; text-align: center; text-transform: uppercase; letter-spacing: 0.05em; white-space: nowrap; }
+  .ob-stp.cur { color: var(--accent); border-bottom-color: var(--accent); }
+  .ob-stp.done { color: var(--teal); border-bottom-color: rgba(52,211,153,0.3); }
+  .ob-tb-scroll { max-height: 500px; overflow-y: auto; border: 1px solid var(--border); border-radius: var(--radius); margin: 10px 0; }
+  .ob-tbl { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .ob-tbl thead th { position: sticky; top: 0; background: var(--surface-1); z-index: 2; text-align: left; font-size: 10px; font-weight: 700; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.07em; padding: 6px 10px; border-bottom: 1px solid var(--border); }
+  .ob-tbl td { padding: 2px 8px; border-bottom: 1px solid var(--border2); }
+  .ob-tbl tr:last-child td { border-bottom: none; }
+  .ob-tbl tbody tr:hover { background: rgba(255,255,255,0.015); }
+  .ob-grp td { background: var(--surface-2); font-size: 9px; font-weight: 700; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.09em; padding: 5px 10px; }
+  .ob-num { font-family: 'Source Code Pro', monospace; background: transparent; border: 1px solid transparent; border-radius: 3px; padding: 3px 6px; color: var(--text-muted); width: 114px; text-align: right; font-size: 12px; }
+  .ob-num:focus { outline: none; border-color: var(--accent); background: var(--surface-2); color: var(--text); }
+  .ob-num.has-val { color: var(--text); background: rgba(99,102,241,0.04); border-color: var(--border); }
+  .ob-num.has-val:focus { background: var(--surface-2); border-color: var(--accent); }
+  .ob-bal { display: flex; align-items: center; gap: 24px; padding: 10px 16px; border-radius: var(--radius); border: 1px solid; margin: 10px 0; font-size: 12px; flex-wrap: wrap; }
+  .ob-bal.ok { background: rgba(52,211,153,0.06); border-color: rgba(52,211,153,0.18); }
+  .ob-bal.err { background: rgba(220,38,38,0.06); border-color: rgba(220,38,38,0.2); }
+  .ob-bal-item { display: flex; flex-direction: column; gap: 1px; }
+  .ob-bal-lbl { font-size: 10px; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.05em; }
+  .ob-bal-v { font-family: 'Source Code Pro', monospace; font-weight: 700; font-size: 13px; color: var(--text); }
+  .ob-bal-v.ok { color: var(--teal); }
+  .ob-bal-v.err { color: var(--danger); }
+  .ob-open-tbl { width: 100%; border-collapse: collapse; font-size: 12px; margin-bottom: 8px; }
+  .ob-open-tbl thead th { text-align: left; font-size: 10px; font-weight: 700; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.06em; padding: 5px 8px; border-bottom: 1px solid var(--border); }
+  .ob-open-tbl td { padding: 4px 6px; border-bottom: 1px solid var(--border2); vertical-align: middle; }
+  .ob-open-tbl tr:last-child td { border-bottom: none; }
+  .ob-fi { background: var(--surface-2); border: 1px solid var(--border); border-radius: 3px; padding: 4px 7px; font-size: 12px; color: var(--text); width: 100%; }
+  .ob-fi:focus { outline: none; border-color: var(--accent); }
+  .ob-tie { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; padding: 9px 14px; border-radius: var(--radius); border: 1px solid; margin: 10px 0; font-size: 12px; }
+  .ob-tie.ok { background: rgba(52,211,153,0.06); border-color: rgba(52,211,153,0.18); color: var(--teal); }
+  .ob-tie.err { background: rgba(220,38,38,0.06); border-color: rgba(220,38,38,0.2); color: var(--danger); }
+  .ob-review-grid { display: grid; grid-template-columns: repeat(3,1fr); gap: 12px; margin: 16px 0; }
+  .ob-rc { background: var(--surface-2); border: 1px solid var(--border); border-radius: var(--radius); padding: 14px 16px; }
+  .ob-rc-title { font-size: 10px; font-weight: 700; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.06em; margin-bottom: 10px; }
+  .ob-rc-row { display: flex; justify-content: space-between; font-size: 12px; padding: 2px 0; }
+  .ob-rc-lbl { color: var(--text-muted); }
+  .ob-rc-val { font-family: 'Source Code Pro', monospace; color: var(--text); }
+  .ob-rc-ok { color: var(--teal); font-size: 11px; font-weight: 600; margin-top: 6px; }
+  .ob-warn { background: rgba(217,119,6,0.07); border: 1px solid rgba(217,119,6,0.22); border-radius: var(--radius); padding: 10px 14px; font-size: 12px; color: #d97706; margin-bottom: 12px; }
+  .ob-err { background: rgba(220,38,38,0.07); border: 1px solid rgba(220,38,38,0.2); border-radius: var(--radius); padding: 10px 14px; font-size: 12px; color: var(--danger); margin: 8px 0; }
+  .ob-done { text-align: center; padding: 36px 20px; }
+  .ob-done-icon { font-size: 36px; margin-bottom: 14px; }
+  .ob-done-title { font-size: 20px; font-weight: 700; color: var(--teal); margin-bottom: 8px; }
+  .ob-done-sub { font-size: 12px; color: var(--text-muted); line-height: 1.8; max-width: 440px; margin: 0 auto 20px; }
 `;
 
 // ─── MAGIC MOMENT ─────────────────────────────────────────────────────────────
@@ -1158,7 +1266,15 @@ function MagicMoment({ onComplete }) {
       <div className="mm-grid" />
       <div className="mm-glow" />
       <div className="mm-card" style={{ animation: "fadeUp 0.5s ease forwards" }}>
-        <div className="mm-idle-logo">Ledgr<span>ly</span></div>
+        <div className="mm-idle-logo">
+          <svg width="32" height="32" viewBox="0 0 100 100" fill="none">
+            <rect x="22" y="12" width="16" height="76" rx="8" fill="#e8edeb"/>
+            <rect x="22" y="72" width="56" height="16" rx="8" fill="#e8edeb"/>
+            <rect x="46" y="24" width="13" height="46" rx="6.5" fill="#10b981"/>
+            <rect x="46" y="57" width="32" height="13" rx="6.5" fill="#10b981"/>
+          </svg>
+          Ledgrly
+        </div>
         <div className="mm-idle-sub">Finance OS · Ireland · {PERIOD}</div>
         <div className="mm-company">{COMPANY}</div>
         <div className="mm-period">▸ Month end close ready · {PERIOD}</div>
@@ -1361,7 +1477,15 @@ function Login({ onLogin }) {
     <div className="login-wrap">
       <div className="login-card">
         <div className="login-hdr">
-          <div className="login-logo">Ledgr<span>ly</span></div>
+          <div className="login-logo">
+            <svg width="26" height="26" viewBox="0 0 100 100" fill="none">
+              <rect x="22" y="12" width="16" height="76" rx="8" fill="#e8edeb"/>
+              <rect x="22" y="72" width="56" height="16" rx="8" fill="#e8edeb"/>
+              <rect x="46" y="24" width="13" height="46" rx="6.5" fill="#10b981"/>
+              <rect x="46" y="57" width="32" height="13" rx="6.5" fill="#10b981"/>
+            </svg>
+            Ledgrly
+          </div>
           <div className="login-tagline">Finance OS · Ireland</div>
         </div>
         <div className="login-body">
@@ -1399,7 +1523,7 @@ function Login({ onLogin }) {
 const OB_MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const OB_CURRENCIES = ["EUR","GBP","USD"];
 const OB_TYPES = ["Limited Company","Sole Trader","Partnership"];
-const OB_STEP_LABELS = ["Company", "Tax", "Accounts", "Checklist", "Bank"];
+const OB_STEP_LABELS = ["Company", "Tax", "Accounts", "Checklist", "Bank", "Opening Balances"];
 
 function GettingStartedCard({ company, onOpenStep, onDismiss }) {
   const STEPS = [
@@ -1408,6 +1532,7 @@ function GettingStartedCard({ company, onOpenStep, onDismiss }) {
     { key: 'chart_of_accounts', num: 3, label: 'Chart of accounts' },
     { key: 'checklist',         num: 4, label: 'Month-end checklist' },
     { key: 'bank_import',       num: 5, label: 'Bank import' },
+    { key: 'opening_balances',  num: 6, label: 'Opening balances' },
   ];
   const done = company?.onboarding_steps || {};
   const doneCount = STEPS.filter(s => done[s.key]).length;
@@ -1416,7 +1541,7 @@ function GettingStartedCard({ company, onOpenStep, onDismiss }) {
       <div className="card-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
         <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <span className="card-title">Getting started</span>
-          <span style={{ fontSize: 11, color: "var(--text-muted)", background: "var(--surface-2)", padding: "2px 7px", borderRadius: 10 }}>{doneCount} / 5 steps</span>
+          <span style={{ fontSize: 11, color: "var(--text-muted)", background: "var(--surface-2)", padding: "2px 7px", borderRadius: 10 }}>{doneCount} / {STEPS.length} steps</span>
         </div>
         <button onClick={onDismiss} style={{ background: "none", border: "none", color: "var(--text-faint)", cursor: "pointer", fontSize: 12, fontFamily: "Inter, system-ui, sans-serif" }}>Dismiss</button>
       </div>
@@ -1424,7 +1549,7 @@ function GettingStartedCard({ company, onOpenStep, onDismiss }) {
         {STEPS.map((s, i) => {
           const isDone = !!done[s.key];
           return (
-            <div key={s.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: i < 4 ? "1px solid var(--border)" : "none" }}>
+            <div key={s.key} style={{ display: "flex", alignItems: "center", gap: 10, padding: "8px 0", borderBottom: i < STEPS.length - 1 ? "1px solid var(--border)" : "none" }}>
               <div style={{ width: 22, height: 22, borderRadius: "50%", flexShrink: 0, background: isDone ? "var(--accent-dim)" : "var(--surface-2)", border: `1px solid ${isDone ? "var(--accent)" : "var(--border)"}`, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 10, fontWeight: 700, color: isDone ? "var(--accent)" : "var(--text-faint)" }}>
                 {isDone ? "✓" : s.num}
               </div>
@@ -1444,6 +1569,24 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
   const [saving, setSaving]           = useState(false);
   const [err, setErr]                 = useState(null);
   const [chkLoading, setChkLoading]   = useState(false);
+
+  // Step 6 — Opening Balances
+  const [obChecking,      setObChecking]      = useState(true);  // checking for an existing OPENING journal
+  const [obAlreadyPosted, setObAlreadyPosted] = useState(false);
+  const [obJustPosted,    setObJustPosted]    = useState(false);
+  const [obSkipped,       setObSkipped]       = useState(false);
+
+  // Same existence check OpeningBalances itself uses before posting — lets this step reflect
+  // "already recorded" instead of showing the entry form pointlessly (or letting a double-post
+  // attempt happen only to be rejected deeper in the flow).
+  useEffect(() => {
+    if (step !== 6 || !wCo?.id) return;
+    let cancelled = false;
+    setObChecking(true);
+    supabase.from('journals').select('id').eq('company_id', wCo.id).eq('reference', 'OPENING').limit(1)
+      .then(({ data }) => { if (!cancelled) { setObAlreadyPosted(!!data?.length); setObChecking(false); } });
+    return () => { cancelled = true; };
+  }, [step, wCo?.id]);
 
   const [s1, setS1] = useState({
     name:           company?.name           || (user?.firstName ? `${user.firstName} ${user.lastName ?? ""}`.trim() : ""),
@@ -1572,12 +1715,30 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
     setChkLoading(false);
   };
 
-  const finish = async (bankDone = false) => {
+  // Advances from step 5 (Bank) to step 6 (Opening Balances) — no longer completes onboarding;
+  // that now only happens once the opening-balances decision (post / already-posted / skip) is
+  // resolved in step 6.
+  const advanceFromBank = async (bankDone) => {
     if (!wCo?.id || saving) return;
     setSaving(true); setErr(null);
     try {
       const steps = { ...(wCo.onboarding_steps || {}) };
       if (bankDone) steps.bank_import = true;
+      const { data, error } = await supabase.from('companies').update({ onboarding_steps: steps }).eq('id', wCo.id).select().single();
+      if (error) throw error;
+      advance(6, data);
+    } catch (e) { setErr(e.message); }
+    setSaving(false);
+  };
+
+  // Terminal step — obChoice is 'posted' or 'skipped', an explicit recorded decision (never
+  // reached silently: the "Open your dashboard" button only appears once one of the three
+  // step-6 states — already-posted, just-posted, or explicit-skip — is resolved).
+  const finish = async (obChoice) => {
+    if (!wCo?.id || saving) return;
+    setSaving(true); setErr(null);
+    try {
+      const steps = { ...(wCo.onboarding_steps || {}), opening_balances: obChoice };
       const { data, error } = await supabase.from('companies').update({
         onboarding_completed: true,
         onboarding_steps:     steps,
@@ -1589,7 +1750,7 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
 
   const coaCategories = [...new Set(COA_SEED.map(a => a.category))];
   const isNewSignup   = !company;
-  const isWide        = step === 3 || step === 5;
+  const isWide        = step === 3 || step === 5 || step === 6;
 
   const stepBar = (
     <div style={{ display: "flex", gap: 6, justifyContent: "center", marginBottom: 20, alignItems: "center" }}>
@@ -1615,7 +1776,15 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
       <div className={`ob-card${isWide ? " ob-card--wide" : ""}`}>
         <div className="ob-header" style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
           <div>
-            <div className="ob-logo">Ledgr<span>ly</span></div>
+            <div className="ob-logo">
+              <svg width="26" height="26" viewBox="0 0 100 100" fill="none">
+                <rect x="22" y="12" width="16" height="76" rx="8" fill="#e8edeb"/>
+                <rect x="22" y="72" width="56" height="16" rx="8" fill="#e8edeb"/>
+                <rect x="46" y="24" width="13" height="46" rx="6.5" fill="#10b981"/>
+                <rect x="46" y="57" width="32" height="13" rx="6.5" fill="#10b981"/>
+              </svg>
+              Ledgrly
+            </div>
             <div className="ob-tagline">Finance OS · Ireland</div>
           </div>
           {!isNewSignup && (
@@ -1624,7 +1793,7 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
         </div>
         <div className="ob-body">
           {stepBar}
-          <div className="ob-step">Step {step} of 5 — {OB_STEP_LABELS[step - 1]}</div>
+          <div className="ob-step">Step {step} of {OB_STEP_LABELS.length} — {OB_STEP_LABELS[step - 1]}</div>
 
           {step === 1 && (
             <>
@@ -1795,10 +1964,55 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
               <p className="ob-sub">Upload a Revolut Business CSV to populate cash flow and kick-start automation. Skip and do this later from Bank Import.</p>
               {wCo?.id && <BankImport companyId={wCo.id} />}
               {err && <div style={{ marginBottom: 12, marginTop: 8, fontSize: 12, color: "var(--red)", background: "rgba(248,113,113,0.08)", border: "1px solid rgba(248,113,113,0.2)", borderRadius: 4, padding: "8px 12px" }}>{err}</div>}
-              <button className="ob-submit" onClick={() => finish(true)} disabled={saving} style={{ marginTop: 14 }}>
-                {saving ? "Finishing…" : "Open your dashboard →"}
+              <button className="ob-submit" onClick={() => advanceFromBank(true)} disabled={saving} style={{ marginTop: 14 }}>
+                {saving ? "Continuing…" : "Continue →"}
               </button>
-              <button className="ob-skip" onClick={() => finish(false)}>Skip bank import →</button>
+              <button className="ob-skip" onClick={() => advanceFromBank(false)}>Skip for now →</button>
+            </>
+          )}
+
+          {step === 6 && (
+            <>
+              <p className="ob-title">Opening balances</p>
+              <p className="ob-sub">
+                Enter the opening trial balance — usually your client's closing position from their prior
+                accountant, as at the date you're taking over. This is what makes the Balance Sheet, bank
+                reconciliation and VAT correct from day one. You can set this "as at" date to a recent
+                month-end and import transactions from there forward — you don't need the full year.
+              </p>
+
+              {obChecking ? (
+                <div style={{ padding: 24, textAlign: "center", color: "var(--text-faint)", fontSize: 12 }}>Checking…</div>
+              ) : obAlreadyPosted ? (
+                <div style={{ background: "var(--accent-dim)", border: "1px solid rgba(52,211,153,0.3)", borderRadius: 8, padding: "14px 16px", marginBottom: 16, fontSize: 13, color: "var(--accent)" }}>
+                  ✓ Opening balances already recorded for this company.
+                </div>
+              ) : obSkipped ? (
+                <div style={{ background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 8, padding: "14px 16px", marginBottom: 16, fontSize: 13, color: "var(--text-muted)", lineHeight: 1.6 }}>
+                  No opening balances recorded. Your Balance Sheet, bank rec and VAT will be incomplete until
+                  this is entered — you can do it anytime from Settings → Client Setup.
+                  <button onClick={() => setObSkipped(false)} style={{ display: "block", marginTop: 8, background: "none", border: "none", color: "var(--accent)", cursor: "pointer", fontSize: 12, textDecoration: "underline", padding: 0 }}>
+                    Undo — enter opening balances now
+                  </button>
+                </div>
+              ) : (
+                <>
+                  {wCo?.id && <OpeningBalances companyId={wCo.id} onPosted={() => setObJustPosted(true)} />}
+                  {!obJustPosted && (
+                    <button className="ob-skip" style={{ marginTop: 10 }} onClick={() => setObSkipped(true)}>
+                      Skip opening balances for now →
+                    </button>
+                  )}
+                </>
+              )}
+
+              {err && <div style={{ marginBottom: 12, marginTop: 8, fontSize: 12, color: "var(--red)", background: "rgba(248,113,113,0.08)", border: "1px solid rgba(248,113,113,0.2)", borderRadius: 4, padding: "8px 12px" }}>{err}</div>}
+
+              {(obAlreadyPosted || obSkipped || obJustPosted) && (
+                <button className="ob-submit" onClick={() => finish(obSkipped ? 'skipped' : 'posted')} disabled={saving} style={{ marginTop: 14 }}>
+                  {saving ? "Finishing…" : "Open your dashboard →"}
+                </button>
+              )}
             </>
           )}
         </div>
@@ -1808,6 +2022,30 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
       </div>
     </div>
   );
+}
+
+// The bank nominal every import path (Yapily, CSV, Stripe default) posts against — see
+// api/yapily/ingest.js and the CSV BankImport pipeline. Not configurable per-account today.
+const BANK_NOMINAL_CODE = '1000';
+
+// Cumulative balance of a single nominal account, from inception up to and including `asOfDate`
+// — the same inception-unbounded, debit-normal approach the Balance Sheet fix uses for
+// Asset/Liability/Equity accounts (see GLReport's bsJournals/tbRows). Used here so Cash Flow's
+// opening balance always agrees with the Balance Sheet's bank balance as at that date, rather
+// than recomputing it a different way.
+async function fetchNominalBalanceAsOf(companyId, nominalCode, asOfDate) {
+  const { data, error } = await supabase.from('journals')
+    .select('debit_account, credit_account, amount')
+    .eq('company_id', companyId)
+    .or(`debit_account.eq.${nominalCode},credit_account.eq.${nominalCode}`)
+    .lte('date', asOfDate);
+  if (error) throw new Error(error.message);
+  return (data || []).reduce((bal, j) => {
+    const amt = Number(j.amount);
+    if (j.debit_account === nominalCode)  bal += amt; // debit-normal (asset)
+    if (j.credit_account === nominalCode) bal -= amt;
+    return bal;
+  }, 0);
 }
 
 // ─── CASH FLOW PAGE ───────────────────────────────────────────────────────────
@@ -1821,6 +2059,8 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
   const [loading, setLoading]     = useState(true);
   const [txns, setTxns]           = useState([]);
   const [allInvoices, setAllInvoices] = useState([]);
+  const [openingBalance,   setOpeningBalance]   = useState(0);
+  const [openingBalLoaded, setOpeningBalLoaded] = useState(false);
 
   useEffect(() => {
     if (!companyId) { setLoading(false); return; }
@@ -1837,6 +2077,22 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
       setLoading(false);
     })();
   }, [companyId]); // eslint-disable-line
+
+  // Opening cash balance — the bank nominal's cumulative balance as at the day before the
+  // displayed period starts. This is the anchor the running/closing balance builds on; without
+  // it the running balance accumulates from zero instead of the real bank position.
+  useEffect(() => {
+    if (!companyId) { setOpeningBalLoaded(true); return; }
+    const [oy, om] = selPeriod.split('-').map(Number);
+    const dayBeforePeriodStart = new Date(oy, om - 1, 0).toISOString().slice(0, 10);
+    let cancelled = false;
+    setOpeningBalLoaded(false);
+    fetchNominalBalanceAsOf(companyId, BANK_NOMINAL_CODE, dayBeforePeriodStart)
+      .then(bal => { if (!cancelled) setOpeningBalance(bal); })
+      .catch(() => { if (!cancelled) setOpeningBalance(0); })
+      .then(() => { if (!cancelled) setOpeningBalLoaded(true); });
+    return () => { cancelled = true; };
+  }, [companyId, selPeriod]);
 
   // ── Empty state ──
   if (!loading && txns.length === 0) return (
@@ -1860,12 +2116,23 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
 
   // ── Derived figures ──
   const txnsUpToEnd = txns.filter(t => t.date <= periodEndStr);
-  const latestTxn   = txnsUpToEnd[txnsUpToEnd.length - 1];
-  const currentBal  = latestTxn ? Number(latestTxn.balance) : 0;
+  const latestTxn   = txnsUpToEnd[txnsUpToEnd.length - 1]; // just for the "last transaction" date label below
 
   const periodTxns  = txns.filter(t => t.date >= periodStart && t.date <= periodEndStr);
   const periodNet   = periodTxns.reduce((s, t) => s + Number(t.amount), 0);
   const avgDaily    = daysInPeriod > 0 ? periodNet / daysInPeriod : 0;
+
+  // Balance at period end = opening cash balance (fetched above, inception-unbounded as at the
+  // day before this period starts) + net movements in the period — not accumulated from zero.
+  const currentBal = openingBalance + periodNet;
+
+  // Running balance per transaction — walks opening → after txn 1 → after txn 2 → ... in
+  // chronological order (periodTxns is date-ascending, matching the bank_transactions query).
+  let _runningBal = openingBalance;
+  const periodTxnsWithBalance = periodTxns.map(t => {
+    _runningBal += Number(t.amount);
+    return { ...t, runningBalance: _runningBal };
+  });
 
   // When the selected period has no transactions, fall back to the most recent period that does
   const effectiveAvgDaily = (() => {
@@ -1894,7 +2161,7 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
   const maxAbs  = Math.max(...forecast.map(f => Math.abs(f.val)), 1);
   const barH    = v => Math.max((Math.abs(v) / maxAbs) * 80, 4);
 
-  const recent10 = [...periodTxns].reverse().slice(0, 10);
+  const recent10 = [...periodTxnsWithBalance].reverse().slice(0, 10);
 
   const recurringPayments = useMemo(() => {
     const getBasePayee = desc => (desc || '')
@@ -1931,11 +2198,13 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
   const ap30End = new Date(periodEndDate.getTime() + 30 * 86400000).toISOString().slice(0, 10);
   const upcomingAP = allInvoices.filter(inv => inv.due_date > periodEndStr && inv.due_date <= ap30End);
 
+  const cfLoading = loading || !openingBalLoaded;
+
   return (
     <div className="fade-up">
-      {loading && <div style={{ padding: "32px 0", textAlign: "center", color: "var(--dim)", fontSize: 12, fontFamily: "Source Code Pro, monospace" }}>Loading cash flow data…</div>}
+      {cfLoading && <div style={{ padding: "32px 0", textAlign: "center", color: "var(--dim)", fontSize: 12, fontFamily: "Source Code Pro, monospace" }}>Loading cash flow data…</div>}
 
-      {!loading && (
+      {!cfLoading && (
         <>
 
           {/* ── KPI row ── */}
@@ -2041,7 +2310,7 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
                 <tbody>
                   {recent10.map((t, i) => {
                     const amt  = Number(t.amount);
-                    const bal  = Number(t.balance);
+                    const bal  = Number(t.runningBalance);
                     const acct = GL_ACCOUNTS.find(a => a.code === t.nominal_account);
                     return (
                       <tr key={i}>
@@ -2108,7 +2377,7 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
 
 function buildARInvoiceHTML(inv, lines, customer, settings, companyName) {
   const isCN    = inv.type === 'credit_note';
-  const accent  = isCN ? '#b91c1c' : '#1d6b72';
+  const accent  = isCN ? '#b91c1c' : '#059669';
   const fmtM    = v => '€' + Number(v || 0).toFixed(2);
   const vatLbl  = { STD23: '23%', RED13: '13.5%', RED9: '9%', ZERO: '0%', EXEMPT: 'Exempt', RCT: 'RCT – Reverse Charge', RC_EU: 'Reverse Charge (EU B2B)' };
   const vatRows = {};
@@ -2232,7 +2501,7 @@ table.lines td{padding:8px 7px;border-bottom:1px solid #f0f0f0;font-size:12px}
 const AR_STATUS_LABELS = { draft: 'Draft', sent: 'Sent', part_paid: 'Part Paid', paid: 'Paid', overdue: 'Overdue', void: 'Void', credited: 'Credited' };
 const AR_STATUS_COLORS = { draft: 'var(--muted)', sent: 'var(--accent)', part_paid: 'var(--gold)', paid: 'var(--teal)', overdue: 'var(--danger)', void: 'var(--dim)', credited: 'var(--dim)' };
 
-function Invoices({ companyName, companyId: propCid, company }) {
+function Invoices({ companyName, companyId: propCid, company, onNavigate }) {
   const cid          = propCid;
   const baseCurrency = company?.base_currency || 'EUR';
   const fmtC = v => new Intl.NumberFormat('en-IE', { style: 'currency', currency: baseCurrency }).format(Number(v) || 0);
@@ -2251,6 +2520,12 @@ function Invoices({ companyName, companyId: propCid, company }) {
   const [modal,  setModal]  = useState(null); // 'invoice'|'cn'|'customer'|'mark_paid'|null
   const [saving, setSaving] = useState(false);
   const [saveErr,setSaveErr]= useState(null);
+
+  // Void / delete confirmation state
+  // voidTarget: null | { inv, action: 'delete'|'void' }
+  const [voidTarget, setVoidTarget] = useState(null);
+  const [voiding,    setVoiding]    = useState(false);
+  const [voidErr,    setVoidErr]    = useState(null);
 
   // ── Form state (shared for invoice + CN modal) ────────────────────────────
   const blankLine = (vc) => calcLineAmounts({ _id: Date.now().toString(36) + Math.random().toString(36).slice(2), description: '', quantity: 1, unit_price: '', vat_code: vc || 'STD23', line_total: 0, vat_amount: 0, gross_total: 0 });
@@ -2362,10 +2637,28 @@ function Invoices({ companyName, companyId: propCid, company }) {
     await loadData();
   };
 
-  const voidDoc = async (inv) => {
-    if (!window.confirm(`Void ${inv.invoice_number}? This cannot be undone.`)) return;
-    await supabase.from('invoices').update({ status: 'void', updated_at: new Date().toISOString() }).eq('id', inv.id);
+  const deleteDraft = async () => {
+    if (!voidTarget) return;
+    setVoiding(true); setVoidErr(null);
+    const { error } = await supabase.from('invoices').delete()
+      .eq('id', voidTarget.inv.id).eq('company_id', cid);
+    if (error) { setVoidErr(error.message); setVoiding(false); return; }
+    setVoidTarget(null);
     await loadData();
+    setVoiding(false);
+  };
+
+  const voidFinalised = async () => {
+    if (!voidTarget) return;
+    setVoiding(true); setVoidErr(null);
+    const { error } = await supabase.rpc('void_ar_invoice', {
+      p_company_id: cid,
+      p_invoice_id: voidTarget.inv.id,
+    });
+    if (error) { setVoidErr(error.message); setVoiding(false); return; }
+    setVoidTarget(null);
+    await loadData();
+    setVoiding(false);
   };
 
   const handlePrint = async (inv) => {
@@ -2486,6 +2779,9 @@ function Invoices({ companyName, companyId: propCid, company }) {
           ))}
         </div>
         <div style={{ display: 'flex', gap: 8 }}>
+          {tab === 'invoices' && onNavigate && (
+            <button className="btn btn-s btn-sm" onClick={() => onNavigate('ar-import')} title="Paste a spreadsheet to migrate or bulk-post invoices">⊕ Import</button>
+          )}
           {tab === 'invoices'      && <button className="btn btn-p btn-sm" onClick={() => openInvoiceForm(null, false)}>+ New Invoice</button>}
           {tab === 'credit_notes'  && <button className="btn btn-p btn-sm" style={{ background: 'var(--danger)', borderColor: 'var(--danger)' }} onClick={() => openInvoiceForm(null, true)}>+ New Credit Note</button>}
           {tab === 'customers'     && <button className="btn btn-p btn-sm" onClick={() => openCustomerForm()}>+ New Customer</button>}
@@ -2549,7 +2845,10 @@ function Invoices({ companyName, companyId: propCid, company }) {
                                 <button className="btn btn-s btn-sm" style={{ borderColor: 'var(--danger)', color: 'var(--danger)' }} onClick={() => openInvoiceForm(null, true, inv)}>CN</button>
                               )}
                               {st === 'draft' && (
-                                <button className="btn btn-s btn-sm" style={{ borderColor: 'var(--dim)', color: 'var(--dim)' }} onClick={() => voidDoc(inv)}>Void</button>
+                                <button className="btn btn-s btn-sm" style={{ borderColor: 'var(--danger)', color: 'var(--danger)' }} onClick={() => { setVoidErr(null); setVoidTarget({ inv, action: 'delete' }); }}>Delete</button>
+                              )}
+                              {(st === 'sent' || st === 'overdue') && (
+                                <button className="btn btn-s btn-sm" style={{ borderColor: 'var(--dim)', color: 'var(--dim)' }} onClick={() => { setVoidErr(null); setVoidTarget({ inv, action: 'void' }); }}>Void</button>
                               )}
                             </div>
                           </td>
@@ -2586,11 +2885,17 @@ function Invoices({ companyName, companyId: propCid, company }) {
                           <td style={{ paddingRight: 8 }}>
                             <div style={{ display: 'flex', gap: 3 }}>
                               {cn.status === 'draft' && <button className="btn btn-s btn-sm" onClick={() => openInvoiceForm(cn, true)}>Edit</button>}
-                              {cn.status !== 'draft' && (
+                              {cn.status !== 'draft' && cn.status !== 'void' && (
                                 <>
                                   <button className="btn btn-s btn-sm" onClick={() => handlePrint(cn)}>PDF</button>
                                   <button className="btn btn-s btn-sm" onClick={() => handleEmail(cn)}>Email</button>
                                 </>
+                              )}
+                              {cn.status === 'draft' && (
+                                <button className="btn btn-s btn-sm" style={{ borderColor: 'var(--danger)', color: 'var(--danger)' }} onClick={() => { setVoidErr(null); setVoidTarget({ inv: cn, action: 'delete' }); }}>Delete</button>
+                              )}
+                              {cn.status !== 'draft' && cn.status !== 'void' && (
+                                <button className="btn btn-s btn-sm" style={{ borderColor: 'var(--dim)', color: 'var(--dim)' }} onClick={() => { setVoidErr(null); setVoidTarget({ inv: cn, action: 'void' }); }}>Void</button>
                               )}
                             </div>
                           </td>
@@ -2865,22 +3170,84 @@ function Invoices({ companyName, companyId: propCid, company }) {
         </div>,
         document.body
       )}
+
+      {/* ── Void / Delete confirmation modal ── */}
+      {voidTarget && createPortal(
+        <div style={{ position: 'fixed', inset: 0, width: '100vw', height: '100vh', background: 'rgba(0,0,0,0.52)', zIndex: 9100, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 24 }}>
+          <div style={{ background: 'var(--surface)', borderRadius: 8, width: 'min(420px, 95vw)', boxShadow: '0 8px 40px rgba(0,0,0,0.35)', display: 'flex', flexDirection: 'column' }}>
+            {/* Header */}
+            <div style={{ padding: '14px 20px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10 }}>
+              <span style={{ fontSize: 18, lineHeight: 1 }}>⚠️</span>
+              <span style={{ fontWeight: 700, fontSize: 15, color: 'var(--danger)' }}>
+                {voidTarget.action === 'delete' ? 'Delete Draft' : 'Void Document'}
+              </span>
+            </div>
+
+            {/* Body */}
+            <div style={{ padding: '18px 20px', fontSize: 13, lineHeight: 1.6, color: 'var(--text-muted)' }}>
+              {voidTarget.action === 'delete' ? (
+                <>
+                  <p style={{ margin: '0 0 10px' }}>
+                    Delete draft <strong style={{ color: 'var(--text)' }}>{voidTarget.inv.invoice_number || (voidTarget.inv.type === 'credit_note' ? 'Credit Note' : 'Invoice')} (unsaved)</strong>?
+                  </p>
+                  <p style={{ margin: 0 }}>
+                    This draft has never been finalised, so it has <strong style={{ color: 'var(--text)' }}>no accounting or VAT impact</strong>. It will be permanently removed.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <p style={{ margin: '0 0 10px' }}>
+                    Void <strong style={{ color: 'var(--text)' }}>{voidTarget.inv.invoice_number}</strong>?
+                  </p>
+                  <ul style={{ margin: '0 0 10px', paddingLeft: 18 }}>
+                    <li>Reversal journals will be posted to net the ledger to zero.</li>
+                    <li>This document will no longer appear in the VAT3 figures.</li>
+                    <li>The record is kept as <em>Void</em> for audit purposes.</li>
+                  </ul>
+                  <p style={{ margin: 0, fontSize: 12, color: 'var(--dim)' }}>
+                    This cannot be undone. If the period is locked, voiding will be blocked.
+                  </p>
+                </>
+              )}
+              {voidErr && (
+                <div style={{ marginTop: 12, padding: '8px 12px', background: 'rgba(220,38,38,0.08)', border: '1px solid rgba(220,38,38,0.25)', borderRadius: 6, fontSize: 12, color: 'var(--danger)' }}>
+                  {voidErr}
+                </div>
+              )}
+            </div>
+
+            {/* Footer */}
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'flex-end', padding: '12px 20px', borderTop: '1px solid var(--border)', background: 'var(--surface-2)', borderRadius: '0 0 8px 8px' }}>
+              <button className="btn btn-s" disabled={voiding} onClick={() => { setVoidTarget(null); setVoidErr(null); }}>Cancel</button>
+              <button
+                disabled={voiding}
+                onClick={voidTarget.action === 'delete' ? deleteDraft : voidFinalised}
+                style={{ padding: '6px 16px', borderRadius: 5, border: '1px solid var(--danger)', background: voiding ? 'rgba(220,38,38,0.12)' : 'rgba(220,38,38,0.15)', color: 'var(--danger)', fontWeight: 600, fontSize: 13, cursor: voiding ? 'wait' : 'pointer' }}
+              >
+                {voiding ? 'Working…' : (voidTarget.action === 'delete' ? 'Delete Draft' : 'Void & Reverse Journals')}
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
     </div>
   );
 }
 
 // ─── AP INVOICES PAGE ────────────────────────────────────────────────────────
-function APInvoices({ companyName = "Company", company }) {
+function APInvoices({ companyName = "Company", company, onNavigate }) {
   const { user } = useUser();
-  const [invoices, setInvoices]             = useState([]);
-  const [reviewInvoices, setReviewInvoices] = useState([]);
-  const [reviewEdits,    setReviewEdits]    = useState({});
-  const [copied,         setCopied]         = useState(false);
-  const [loading, setLoading]         = useState(true);
-  const [selected, setSelected]       = useState(null);
-  const [showForm, setShowForm]       = useState(false);
-  const [saveError, setSaveError]     = useState(null);
-  const [justCleared, setJustCleared] = useState(false);
+  const [invoices, setInvoices]                 = useState([]);
+  const [reviewInvoices, setReviewInvoices]     = useState([]);
+  const [reviewEdits,    setReviewEdits]         = useState({});
+  const [copied,         setCopied]             = useState(false);
+  const [loading, setLoading]                   = useState(true);
+  const [selected, setSelected]                 = useState(null);
+  const [showForm, setShowForm]                 = useState(false);
+  const [saveError, setSaveError]               = useState(null);
+  const [justCleared, setJustCleared]           = useState(false);
+  const [assetCapturePrompt, setAssetCapturePrompt] = useState(false);
 
   useEffect(() => { if (reviewInvoices.length > 0) setJustCleared(false); }, [reviewInvoices.length]);
 
@@ -2950,7 +3317,7 @@ function APInvoices({ companyName = "Company", company }) {
       nominal_code: nomCode,
       vat_code: vatCode,
     }).select().single();
-    if (error) { setSaveError(`Save failed: ${error.message}`); return; }
+    if (error) { captureError(error, { company_id: cid, operation: 'ap-bill-save' }); setSaveError(`Save failed: ${error.message}`); return; }
     // Post accrual journal: Dr Expense / Cr Trade Creditors (2000)
     await supabase.from('journals').insert({
       company_id: cid, date: form.invoice_date,
@@ -2961,6 +3328,7 @@ function APInvoices({ companyName = "Company", company }) {
       source_recurring_id: null, is_accrual_reversal: false,
     });
     setInvoices((prev) => [...prev, inserted].sort((a, b) => new Date(a.due_date) - new Date(b.due_date)));
+    if (nomCode >= '1500' && nomCode <= '1549') setAssetCapturePrompt(true);
     setForm(emptyForm());
     setShowForm(false);
   };
@@ -2974,6 +3342,7 @@ function APInvoices({ companyName = "Company", company }) {
       setInvoices(prev => prev.map(i => i.id === inv.id ? { ...i, status: 'paid', amount_paid: paidAmt } : i));
       if (selected === inv.id) setSelected(null);
     } catch (err) {
+      captureError(err, { company_id: companyId, operation: 'ap-mark-paid' });
       console.error('[ap] mark paid failed:', err.message);
     }
   };
@@ -3022,6 +3391,7 @@ function APInvoices({ companyName = "Company", company }) {
         vat_amount:    parseFloat(ed.vat_amount  ?? inv.vat_amount  ?? 0) || null,
       });
     } catch (err) {
+      captureError(err, { company_id: inv.company_id, operation: 'ap-approve' });
       console.error('[ap] approve failed:', err.message);
       return;
     }
@@ -3081,7 +3451,7 @@ function APInvoices({ companyName = "Company", company }) {
     <div className="fade-up">
 
       {/* ── AP Mailbox address banner ── */}
-      {apEmail && (
+      {apEmail && can(company, 'ap_mailbox') && (
         <div style={{ marginBottom: 12, padding: "10px 16px", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 4, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12 }}>
           <div>
             <div style={{ fontSize: 10, fontFamily: "Source Code Pro, monospace", color: "var(--dim)", letterSpacing: "0.06em", marginBottom: 3 }}>AP MAILBOX</div>
@@ -3168,7 +3538,7 @@ function APInvoices({ companyName = "Company", company }) {
       )}
 
       {!loading && companyId && reviewInvoices.length === 0 && (
-        <InboxZeroCelebration companyId={companyId} justCleared={justCleared} theme="light" />
+        <InboxZeroCelebration companyId={companyId} justCleared={justCleared} theme="dark" />
       )}
 
       <div className="kpi-grid" style={{ gridTemplateColumns: "repeat(3,1fr)" }}>
@@ -3255,6 +3625,15 @@ function APInvoices({ companyName = "Company", company }) {
         </div>
       )}
 
+
+      {assetCapturePrompt && can(company, 'fixed_assets') && (
+        <div style={{ background: 'var(--accent-dim)', border: '1px solid rgba(52,211,153,0.3)', borderRadius: 'var(--radius-card)', padding: '10px 14px', marginBottom: 12, display: 'flex', alignItems: 'center', gap: 10, fontSize: 12 }}>
+          <span style={{ color: 'var(--accent)', fontSize: 16 }}>⊟</span>
+          <span style={{ color: 'var(--text)', flex: 1 }}>This bill was coded to a fixed-asset account — add it to the asset register?</span>
+          <button className="btn btn-p btn-sm" onClick={() => { setAssetCapturePrompt(false); onNavigate?.('fixed-assets'); }}>Go to Fixed Assets →</button>
+          <button className="btn btn-s btn-sm" onClick={() => setAssetCapturePrompt(false)}>Dismiss</button>
+        </div>
+      )}
 
       <div className="card full-col">
         <div className="card-header">
@@ -3391,6 +3770,98 @@ function APInvoices({ companyName = "Company", company }) {
 const MONTH_NAMES_LONG  = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const MONTH_NAMES_SHORT = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
+// ── VAT3 XML GENERATOR (Phase 1 — test/preview) ────────────────────────────
+
+function buildVAT3Xml(a) {
+  const esc = s => String(s ?? '').replace(/&/g,'&amp;').replace(/"/g,'&quot;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
+  return `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>\n` +
+    `<VAT3 currency="${esc(a.currency)}" language="${esc(a.language)}" formversion="${esc(a.formversion)}"` +
+    ` name="${esc(a.name)}" regnum="${esc(a.regnum)}" filefreq="${esc(a.filefreq)}"` +
+    ` startdate="${esc(a.startdate)}" enddate="${esc(a.enddate)}" type="${esc(a.type)}"` +
+    ` sales="${esc(a.sales)}" purchs="${esc(a.purchs)}"` +
+    ` goodsto="${esc(a.goodsto)}" goodsfrom="${esc(a.goodsfrom)}"` +
+    ` servicesto="${esc(a.servicesto)}" servicesfrom="${esc(a.servicesfrom)}"` +
+    ` postponedAccounting="${esc(a.postponedAccounting)}"/>`;
+}
+
+function validateVAT3({ company, vatPeriod, t1, t2, e1, e2, es1, es2, pa1, returnType }) {
+  const errors = [], warnings = [];
+
+  // name — 1–30 chars
+  const rawName = (company?.name || '').trim();
+  const xmlName = rawName.slice(0, 30);
+  if (!rawName) errors.push('Company name is missing');
+  else if (rawName.length > 30) warnings.push(`name: "${rawName}" truncated to 30 chars for XML`);
+
+  // regnum — 7 digits + 1–2 letters; strip "IE " prefix
+  const rawRegnum = (company?.vat_number || '').trim();
+  const regnumStripped = rawRegnum.replace(/^IE\s*/i, '').replace(/\s+/g, '').toUpperCase();
+  const regnumOk = /^\d{7}[A-Z]{1,2}$/.test(regnumStripped);
+  if (!rawRegnum) errors.push('VAT registration number is missing — add it in Settings → Tax & Compliance');
+  else if (!regnumOk) errors.push(`VAT number "${rawRegnum}" doesn't match required format (7 digits + 1–2 letters, e.g. 1234567A) — update in Settings`);
+
+  // filefreq
+  const freqMap = { bimonthly: '0', monthly: '1', 'four-monthly': '2', 'bi-annual': '3' };
+  const filefreq = freqMap[company?.vat_period] ?? '0';
+
+  // dates YYYY-MM-DD → DD/MM/YYYY
+  const toIE = iso => (iso || '').split('-').reverse().join('/');
+  const startdate = toIE(vatPeriod?.start);
+  const enddate   = toIE(vatPeriod?.end);
+  if (!startdate || !enddate) errors.push('Period dates are missing');
+
+  // sales / purchs — round to whole euro
+  const t1c = Math.round(t1 * 100) / 100;
+  const t2c = Math.round(t2 * 100) / 100;
+  const salesInt  = Math.round(t1c);
+  const purchsInt = Math.round(t2c);
+  if (salesInt  > 999999999) errors.push(`T1 (€${salesInt.toLocaleString()}) exceeds schema max €999,999,999`);
+
+  // EU boxes — manually entered
+  const e1n = Number(e1) || 0, e2n = Number(e2) || 0;
+  const es1n = Number(es1) || 0, es2n = Number(es2) || 0;
+  const goodsTo   = Math.round(e1n),  goodsFrom   = Math.round(e2n);
+  const servTo    = Math.round(es1n), servFrom    = Math.round(es2n);
+  if (servTo > 9999999999) errors.push(`ES1 (€${servTo.toLocaleString()}) exceeds schema max €9,999,999,999`);
+
+  // PA1
+  const pa1c   = Math.round(pa1 * 100) / 100;
+  const pa1Int = Math.round(pa1c);
+  warnings.push('postponedAccounting is 0 — engine has no PA-import journal tracking. This is correct for domestic-only trading; verify if you have goods imported under postponed accounting.');
+
+  const previewRows = [
+    { attr: 'name',                source: 'company.name',                  rawVal: rawName,           xmlVal: xmlName,          note: rawName.length > 30 ? `⚠ truncated ${rawName.length}→30` : '',                              flag: rawName.length > 30 },
+    { attr: 'regnum',              source: 'company.vat_number',            rawVal: rawRegnum,         xmlVal: regnumStripped,   note: rawRegnum ? 'IE prefix + spaces stripped' : '⛔ missing',                                     flag: !regnumOk },
+    { attr: 'filefreq',            source: 'company.vat_period',            rawVal: company?.vat_period || '—', xmlVal: filefreq, note: '0=bi-monthly · 1=monthly · 2=four-monthly · 3=bi-annual',                                flag: false },
+    { attr: 'startdate',           source: 'vatPeriod.start',               rawVal: vatPeriod?.start || '—', xmlVal: startdate, note: 'YYYY-MM-DD → DD/MM/YYYY',                                                                    flag: false },
+    { attr: 'enddate',             source: 'vatPeriod.end',                 rawVal: vatPeriod?.end   || '—', xmlVal: enddate,   note: '',                                                                                             flag: false },
+    { attr: 'type',                source: 'user selection (see below)',     rawVal: '—',               xmlVal: returnType,       note: '0=original · 1=supplementary · 2=amended (no engine concept — user selects)',                flag: false },
+    { attr: 'sales',               source: 'engine t1 (auto-computed)',     rawVal: `€${t1c.toFixed(2)}`, xmlVal: String(salesInt), note: t1c !== salesInt ? `rounded · diff €${Math.abs(t1c-salesInt).toFixed(2)} ⚠ confirm Revenue convention` : 'no rounding diff', flag: t1c !== salesInt, isAmount: true },
+    { attr: 'purchs',              source: 'engine t2 (auto-computed)',     rawVal: `€${t2c.toFixed(2)}`, xmlVal: String(purchsInt), note: t2c !== purchsInt ? `rounded · diff €${Math.abs(t2c-purchsInt).toFixed(2)} ⚠ confirm Revenue convention` : 'no rounding diff', flag: t2c !== purchsInt, isAmount: true },
+    { attr: 'goodsto',             source: 'E1 box (manual entry)',         rawVal: `€${e1n.toFixed(2)}`, xmlVal: String(goodsTo),   note: 'manually entered — not auto-computed from transactions',                               flag: false, isManual: true },
+    { attr: 'goodsfrom',           source: 'E2 box (manual entry)',         rawVal: `€${e2n.toFixed(2)}`, xmlVal: String(goodsFrom), note: 'manually entered — not auto-computed from transactions',                               flag: false, isManual: true },
+    { attr: 'servicesto',          source: 'ES1 box (manual entry)',        rawVal: `€${es1n.toFixed(2)}`, xmlVal: String(servTo),   note: 'manually entered — not auto-computed from transactions',                               flag: false, isManual: true },
+    { attr: 'servicesfrom',        source: 'ES2 box (manual entry)',        rawVal: `€${es2n.toFixed(2)}`, xmlVal: String(servFrom), note: 'manually entered — not auto-computed from transactions',                               flag: false, isManual: true },
+    { attr: 'postponedAccounting', source: 'pa1 (hardcoded 0 — no PA tracking)', rawVal: `€${pa1c.toFixed(2)}`, xmlVal: String(pa1Int), note: '⚠ ENGINE GAP: no PA-import journal tracking — verify manually',                  flag: true, isGap: true },
+    { attr: 'formversion',         source: 'fixed constant',                rawVal: '—',               xmlVal: '1',              note: 'always "1" per schema',                                                                      flag: false },
+    { attr: 'language',            source: 'fixed constant',                rawVal: '—',               xmlVal: 'E',              note: 'English',                                                                                    flag: false },
+    { attr: 'currency',            source: 'fixed constant',                rawVal: '—',               xmlVal: 'E',              note: 'Euro — always E',                                                                            flag: false },
+  ];
+
+  const canGenerate = errors.length === 0;
+  const attrs = canGenerate ? {
+    currency: 'E', language: 'E', formversion: '1',
+    name: xmlName, regnum: regnumStripped, filefreq, startdate, enddate,
+    type: returnType,
+    sales: String(salesInt), purchs: String(purchsInt),
+    goodsto: String(goodsTo), goodsfrom: String(goodsFrom),
+    servicesto: String(servTo), servicesfrom: String(servFrom),
+    postponedAccounting: String(pa1Int),
+  } : null;
+
+  return { errors, warnings, previewRows, attrs, canGenerate };
+}
+
 function getVATPeriods(vatPeriodType, rosEfiler = false) {
   const dueDay = rosEfiler ? 23 : 19;
   const now = new Date();
@@ -3448,6 +3919,22 @@ function VATReturns({ company, onNavigate }) {
   const [draftArInvoices, setDraftArInvoices] = useState([]);
   const [markingFiled, setMarkingFiled] = useState(false);
   const [markError,    setMarkError]    = useState(null);
+  const [showXmlPanel, setShowXmlPanel] = useState(false);
+  const [xmlReturnType, setXmlReturnType] = useState('0');
+
+  // Adjustment state — review-stage edits to T1/T2 before finalisation
+  const [adjT1,        setAdjT1]        = useState('');
+  const [adjT2,        setAdjT2]        = useState('');
+  const [adjT1Comment, setAdjT1Comment] = useState('');
+  const [adjT2Comment, setAdjT2Comment] = useState('');
+  const [showAdj,      setShowAdj]      = useState(null); // null | 'T1' | 'T2'
+  // Fix-at-source state — inline vat_code edit on a DrillTable row
+  const [fixSrc,       setFixSrc]       = useState(null); // journal id
+  const [fixSrcCode,   setFixSrcCode]   = useState('');
+  const [fixSrcSaving, setFixSrcSaving] = useState(false);
+  // Unfile state
+  const [unfileConfirm, setUnfileConfirm] = useState(false);
+  const [unfiling,      setUnfiling]      = useState(false);
 
   const vatPeriod  = vatPeriods.find(p => p.val === selVal) ?? vatPeriods[0];
   const filedReturn = filedMap[selVal] ?? null;
@@ -3549,6 +4036,30 @@ function VATReturns({ company, onNavigate }) {
   const t3 = Math.max(0, t1 - t2);
   const t4 = Math.max(0, t2 - t1);
 
+  // Review-stage adjustment values
+  const adjT1Num = parseFloat(adjT1) || 0;
+  const adjT2Num = parseFloat(adjT2) || 0;
+  const t1Final  = Math.round((t1 + adjT1Num) * 100) / 100;
+  const t2Final  = Math.round((t2 + adjT2Num) * 100) / 100;
+  const t3Final  = Math.max(0, t1Final - t2Final);
+  const t4Final  = Math.max(0, t2Final - t1Final);
+  const hasAdjT1 = adjT1Num !== 0;
+  const hasAdjT2 = adjT2Num !== 0;
+
+  // Inline fix-at-source: save changed vat_code to DB, optimistically update journals state
+  const saveFixAtSource = async () => {
+    if (!fixSrc || fixSrcSaving) return;
+    setFixSrcSaving(true);
+    const { error } = await supabase.from('journals')
+      .update({ vat_code: fixSrcCode || null })
+      .eq('id', fixSrc).eq('company_id', company.id);
+    if (!error) {
+      setJournals(js => js.map(j => j.id === fixSrc ? { ...j, vat_code: fixSrcCode || null } : j));
+      setFixSrc(null); setFixSrcCode('');
+    }
+    setFixSrcSaving(false);
+  };
+
   // Annotated drill rows — _acct and _vatSign pre-computed for DrillTable
   const t1DrillRows = salesJournals
     .filter(j => j.vat_code && j.vat_code !== 'NONE' && j.vat_code !== 'EXEMPT' && j.vat_code !== 'RCT' && j.vat_code !== 'RC_EU')
@@ -3577,23 +4088,71 @@ function VATReturns({ company, onNavigate }) {
   const hardBlockCount = pendingBills.length + unreconciledBt.length;
   const canFile = !isLocked && hardBlockCount === 0;
 
+  const xmlPreview = showXmlPanel
+    ? validateVAT3({ company, vatPeriod, t1, t2, e1, e2, es1, es2, pa1, returnType: xmlReturnType })
+    : null;
+
+  const downloadXML = () => {
+    if (!xmlPreview?.attrs) return;
+    const slug = (vatPeriod?.label || 'period').replace(/\//g, '-').replace(/\s/g, '-');
+    const blob = new Blob([buildVAT3Xml(xmlPreview.attrs)], { type: 'application/xml;charset=utf-8;' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `vat3-${slug}-TEST.xml`; a.click();
+    setTimeout(() => URL.revokeObjectURL(url), 1000);
+  };
+
   const markFiled = async () => {
     if (!company?.id || !vatPeriod || !canFile) return;
+    // Enforce: any adjustment must have a comment
+    if (hasAdjT1 && !adjT1Comment.trim()) { setMarkError('T1 adjustment requires a comment before filing.'); return; }
+    if (hasAdjT2 && !adjT2Comment.trim()) { setMarkError('T2 adjustment requires a comment before filing.'); return; }
     setMarkingFiled(true); setMarkError(null);
+    // Build per-box adjustment records for audit trail
+    const adjustments = [];
+    if (hasAdjT1) adjustments.push({ box: 'T1', computed: round2(t1), delta: round2(adjT1Num), final: t1Final, comment: adjT1Comment.trim(), ts: new Date().toISOString() });
+    if (hasAdjT2) adjustments.push({ box: 'T2', computed: round2(t2), delta: round2(adjT2Num), final: t2Final, comment: adjT2Comment.trim(), ts: new Date().toISOString() });
     const payload = {
       company_id: company.id, period_val: selVal,
       period_start: vatPeriod.start, period_end: vatPeriod.end,
-      t1: round2(t1), t2: round2(t2), t3: round2(t3), t4: round2(t4),
+      // Final (adjusted) figures are what gets filed and posted to VAT control account
+      t1: t1Final, t2: t2Final, t3: t3Final, t4: t4Final,
       e1: Number(e1)||0, e2: Number(e2)||0, es1: Number(es1)||0, es2: Number(es2)||0,
       pa1: round2(pa1),
-      figures: { t1, t2, t3, t4, e1, e2, es1, es2, pa1 },
+      figures: {
+        computed: { t1: round2(t1), t2: round2(t2), t3: round2(t3), t4: round2(t4), pa1: round2(pa1) },
+        adjustments,
+        final: { t1: t1Final, t2: t2Final, t3: t3Final, t4: t4Final },
+        e1: Number(e1)||0, e2: Number(e2)||0, es1: Number(es1)||0, es2: Number(es2)||0,
+      },
       status: 'filed', filed_at: new Date().toISOString(),
     };
     const { error } = await supabase.from('vat_returns')
       .upsert(payload, { onConflict: 'company_id,period_val' });
-    if (error) setMarkError(error.message);
-    else setFiledMap(prev => ({ ...prev, [selVal]: payload }));
+    if (error) {
+      captureError(error, { company_id: company.id, operation: 'vat-mark-filed', period: selVal });
+      setMarkError(error.message);
+    } else {
+      setFiledMap(prev => ({ ...prev, [selVal]: payload }));
+    }
     setMarkingFiled(false);
+  };
+
+  const unfile = async () => {
+    if (!company?.id || !filedReturn || unfiling) return;
+    setUnfiling(true);
+    const now = new Date().toISOString();
+    const { error } = await supabase.from('vat_returns')
+      .update({ status: 'draft', superseded_at: now })
+      .eq('company_id', company.id)
+      .eq('period_val', selVal);
+    if (error) {
+      setMarkError(error.message);
+    } else {
+      setFiledMap(prev => ({ ...prev, [selVal]: { ...filedReturn, status: 'draft', superseded_at: now } }));
+      setUnfileConfirm(false);
+    }
+    setUnfiling(false);
   };
 
   const exportCSV = () => {
@@ -3653,17 +4212,21 @@ function VATReturns({ company, onNavigate }) {
   );
 
   // Generic drill table: rows must have _acct and _vatSign. mode='vat' asserts VAT sum; mode='net' asserts net sum.
+  // When not locked, each row has an inline VAT code fix button (fix-at-source).
   const DrillTable = ({ title, rows, mode, expectedSum, emptyMsg }) => {
     const computedSum = rows.reduce((acc, j) => {
       const { vat, net } = calcJournalVAT(j.amount, j.vat_code);
       return acc + (j._vatSign ?? 1) * (mode === 'net' ? net : vat);
     }, 0);
     const ok = Math.abs(computedSum - (expectedSum ?? computedSum)) < 0.005;
+    const VAT_CODE_OPTS = ['STD23','RED13','RED9','ZERO','EXEMPT','NONE','RCT','RC_EU'];
     return (
       <div className="card" style={{ marginBottom: 12 }}>
         <div className="card-header">
           <span className="card-title">{title}</span>
-          <span style={{ fontSize: 10, color: "var(--text-faint)", fontFamily: "Source Code Pro,monospace" }}>{rows.length} journals · click box to close</span>
+          <span style={{ fontSize: 10, color: "var(--text-faint)", fontFamily: "Source Code Pro,monospace" }}>
+            {rows.length} journals · click box to close{!isLocked && ' · click VAT code to fix at source'}
+          </span>
         </div>
         {rows.length === 0 ? (
           <div style={{ padding: "14px 16px", fontSize: 12, color: "var(--text-muted)" }}>
@@ -3683,13 +4246,36 @@ function VATReturns({ company, onNavigate }) {
                 {rows.map(j => {
                   const { vat, net } = calcJournalVAT(j.amount, j.vat_code);
                   const sign = j._vatSign ?? 1;
+                  const isEditing = fixSrc === j.id;
                   return (
-                    <tr key={j.id}>
+                    <tr key={j.id} style={{ background: isEditing ? 'rgba(52,211,153,0.04)' : undefined }}>
                       <td style={{ fontFamily: "Source Code Pro,monospace", fontSize: 11 }}>{j.date}</td>
                       <td style={{ fontSize: 12, maxWidth: 240, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={j.description}>{j.description}</td>
                       <td style={{ fontSize: 11, fontFamily: "Source Code Pro,monospace" }}>{j._acct} · {nomName(j._acct)}</td>
-                      <td style={{ textAlign: "center" }}>
-                        <span style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.06em", padding: "2px 6px", borderRadius: 4, background: "var(--surface-2)", color: "var(--accent)" }}>{j.vat_code || '—'}</span>
+                      <td style={{ textAlign: "center", minWidth: isEditing ? 220 : undefined }}>
+                        {isEditing ? (
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+                            <select
+                              value={fixSrcCode}
+                              onChange={e => setFixSrcCode(e.target.value)}
+                              style={{ fontSize: 11, padding: '2px 4px', borderRadius: 4, border: '1px solid var(--accent)', background: 'var(--surface)', color: 'var(--text)' }}
+                            >
+                              {VAT_CODE_OPTS.map(c => <option key={c} value={c}>{c}</option>)}
+                            </select>
+                            <button className="btn btn-p btn-sm" style={{ fontSize: 10, padding: '2px 8px' }} onClick={saveFixAtSource} disabled={fixSrcSaving}>
+                              {fixSrcSaving ? '…' : 'Save'}
+                            </button>
+                            <button className="btn btn-s btn-sm" style={{ fontSize: 10, padding: '2px 6px' }} onClick={() => { setFixSrc(null); setFixSrcCode(''); }}>✕</button>
+                          </span>
+                        ) : (
+                          <span
+                            title={isLocked ? undefined : 'Click to fix VAT code at source'}
+                            onClick={isLocked ? undefined : () => { setFixSrc(j.id); setFixSrcCode(j.vat_code || 'STD23'); }}
+                            style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.06em", padding: "2px 6px", borderRadius: 4, background: "var(--surface-2)", color: "var(--accent)", cursor: isLocked ? 'default' : 'pointer', userSelect: 'none' }}
+                          >
+                            {j.vat_code || '—'}
+                          </span>
+                        )}
                       </td>
                       <td className="r" style={{ fontFamily: "Source Code Pro,monospace", fontSize: 11 }}>{fmtEUR(Math.abs(Number(j.amount)))}</td>
                       <td className="r" style={{ fontFamily: "Source Code Pro,monospace", fontSize: 11, color: sign < 0 ? "var(--warn)" : "var(--accent)" }}>{fmtEUR(sign * vat)}</td>
@@ -3823,6 +4409,14 @@ function VATReturns({ company, onNavigate }) {
             ))}
           </select>
           {!loading && <ExportDropdown onCSV={exportCSV} onPrint={() => window.print()} />}
+          {!loading && (
+            <button
+              onClick={() => setShowXmlPanel(v => !v)}
+              style={{ fontSize: 11, fontFamily: 'Source Code Pro,monospace', padding: '4px 10px', borderRadius: 6, border: '1px solid var(--border)', background: showXmlPanel ? 'rgba(184,134,11,0.12)' : 'var(--surface)', color: showXmlPanel ? 'var(--warn)' : 'var(--text-muted)', cursor: 'pointer', whiteSpace: 'nowrap' }}
+            >
+              VAT3 XML {showXmlPanel ? '▲' : '↓'}
+            </button>
+          )}
         </div>
       </div>
 
@@ -3862,9 +4456,39 @@ function VATReturns({ company, onNavigate }) {
 
       {/* Filed banner */}
       {isLocked && (
-        <div style={{ fontSize: 12, background: "var(--accent-dim)", border: "1px solid rgba(52,211,153,0.3)", borderRadius: "var(--radius-card)", padding: "10px 14px", marginBottom: 12, color: "var(--accent)" }}>
-          ✓ Period locked — filed {new Date(filedReturn.filed_at).toLocaleDateString("en-IE", { day: "numeric", month: "short", year: "numeric" })}. Figures are read-only.
-        </div>
+        <>
+          <div style={{ fontSize: 12, background: "var(--accent-dim)", border: "1px solid rgba(52,211,153,0.3)", borderRadius: "var(--radius-card)", padding: "10px 14px", marginBottom: 12, color: "var(--accent)", display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+            <span>✓ Period locked — filed {new Date(filedReturn.filed_at).toLocaleDateString("en-IE", { day: "numeric", month: "short", year: "numeric" })}. Figures are read-only.</span>
+            <button
+              onClick={() => setUnfileConfirm(true)}
+              style={{ fontSize: 11, fontFamily: 'Source Code Pro,monospace', padding: '3px 10px', borderRadius: 5, border: '1px solid rgba(52,211,153,0.35)', background: 'rgba(52,211,153,0.08)', color: 'var(--accent)', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0 }}
+            >
+              Unfile
+            </button>
+          </div>
+          {unfileConfirm && createPortal(
+            <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+              <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-card)', padding: '24px 28px', maxWidth: 460, width: '90%' }}>
+                <div style={{ fontWeight: 700, fontSize: 15, color: 'var(--text)', marginBottom: 10 }}>Unfile {vatPeriod?.label}?</div>
+                <div style={{ fontSize: 13, color: 'var(--text-muted)', lineHeight: 1.6, marginBottom: 18 }}>
+                  This unlocks {vatPeriod?.label}. Journals become editable and the filed snapshot is marked superseded — only do this if the return was not actually submitted to Revenue, or needs amendment.
+                </div>
+                <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+                  <button className="btn btn-s" onClick={() => setUnfileConfirm(false)}>Cancel</button>
+                  <button
+                    className="btn btn-p btn-sm"
+                    onClick={unfile}
+                    disabled={unfiling}
+                    style={{ background: 'var(--danger)', borderColor: 'var(--danger)' }}
+                  >
+                    {unfiling ? 'Unlocking…' : 'Unfile — Unlock Period'}
+                  </button>
+                </div>
+              </div>
+            </div>,
+            document.body
+          )}
+        </>
       )}
 
       {loading ? (
@@ -3872,23 +4496,162 @@ function VATReturns({ company, onNavigate }) {
       ) : (
         <>
           {/* T1 / T2 / T3 / T4 */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 12, marginBottom: 12 }}>
-            <VATBox label="T1" title="VAT on Sales (Output)" value={t1} color="var(--accent)" drill
-              sub={`${t1DrillRows.length} journals · click to drill down`} />
-            <VATBox label="T2" title="VAT on Purchases (Input)" value={t2} color="var(--warn)" drill
-              sub={`${t2DrillRows.length} journals · click to drill down`} />
-            <VATBox label="T3" title="Net VAT Payable" value={t3} color={t3 > 0 ? "var(--danger)" : "var(--text-faint)"}
+          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 12, marginBottom: 4 }}>
+            <VATBox label="T1" title="VAT on Sales (Output)" value={t1Final} color="var(--accent)" drill
+              sub={hasAdjT1
+                ? `Computed: ${fmtEUR(round2(t1))} · adj: ${adjT1Num >= 0 ? '+' : ''}${fmtEUR(adjT1Num)}`
+                : `${t1DrillRows.length} journals · click to drill down`} />
+            <VATBox label="T2" title="VAT on Purchases (Input)" value={t2Final} color="var(--warn)" drill
+              sub={hasAdjT2
+                ? `Computed: ${fmtEUR(round2(t2))} · adj: ${adjT2Num >= 0 ? '+' : ''}${fmtEUR(adjT2Num)}`
+                : `${t2DrillRows.length} journals · click to drill down`} />
+            <VATBox label="T3" title="Net VAT Payable" value={t3Final} color={t3Final > 0 ? "var(--danger)" : "var(--text-faint)"}
               drill={t1DrillRows.length > 0 || t2DrillRows.length > 0}
-              sub={t3 > 0 ? "Due to Revenue · click to drill" : "Nothing payable"} />
-            <VATBox label="T4" title="Net Repayable" value={t4} color={t4 > 0 ? "var(--accent)" : "var(--text-faint)"}
+              sub={t3Final > 0 ? "Due to Revenue · click to drill" : "Nothing payable"} />
+            <VATBox label="T4" title="Net Repayable" value={t4Final} color={t4Final > 0 ? "var(--accent)" : "var(--text-faint)"}
               drill={t1DrillRows.length > 0 || t2DrillRows.length > 0}
-              sub={t4 > 0 ? "Refund from Revenue · click to drill" : "No repayment"} />
+              sub={t4Final > 0 ? "Refund from Revenue · click to drill" : "No repayment"} />
           </div>
+
+          {/* Adjust T1 / T2 toggle buttons (review stage only) */}
+          {!isLocked && (
+            <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
+              <button
+                onClick={() => setShowAdj(v => v === 'T1' ? null : 'T1')}
+                style={{ fontSize: 10, fontFamily: 'Source Code Pro,monospace', padding: '3px 10px', borderRadius: 5, border: `1px solid ${hasAdjT1 ? 'var(--warn)' : 'var(--border)'}`, background: hasAdjT1 ? 'rgba(184,134,11,0.1)' : 'var(--surface)', color: hasAdjT1 ? 'var(--warn)' : 'var(--text-faint)', cursor: 'pointer' }}
+              >
+                {hasAdjT1 ? '✎ T1 adjusted' : '+ Adjust T1'} {showAdj === 'T1' ? '▲' : '▼'}
+              </button>
+              <button
+                onClick={() => setShowAdj(v => v === 'T2' ? null : 'T2')}
+                style={{ fontSize: 10, fontFamily: 'Source Code Pro,monospace', padding: '3px 10px', borderRadius: 5, border: `1px solid ${hasAdjT2 ? 'var(--warn)' : 'var(--border)'}`, background: hasAdjT2 ? 'rgba(184,134,11,0.1)' : 'var(--surface)', color: hasAdjT2 ? 'var(--warn)' : 'var(--text-faint)', cursor: 'pointer' }}
+              >
+                {hasAdjT2 ? '✎ T2 adjusted' : '+ Adjust T2'} {showAdj === 'T2' ? '▲' : '▼'}
+              </button>
+            </div>
+          )}
+
+          {/* Adjustment panels */}
+          {!isLocked && showAdj === 'T1' && (
+            <div style={{ marginBottom: 12, border: '1px solid rgba(184,134,11,0.35)', borderRadius: 'var(--radius-card)', padding: '14px 18px', background: 'rgba(184,134,11,0.04)' }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--warn)', marginBottom: 10 }}>T1 — Review Adjustment</div>
+              <div style={{ display: 'flex', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                <div>
+                  <div style={{ fontSize: 10, color: 'var(--text-faint)', marginBottom: 3, fontFamily: 'Source Code Pro,monospace', letterSpacing: '0.06em' }}>COMPUTED FROM FEED</div>
+                  <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--accent)', fontVariantNumeric: 'tabular-nums' }}>{fmtEUR(round2(t1))}</div>
+                </div>
+                <div style={{ paddingTop: 18, color: 'var(--text-faint)', fontSize: 14 }}>+</div>
+                <div style={{ minWidth: 120 }}>
+                  <div style={{ fontSize: 10, color: 'var(--text-faint)', marginBottom: 3, fontFamily: 'Source Code Pro,monospace', letterSpacing: '0.06em' }}>ADJUSTMENT (€)</div>
+                  <input
+                    type="number" step="0.01" placeholder="0.00"
+                    value={adjT1}
+                    onChange={e => setAdjT1(e.target.value)}
+                    style={{ width: '100%', fontSize: 16, fontWeight: 700, background: 'transparent', border: 'none', borderBottom: '2px solid var(--warn)', color: 'var(--text)', padding: '2px 0', outline: 'none', fontVariantNumeric: 'tabular-nums' }}
+                  />
+                  <div style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 2 }}>negative to reduce</div>
+                </div>
+                <div style={{ paddingTop: 18, color: 'var(--text-faint)', fontSize: 14 }}>=</div>
+                <div>
+                  <div style={{ fontSize: 10, color: 'var(--text-faint)', marginBottom: 3, fontFamily: 'Source Code Pro,monospace', letterSpacing: '0.06em' }}>FINAL T1</div>
+                  <div style={{ fontSize: 20, fontWeight: 700, color: hasAdjT1 ? 'var(--warn)' : 'var(--accent)', fontVariantNumeric: 'tabular-nums' }}>{fmtEUR(t1Final)}</div>
+                </div>
+              </div>
+              <div style={{ marginTop: 12 }}>
+                <div style={{ fontSize: 10, color: adjT1Comment.trim() ? 'var(--text-faint)' : 'var(--danger)', marginBottom: 4, fontFamily: 'Source Code Pro,monospace', letterSpacing: '0.06em' }}>
+                  REASON FOR ADJUSTMENT {!adjT1Comment.trim() && hasAdjT1 && '— required'}
+                </div>
+                <textarea
+                  placeholder="e.g. Invoice 123 had no VAT recorded; Revenue-agreed figure per correspondence dated…"
+                  value={adjT1Comment}
+                  onChange={e => setAdjT1Comment(e.target.value)}
+                  rows={2}
+                  style={{ width: '100%', fontSize: 12, background: 'var(--surface)', border: `1px solid ${adjT1Comment.trim() ? 'var(--border)' : 'rgba(239,68,68,0.4)'}`, borderRadius: 4, color: 'var(--text)', padding: '6px 8px', resize: 'vertical', outline: 'none', boxSizing: 'border-box' }}
+                />
+              </div>
+              {!adjT1Comment.trim() && hasAdjT1 && (
+                <div style={{ fontSize: 11, color: 'var(--danger)', marginTop: 4 }}>A comment is required before this adjustment can be filed.</div>
+              )}
+            </div>
+          )}
+          {!isLocked && showAdj === 'T2' && (
+            <div style={{ marginBottom: 12, border: '1px solid rgba(184,134,11,0.35)', borderRadius: 'var(--radius-card)', padding: '14px 18px', background: 'rgba(184,134,11,0.04)' }}>
+              <div style={{ fontSize: 12, fontWeight: 600, color: 'var(--warn)', marginBottom: 10 }}>T2 — Review Adjustment</div>
+              <div style={{ display: 'flex', gap: 18, alignItems: 'flex-start', flexWrap: 'wrap' }}>
+                <div>
+                  <div style={{ fontSize: 10, color: 'var(--text-faint)', marginBottom: 3, fontFamily: 'Source Code Pro,monospace', letterSpacing: '0.06em' }}>COMPUTED FROM FEED</div>
+                  <div style={{ fontSize: 20, fontWeight: 700, color: 'var(--warn)', fontVariantNumeric: 'tabular-nums' }}>{fmtEUR(round2(t2))}</div>
+                </div>
+                <div style={{ paddingTop: 18, color: 'var(--text-faint)', fontSize: 14 }}>+</div>
+                <div style={{ minWidth: 120 }}>
+                  <div style={{ fontSize: 10, color: 'var(--text-faint)', marginBottom: 3, fontFamily: 'Source Code Pro,monospace', letterSpacing: '0.06em' }}>ADJUSTMENT (€)</div>
+                  <input
+                    type="number" step="0.01" placeholder="0.00"
+                    value={adjT2}
+                    onChange={e => setAdjT2(e.target.value)}
+                    style={{ width: '100%', fontSize: 16, fontWeight: 700, background: 'transparent', border: 'none', borderBottom: '2px solid var(--warn)', color: 'var(--text)', padding: '2px 0', outline: 'none', fontVariantNumeric: 'tabular-nums' }}
+                  />
+                  <div style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 2 }}>negative to reduce</div>
+                </div>
+                <div style={{ paddingTop: 18, color: 'var(--text-faint)', fontSize: 14 }}>=</div>
+                <div>
+                  <div style={{ fontSize: 10, color: 'var(--text-faint)', marginBottom: 3, fontFamily: 'Source Code Pro,monospace', letterSpacing: '0.06em' }}>FINAL T2</div>
+                  <div style={{ fontSize: 20, fontWeight: 700, color: hasAdjT2 ? 'var(--warn)' : 'var(--warn)', fontVariantNumeric: 'tabular-nums' }}>{fmtEUR(t2Final)}</div>
+                </div>
+              </div>
+              <div style={{ marginTop: 12 }}>
+                <div style={{ fontSize: 10, color: adjT2Comment.trim() ? 'var(--text-faint)' : 'var(--danger)', marginBottom: 4, fontFamily: 'Source Code Pro,monospace', letterSpacing: '0.06em' }}>
+                  REASON FOR ADJUSTMENT {!adjT2Comment.trim() && hasAdjT2 && '— required'}
+                </div>
+                <textarea
+                  placeholder="e.g. Input credit note not yet posted; supplier invoice mismatch per…"
+                  value={adjT2Comment}
+                  onChange={e => setAdjT2Comment(e.target.value)}
+                  rows={2}
+                  style={{ width: '100%', fontSize: 12, background: 'var(--surface)', border: `1px solid ${adjT2Comment.trim() ? 'var(--border)' : 'rgba(239,68,68,0.4)'}`, borderRadius: 4, color: 'var(--text)', padding: '6px 8px', resize: 'vertical', outline: 'none', boxSizing: 'border-box' }}
+                />
+              </div>
+              {!adjT2Comment.trim() && hasAdjT2 && (
+                <div style={{ fontSize: 11, color: 'var(--danger)', marginTop: 4 }}>A comment is required before this adjustment can be filed.</div>
+              )}
+            </div>
+          )}
 
           {drillOpen === 'T1' && <DrillTable title="T1 — Output VAT Detail" rows={t1DrillRows} mode="vat" expectedSum={t1} />}
           {drillOpen === 'T2' && <DrillTable title="T2 — Input VAT Detail" rows={t2DrillRows} mode="vat" expectedSum={t2} />}
           {drillOpen === 'T3' && <T34DrillTable isT3 />}
           {drillOpen === 'T4' && <T34DrillTable isT3={false} />}
+
+          {/* Filed adjustment history — shown on locked periods that had adjustments */}
+          {isLocked && filedReturn?.figures?.adjustments?.length > 0 && (
+            <div style={{ marginBottom: 12, border: '1px solid rgba(184,134,11,0.3)', borderRadius: 'var(--radius-card)', padding: '14px 18px', background: 'rgba(184,134,11,0.04)' }}>
+              <div style={{ fontSize: 11, fontWeight: 600, color: 'var(--warn)', marginBottom: 10, fontFamily: 'Source Code Pro,monospace', letterSpacing: '0.04em' }}>REVIEW ADJUSTMENTS — AUDIT TRAIL</div>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                    <th style={{ textAlign: 'left', padding: '4px 8px', fontSize: 10, fontFamily: 'Source Code Pro,monospace', color: 'var(--text-faint)', letterSpacing: '0.06em' }}>BOX</th>
+                    <th style={{ textAlign: 'right', padding: '4px 8px', fontSize: 10, fontFamily: 'Source Code Pro,monospace', color: 'var(--text-faint)', letterSpacing: '0.06em' }}>COMPUTED</th>
+                    <th style={{ textAlign: 'right', padding: '4px 8px', fontSize: 10, fontFamily: 'Source Code Pro,monospace', color: 'var(--text-faint)', letterSpacing: '0.06em' }}>ADJUSTMENT</th>
+                    <th style={{ textAlign: 'right', padding: '4px 8px', fontSize: 10, fontFamily: 'Source Code Pro,monospace', color: 'var(--text-faint)', letterSpacing: '0.06em' }}>FILED</th>
+                    <th style={{ textAlign: 'left', padding: '4px 8px', fontSize: 10, fontFamily: 'Source Code Pro,monospace', color: 'var(--text-faint)', letterSpacing: '0.06em' }}>REASON</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filedReturn.figures.adjustments.map((a, i) => (
+                    <tr key={i} style={{ borderBottom: '1px solid var(--border)' }}>
+                      <td style={{ padding: '6px 8px', fontFamily: 'Source Code Pro,monospace', fontWeight: 700, color: 'var(--accent)' }}>{a.box}</td>
+                      <td style={{ padding: '6px 8px', fontFamily: 'Source Code Pro,monospace', textAlign: 'right', color: 'var(--text-muted)' }}>{fmtEUR(a.computed)}</td>
+                      <td style={{ padding: '6px 8px', fontFamily: 'Source Code Pro,monospace', textAlign: 'right', color: a.delta >= 0 ? 'var(--accent)' : 'var(--danger)' }}>
+                        {a.delta >= 0 ? '+' : ''}{fmtEUR(a.delta)}
+                      </td>
+                      <td style={{ padding: '6px 8px', fontFamily: 'Source Code Pro,monospace', textAlign: 'right', fontWeight: 700, color: 'var(--text)' }}>{fmtEUR(a.final)}</td>
+                      <td style={{ padding: '6px 8px', fontSize: 11, color: 'var(--text-muted)', maxWidth: 320 }}>{a.comment}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
 
           {/* PA1 — postponed accounting imports only */}
           <div style={{ marginBottom: 12 }}>
@@ -3984,7 +4747,7 @@ function VATReturns({ company, onNavigate }) {
 
           {/* Mark as Filed */}
           {!isLocked && (
-            <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 10, marginTop: 8 }}>
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 10, marginTop: 8, flexWrap: "wrap" }}>
               {hardBlockCount > 0 && (
                 <span style={{ fontSize: 11, color: "var(--danger)" }}>
                   ⚠ {hardBlockCount} item{hardBlockCount !== 1 ? 's' : ''} blocking — see banners above
@@ -3993,10 +4756,119 @@ function VATReturns({ company, onNavigate }) {
               {codeExceptions.length > 0 && (
                 <span style={{ fontSize: 11, color: "var(--warn)" }}>⚠ {codeExceptions.length} missing VAT code{codeExceptions.length !== 1 ? 's' : ''}</span>
               )}
+              {hasAdjT1 && !adjT1Comment.trim() && (
+                <span style={{ fontSize: 11, color: "var(--danger)" }}>⚠ T1 adjustment needs a comment</span>
+              )}
+              {hasAdjT2 && !adjT2Comment.trim() && (
+                <span style={{ fontSize: 11, color: "var(--danger)" }}>⚠ T2 adjustment needs a comment</span>
+              )}
               {markError && <span style={{ fontSize: 11, color: "var(--danger)" }}>{markError}</span>}
-              <button className="btn btn-p btn-sm" onClick={markFiled} disabled={markingFiled || !canFile}>
+              <button
+                className="btn btn-p btn-sm"
+                onClick={markFiled}
+                disabled={markingFiled || !canFile || (hasAdjT1 && !adjT1Comment.trim()) || (hasAdjT2 && !adjT2Comment.trim())}
+              >
                 {markingFiled ? "Saving…" : "Mark as Filed — Lock Period"}
               </button>
+            </div>
+          )}
+
+          {/* ── VAT3 XML Generator — Phase 1 test/preview ── */}
+          {showXmlPanel && (
+            <div style={{ marginTop: 20, border: '2px solid rgba(184,134,11,0.35)', borderRadius: 'var(--radius-card)', padding: '16px 20px', background: 'rgba(184,134,11,0.04)' }}>
+
+              {/* Banner */}
+              <div style={{ display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', marginBottom: 14 }}>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 700, color: 'var(--warn)' }}>⚠ VAT3 XML — TEST / PREVIEW ONLY</div>
+                  <div style={{ fontSize: 11, color: 'var(--text-muted)', marginTop: 3, lineHeight: 1.55 }}>
+                    Verify all figures before generating. Validate the output at <strong>softwaretest.ros.ie</strong> before any live use.
+                    Engine numbers not yet verified on real Revenue data — Phase 1 structural prototype.
+                  </div>
+                </div>
+                <button onClick={() => setShowXmlPanel(false)} style={{ background: 'none', border: 'none', color: 'var(--text-faint)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: '0 4px', marginLeft: 12 }}>✕</button>
+              </div>
+
+              {/* Return type + rounding note */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 16, marginBottom: 14, flexWrap: 'wrap', fontSize: 12 }}>
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                  <label style={{ color: 'var(--text-muted)' }}>Return type:</label>
+                  <select value={xmlReturnType} onChange={e => setXmlReturnType(e.target.value)}
+                    style={{ fontSize: 12, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 4, padding: '3px 8px', color: 'var(--text)' }}>
+                    <option value="0">0 — Original</option>
+                    <option value="1">1 — Supplementary</option>
+                    <option value="2">2 — Amended</option>
+                  </select>
+                </div>
+                <div style={{ fontSize: 11, color: 'var(--text-faint)' }}>
+                  ⓘ Whole-euro rounding uses <code style={{ fontFamily: 'Source Code Pro,monospace' }}>Math.round()</code> — confirm Revenue's convention (round vs truncate) if a cent diff appears in the table below
+                </div>
+              </div>
+
+              {/* Validation errors */}
+              {xmlPreview?.errors?.length > 0 && (
+                <div style={{ background: 'rgba(220,38,38,0.07)', border: '1px solid rgba(220,38,38,0.2)', borderRadius: 6, padding: '10px 14px', marginBottom: 12 }}>
+                  <div style={{ fontWeight: 700, color: 'var(--danger)', fontSize: 12, marginBottom: 6 }}>
+                    ⛔ Cannot generate — {xmlPreview.errors.length} error{xmlPreview.errors.length !== 1 ? 's' : ''} must be resolved:
+                  </div>
+                  {xmlPreview.errors.map((err, i) => <div key={i} style={{ fontSize: 12, color: 'var(--danger)', marginTop: 3 }}>• {err}</div>)}
+                </div>
+              )}
+
+              {/* Warnings */}
+              {xmlPreview?.warnings?.length > 0 && (
+                <div style={{ background: 'rgba(184,134,11,0.07)', border: '1px solid rgba(184,134,11,0.22)', borderRadius: 6, padding: '10px 14px', marginBottom: 12 }}>
+                  {xmlPreview.warnings.map((w, i) => <div key={i} style={{ fontSize: 12, color: 'var(--warn)', marginTop: i > 0 ? 4 : 0 }}>⚠ {w}</div>)}
+                </div>
+              )}
+
+              {/* Preview table */}
+              <div style={{ overflowX: 'auto', marginBottom: 14 }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                  <thead>
+                    <tr style={{ background: 'var(--surface-2)', borderBottom: '2px solid var(--border)' }}>
+                      {['XML Attribute', 'Source', 'Engine value (to cent)', 'Written to XML (whole €)', 'Notes'].map(h => (
+                        <th key={h} style={{ textAlign: 'left', padding: '6px 10px', fontSize: 10, fontWeight: 700, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.07em', whiteSpace: 'nowrap' }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {xmlPreview?.previewRows?.map((row, i) => (
+                      <tr key={row.attr} style={{ borderBottom: '1px solid var(--border2)', background: row.flag ? 'rgba(184,134,11,0.07)' : i % 2 === 0 ? 'transparent' : 'rgba(255,255,255,0.01)' }}>
+                        <td style={{ padding: '5px 10px', fontFamily: 'Source Code Pro,monospace', fontSize: 11, color: row.flag ? 'var(--warn)' : 'var(--accent)', whiteSpace: 'nowrap' }}>{row.attr}</td>
+                        <td style={{ padding: '5px 10px', color: 'var(--text-muted)', fontSize: 11 }}>{row.source}</td>
+                        <td style={{ padding: '5px 10px', fontFamily: 'Source Code Pro,monospace', fontSize: 11, color: 'var(--text)' }}>{row.rawVal}</td>
+                        <td style={{ padding: '5px 10px', fontFamily: 'Source Code Pro,monospace', fontSize: 12, fontWeight: 700, color: row.flag ? 'var(--warn)' : 'var(--teal)' }}>{row.xmlVal}</td>
+                        <td style={{ padding: '5px 10px', fontSize: 11, color: row.isGap ? 'var(--warn)' : 'var(--text-faint)', fontStyle: row.isManual ? 'italic' : 'normal' }}>{row.note}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+
+              {/* Download / Generate button */}
+              <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+                <button className="btn btn-p" onClick={downloadXML} disabled={!xmlPreview?.canGenerate}>
+                  ↓ Download VAT3-TEST.xml
+                </button>
+                {xmlPreview?.canGenerate && (
+                  <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+                    File: <code style={{ fontFamily: 'Source Code Pro,monospace' }}>vat3-{(vatPeriod?.label || '').replace(/\//g, '-').replace(/\s/g, '-')}-TEST.xml</code>
+                  </span>
+                )}
+                {!xmlPreview?.canGenerate && (
+                  <span style={{ fontSize: 11, color: 'var(--danger)' }}>Resolve errors above to enable download</span>
+                )}
+              </div>
+
+              {/* Phase 1 gap report footer */}
+              <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--border)', fontSize: 11, color: 'var(--text-faint)', lineHeight: 1.7 }}>
+                <strong style={{ color: 'var(--text-muted)' }}>Phase 1 gap report</strong> — fields the engine does NOT auto-compute:
+                {' '}<strong>postponedAccounting</strong> (hardcoded 0; no PA-import journal tracking in engine),
+                {' '}<strong>goodsto / goodsfrom / servicesto / servicesfrom</strong> (manually entered in the EU boxes above — not sourced from transactions),
+                {' '}<strong>type</strong> (original/supplementary/amended — no engine concept; user-selected above).
+                Revenue v1.5 schema version to be confirmed against softwaretest.ros.ie before treating output as valid.
+              </div>
             </div>
           )}
         </>
@@ -4715,13 +5587,161 @@ async function isPeriodLocked(companyId, date) {
   return { locked: false, filedAt: null };
 }
 
-// Evaluates checklist auto-conditions and updates the DB in-place.
+// ── GL reclassification — correcting-journal helpers (never edit-in-place) ────
+// True only for VAT codes that actually carry a rate (STD23/RED13/RED9) — these are the
+// only codes calcJournalVAT() backs a real VAT amount out of. ZERO/EXEMPT/NONE/RCT/RC_EU
+// don't move a VAT amount, so a filed period doesn't need special handling for them.
+function hasRealVatCode(code) {
+  return !!code && VAT_RATES[code] !== undefined;
+}
+
+// Computes the Dr/Cr accounts for a correcting journal that reclassifies ONE leg of an
+// original journal from its current nominal to `newCode`, leaving the other leg untouched.
+// `side` is which leg of the ORIGINAL journal is being corrected ('debit' | 'credit') —
+// i.e. which account the user clicked in the GL row.
+//
+// This is intentionally NOT always "Dr new / Cr old": which side the old nominal sits on
+// determines which side of the correction it must sit on too, so the correction nets out
+// against the original correctly for both expense entries (nominal on debit) and income
+// entries (nominal on credit). See supabase/add_journals_reclass_link.sql / GL Reclassify
+// for the full derivation.
+function computeReclassLegs(original, side, newCode) {
+  if (side === 'debit') {
+    return { debit_account: newCode, credit_account: original.debit_account };
+  }
+  return { debit_account: original.credit_account, credit_account: newCode };
+}
+
+// ── Fixed Asset depreciation engine (pure computation — no DB calls) ─────────
+
+function faNextYM(ym) {
+  const [y, m] = ym.split('-').map(Number);
+  return m === 12 ? `${y + 1}-01` : `${y}-${String(m + 1).padStart(2, '0')}`;
+}
+function faMonthsBetween(ymA, ymB) {
+  const [ya, ma] = ymA.split('-').map(Number);
+  const [yb, mb] = ymB.split('-').map(Number);
+  return (yb - ya) * 12 + (mb - ma);
+}
+
+// Monthly depreciation charge for `asset` in calendar month `ym` ('YYYY-MM').
+// Starts in purchase month; stops the month BEFORE disposal month.
+// Never depreciates below residual value.
+function faMonthlyDep(asset, ym) {
+  const pYM = asset.purchase_date.slice(0, 7);
+  const dYM = asset.disposal_date ? asset.disposal_date.slice(0, 7) : null;
+  if (ym < pYM) return 0;
+  if (dYM && ym >= dYM) return 0;
+  const cost     = Number(asset.cost);
+  const residual = Number(asset.residual_value || 0);
+  if (asset.method === 'straight_line') {
+    const months = Number(asset.useful_life_months);
+    if (!months) return 0;
+    const charge   = (cost - residual) / months;
+    const elapsed  = faMonthsBetween(pYM, ym); // months already charged before this one
+    const depSoFar = charge * elapsed;
+    return Math.min(charge, Math.max(0, cost - residual - depSoFar));
+  }
+  if (asset.method === 'reducing_balance') {
+    const rate = Number(asset.rate_percent);
+    if (!rate) return 0;
+    const elapsed    = faMonthsBetween(pYM, ym);
+    const mRate      = rate / 1200;                            // annual% → monthly fraction
+    const openingNBV = cost * Math.pow(1 - mRate, elapsed);
+    return Math.max(0, Math.min(openingNBV * mRate, openingNBV - residual));
+  }
+  return 0;
+}
+
+// Accumulated depreciation through the END of month `ym` (inclusive).
+function faAccumDep(asset, ym) {
+  const pYM = asset.purchase_date.slice(0, 7);
+  if (!ym || ym < pYM) return 0;
+  if (asset.method === 'straight_line') {
+    const months   = Number(asset.useful_life_months);
+    if (!months) return 0;
+    const cost     = Number(asset.cost);
+    const residual = Number(asset.residual_value || 0);
+    const charge   = (cost - residual) / months;
+    const dYM      = asset.disposal_date ? asset.disposal_date.slice(0, 7) : null;
+    // number of months actually charged: from pYM up to and including ym, capped by disposal
+    const cap = dYM && dYM <= ym ? faMonthsBetween(pYM, dYM) : faMonthsBetween(pYM, ym) + 1;
+    return Math.min(charge * Math.max(0, cap), cost - residual);
+  }
+  // Reducing balance: iterate (fast enough for ≤600 months)
+  let total = 0, cur = pYM;
+  const dYM = asset.disposal_date ? asset.disposal_date.slice(0, 7) : null;
+  while (cur <= ym) {
+    if (dYM && cur >= dYM) break;
+    total += faMonthlyDep(asset, cur);
+    cur = faNextYM(cur);
+  }
+  return total;
+}
+
+// Full monthly schedule for a single asset (used in drill-down).
+function faMonthlySchedule(asset, maxRows = 480) {
+  const rows = [];
+  let ym = asset.purchase_date.slice(0, 7);
+  const dYM = asset.disposal_date ? asset.disposal_date.slice(0, 7) : null;
+  let accum = 0;
+  while (rows.length < maxRows) {
+    const charge = faMonthlyDep(asset, ym);
+    if (charge < 0.001) break;
+    accum += charge;
+    rows.push({ ym, charge, accum, nbv: Number(asset.cost) - accum });
+    const next = faNextYM(ym);
+    if (dYM && next > dYM) break;
+    ym = next;
+  }
+  return rows;
+}
+
+// Wear & Tear schedule (Irish tax — 12.5% SL over 8 years; motor vehicles: cap €24k).
+// Display-only; no journals posted.
+function faWearAndTear(asset) {
+  const purchaseYear = Number(asset.purchase_date.slice(0, 4));
+  const cost    = Number(asset.cost);
+  const isMV    = asset.category === 'motor_vehicles';
+  const qualCost = isMV ? Math.min(cost, 24000) : cost;
+  const annual  = qualCost * 0.125;
+  const rows = [];
+  let twdv = qualCost;
+  for (let i = 0; i < 8; i++) {
+    const year = purchaseYear + i;
+    if (asset.disposal_date && year > Number(asset.disposal_date.slice(0, 4))) break;
+    twdv = Math.max(0, twdv - annual);
+    rows.push({
+      year,
+      annual,
+      twdv,
+      note: i === 0 && isMV && cost > 24000 ? `Qualifying cost capped at €24,000 (actual cost €${cost.toLocaleString('en-IE')})` : null,
+    });
+  }
+  return rows;
+}
+
+// ── Defaults per category ────────────────────────────────────────────────────
+const FA_CATEGORY_DEFAULTS = {
+  plant_machinery:   { asset_nominal: '1510', accum_dep_nominal: '1511' },
+  fixtures_fittings: { asset_nominal: '1520', accum_dep_nominal: '1521' },
+  computer_equipment:{ asset_nominal: '1530', accum_dep_nominal: '1531' },
+  motor_vehicles:    { asset_nominal: '1540', accum_dep_nominal: '1541' },
+  other:             { asset_nominal: '1500', accum_dep_nominal: '1501' },
+};
+const FA_CATEGORY_LABELS = {
+  plant_machinery: 'Plant & Machinery', fixtures_fittings: 'Fixtures & Fittings',
+  computer_equipment: 'Computer Equipment', motor_vehicles: 'Motor Vehicles', other: 'Other',
+};
+
+// ── Evaluates checklist auto-conditions and updates the DB in-place. ─────────
 // Returns an updated copy of `items` with checked/completed_by adjusted.
 async function runChecklistAutoEval(companyId, periodStart, periodEnd, items) {
   const condItems = items.filter(i => i.completion_condition && !i.pinned_manual);
   if (!condItems.length) return items;
 
-  const [payrollRes, vatRes, reconRes] = await Promise.all([
+  const period = periodStart.slice(0, 7); // 'YYYY-MM'
+  const [payrollRes, vatRes, reconRes, depRes, hasAssetsRes] = await Promise.all([
     supabase.from('journals').select('id', { count: 'exact', head: true })
       .eq('company_id', companyId)
       .in('debit_account', ['6000', '5300'])
@@ -4732,12 +5752,19 @@ async function runChecklistAutoEval(companyId, periodStart, periodEnd, items) {
     supabase.from('bank_transactions').select('id', { count: 'exact', head: true })
       .eq('company_id', companyId).eq('reconciled', true)
       .gte('date', periodStart).lte('date', periodEnd),
+    supabase.from('asset_depreciation_runs').select('id', { count: 'exact', head: true })
+      .eq('company_id', companyId).eq('period', period),
+    supabase.from('fixed_assets').select('id', { count: 'exact', head: true })
+      .eq('company_id', companyId).lte('purchase_date', periodEnd),
   ]);
 
+  // depreciation_posted = true when a run exists OR no assets exist (nothing to post)
+  const noAssets = (hasAssetsRes.count ?? 0) === 0;
   const condResults = {
     payroll_journals_posted: (payrollRes.count ?? 0) > 0,
     vat3_return_prepared:    (vatRes.count ?? 0) > 0,
     bank_recon_complete:     (reconRes.count ?? 0) > 0,
+    depreciation_posted:     noAssets || (depRes.count ?? 0) > 0,
   };
 
   const dbUpdates = [];
@@ -4804,6 +5831,15 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
   const [editLayout, setEditLayout]          = useState(false);
   const [dragId, setDragId]                  = useState(null);
   const [dragOverId, setDragOverId]          = useState(null);
+  const [kpiBalance30d,  setKpiBalance30d]   = useState(null);
+  const [kpiArTotal,     setKpiArTotal]      = useState(0);
+  const [kpiArCount,     setKpiArCount]      = useState(0);
+  const [kpiArOldest,    setKpiArOldest]     = useState(null);
+  const [kpiApTotal,     setKpiApTotal]      = useState(0);
+  const [kpiApCount30d,  setKpiApCount30d]   = useState(0);
+  const [chartData,      setChartData]       = useState([]);
+  const [chartMode,      setChartMode]       = useState('line');
+  const [chartHover,     setChartHover]      = useState(null);
 
   const { healthy: bookHealthy } = useHealthy(companyId);
 
@@ -4826,16 +5862,17 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
     (async () => {
       setLoading(true);
       const today = new Date().toISOString().slice(0, 10);
+      const dayBeforePeriodStart = new Date(new Date(periodStart).getTime() - 86400000).toISOString().slice(0, 10);
 
-      const [btLatest, btRecent, overdueRes, expRes, chkRes, jnlRes] = await Promise.all([
-        // Latest balance as of the end of the selected period
-        supabase.from('bank_transactions')
-          .select('date, balance, created_at')
-          .eq('company_id', companyId)
-          .lte('date', periodEnd)
-          .order('date', { ascending: false })
-          .order('created_at', { ascending: false })
-          .limit(1),
+      const [periodEndBal, openingForPeriod, btRecent, overdueRes, expRes, chkRes, jnlRes] = await Promise.all([
+        // Bank nominal balance as at the end of the selected period — inception-unbounded, same
+        // calc the Balance Sheet and Cash Flow use. NOT the raw bank_transactions.balance column:
+        // that's only populated for CSV imports with a statement balance column: Yapily-fed rows
+        // always leave it null, which is why this tile showed €0.
+        fetchNominalBalanceAsOf(companyId, BANK_NOMINAL_CODE, periodEnd).catch(() => null),
+        // Same, but as at the day before the period starts — the anchor for the sparkline's
+        // running balance below.
+        fetchNominalBalanceAsOf(companyId, BANK_NOMINAL_CODE, dayBeforePeriodStart).catch(() => 0),
         // Sparkline: rows within the selected month, chronological
         supabase.from('bank_transactions')
           .select('date, amount, balance, nominal_account')
@@ -4868,18 +5905,14 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
           .lte('date', periodEnd),
       ]);
 
-      console.log('[Overview] btLatest result:', btLatest.data, 'error:', btLatest.error);
-      if (btLatest.data && btLatest.data.length > 0) {
-        const bal = Number(btLatest.data[0].balance);
-        console.log('[Overview] currentBalance set to:', bal);
-        setCurrentBalance(isNaN(bal) ? null : bal);
-      } else {
-        console.log('[Overview] no bank_transactions rows for company_id:', companyId, 'periodEnd:', periodEnd);
-      }
+      setCurrentBalance(periodEndBal);
 
-      console.log('[Overview] btRecent rows:', btRecent.data?.length, 'error:', btRecent.error);
       if (btRecent.data && btRecent.data.length > 0) {
-        setBtSparkline([...btRecent.data].reverse());
+        // Running balance, oldest → newest: opening anchor + each transaction's amount.
+        let running = openingForPeriod;
+        const asc = [...btRecent.data].reverse();
+        const withRunningBalance = asc.map(r => { running += Number(r.amount); return { ...r, balance: running }; });
+        setBtSparkline(withRunningBalance);
         setUncategorised(btRecent.data.filter(r => r.nominal_account === '6600').length);
       } else {
         setBtSparkline([]);
@@ -4938,6 +5971,78 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
       setReconcStats({ suggested: suggested || 0, balance, autoCount, avgConf });
     }).catch(() => {});
   }, [companyId, selPeriod]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // 90-day rolling chart data (or full period for historical view). Each point's balance is a
+  // running total from the opening anchor — not the raw bank_transactions.balance column, which
+  // is only populated for CSV imports and left null for Yapily-fed rows.
+  useEffect(() => {
+    if (!companyId) return;
+    const now    = new Date();
+    const todayS = now.toISOString().slice(0, 10);
+    const start  = isHistorical
+      ? periodStart
+      : new Date(Date.now() - 89 * 86400000).toISOString().slice(0, 10);
+    const end    = isHistorical ? periodEnd : todayS;
+    const dayBeforeStart = new Date(new Date(start).getTime() - 86400000).toISOString().slice(0, 10);
+    (async () => {
+      const [{ data }, openingBal] = await Promise.all([
+        supabase.from('bank_transactions')
+          .select('date, amount, balance')
+          .eq('company_id', companyId)
+          .gte('date', start)
+          .lte('date', end)
+          .order('date', { ascending: false })
+          .limit(500),
+        fetchNominalBalanceAsOf(companyId, BANK_NOMINAL_CODE, dayBeforeStart).catch(() => 0),
+      ]);
+      if (!data) return;
+      let running = openingBal;
+      const withRunningBalance = [...data].reverse().map(r => { running += Number(r.amount); return { ...r, balance: running }; });
+      setChartData(withRunningBalance);
+    })();
+  }, [companyId, selPeriod]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // KPI strip: 30d-ago balance, total AR outstanding, AP bills due.
+  // Debtors/creditors totals now use the same inception-unbounded nominal-balance calc as the
+  // Balance Sheet — not a sum of open invoices/bills — so they reconcile to the BS exactly, even
+  // if the subsidiary ledger and the control account have ever drifted apart. Item counts and
+  // "oldest" still come from the invoice/bill tables — that's genuinely different information
+  // (which items are open), not a balance.
+  useEffect(() => {
+    if (!companyId) return;
+    const today  = new Date().toISOString().slice(0, 10);
+    const d30ago = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
+    const d30fwd = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+    Promise.all([
+      fetchNominalBalanceAsOf(companyId, BANK_NOMINAL_CODE, d30ago).catch(() => null),
+      fetchNominalBalanceAsOf(companyId, '1100', today).catch(() => 0), // Debtors — asset, debit-normal
+      fetchNominalBalanceAsOf(companyId, '2000', today).catch(() => 0), // Creditors — liability, credit-normal (negate below)
+      supabase.from('invoices')
+        .select('amount, due_date')
+        .eq('company_id', companyId)
+        .in('status', ['sent', 'overdue'])
+        .order('due_date'),
+      supabase.from('ap_invoices')
+        .select('id')
+        .eq('company_id', companyId)
+        .in('status', ['pending', 'approved', 'part_paid'])
+        .lte('due_date', d30fwd),
+    ]).then(([bal30, debtorsBal, creditorsBal, arRes, apCountRes]) => {
+      setKpiBalance30d(bal30);
+      setKpiArTotal(debtorsBal);
+      setKpiApTotal(-creditorsBal);
+      if (arRes.data) {
+        setKpiArCount(arRes.data.length);
+        if (arRes.data.length > 0) {
+          const days = Math.max(0, Math.floor((Date.now() - new Date(arRes.data[0].due_date).getTime()) / 86400000));
+          setKpiArOldest(days);
+        } else {
+          setKpiArOldest(null);
+        }
+      }
+      setKpiApCount30d((apCountRes.data || []).length);
+    }).catch(() => {});
+  }, [companyId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!companyId) return;
@@ -5231,18 +6336,97 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
     );
   };
 
-  // Sparkline SVG
-  const SparkLine = () => {
-    if (btSparkline.length < 2) return <div style={{ height: 50, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "var(--dim)" }}>No data</div>;
-    const vals = btSparkline.map(r => Number(r.balance || 0));
-    const lo = Math.min(...vals), hi = Math.max(...vals), rng = hi - lo || 1;
-    const W = 200, H = 44;
-    const pts = vals.map((v, i) => `${(i / (vals.length - 1)) * W},${H - ((v - lo) / rng) * (H - 8) - 4}`).join(' ');
-    const up  = vals[vals.length - 1] >= vals[0];
+  // 90-day area/line chart with hover tooltip and monthly bars toggle
+  const CashPositionChart = ({ data, mode, hover, setHover }) => {
+    if (data.length === 0) return <div style={{ height: 120, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 11, color: "var(--dim)" }}>No data</div>;
+    // Deduplicate to one row per date (latest balance wins)
+    const byDate = {};
+    data.forEach(r => { byDate[r.date] = r; });
+    const daily = Object.values(byDate).sort((a, b) => a.date.localeCompare(b.date));
+    const vals  = daily.map(r => Number(r.balance || 0));
+    const W = 400, H = 120, Pt = 8, Pb = 20, Pl = 2, Pr = 2;
+    const cW = W - Pl - Pr, cH = H - Pt - Pb;
+    const lo  = Math.min(0, Math.min(...vals));
+    const hi  = Math.max(...vals);
+    const rng = hi - lo || 1;
+    const cx  = (i) => Pl + (i / Math.max(daily.length - 1, 1)) * cW;
+    const cy  = (v) => Pt + cH - ((v - lo) / rng) * cH;
+    const pts = daily.map((_, i) => `${cx(i)},${cy(vals[i])}`).join(' ');
+    const baseline = cy(0);
+    const areaD   = `M ${cx(0)} ${baseline} L ${cx(0)} ${cy(vals[0])} ` +
+      daily.slice(1).map((_, i) => `L ${cx(i + 1)} ${cy(vals[i + 1])}`).join(' ') +
+      ` L ${cx(daily.length - 1)} ${baseline} Z`;
+    const isUp    = vals[vals.length - 1] >= vals[0];
+    const lineCol = isUp ? "var(--accent)" : "var(--danger)";
+    // Monthly in/out for bars mode
+    const monthBars = (() => {
+      const m = {};
+      data.forEach(r => {
+        const mo = r.date.slice(0, 7);
+        if (!m[mo]) m[mo] = { _in: 0, out: 0 };
+        const amt = Number(r.amount || 0);
+        if (amt > 0) m[mo]._in += amt; else m[mo].out += Math.abs(amt);
+      });
+      return Object.entries(m).sort(([a], [b]) => a.localeCompare(b)).map(([mo, v]) => ({ mo, ...v }));
+    })();
+    if (mode === 'bars') {
+      const maxV = Math.max(...monthBars.map(m => Math.max(m._in, m.out)), 1);
+      const bw   = monthBars.length > 0 ? Math.max(4, (cW / monthBars.length) * 0.38) : 10;
+      return (
+        <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display: "block" }}>
+          {monthBars.map((m, i) => {
+            const bx   = Pl + (i / monthBars.length) * cW + (cW / monthBars.length) * 0.12;
+            const inH  = (m._in  / maxV) * cH;
+            const outH = (m.out  / maxV) * cH;
+            return (
+              <g key={m.mo}>
+                <rect x={bx}       y={Pt + cH - inH}  width={bw} height={Math.max(inH, 1)}  fill="var(--accent)"  opacity="0.65" rx="2" />
+                <rect x={bx + bw + 2} y={Pt + cH - outH} width={bw} height={Math.max(outH, 1)} fill="var(--danger)"  opacity="0.55" rx="2" />
+                <text x={bx + bw} y={H - 4} textAnchor="middle" fontSize="7" fill="var(--text-faint)">{m.mo.slice(5)}</text>
+              </g>
+            );
+          })}
+        </svg>
+      );
+    }
     return (
-      <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display: "block" }}>
-        <polyline points={pts} fill="none" stroke={up ? "var(--accent)" : "var(--danger)"} strokeWidth="1.5" strokeLinejoin="round" />
-      </svg>
+      <div style={{ position: "relative" }}>
+        <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display: "block" }}
+          onMouseMove={e => {
+            const rect = e.currentTarget.getBoundingClientRect();
+            const px   = ((e.clientX - rect.left) / rect.width) * W;
+            const idx  = Math.max(0, Math.min(daily.length - 1, Math.round(((px - Pl) / cW) * (daily.length - 1))));
+            setHover({ idx, svgX: px, svgY: cy(vals[idx]), date: daily[idx].date, balance: vals[idx] });
+          }}
+          onMouseLeave={() => setHover(null)}
+        >
+          <defs>
+            <linearGradient id="cpGrad" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%"   stopColor={lineCol} stopOpacity="0.22" />
+              <stop offset="100%" stopColor={lineCol} stopOpacity="0.02" />
+            </linearGradient>
+          </defs>
+          <path d={areaD} fill="url(#cpGrad)" />
+          <polyline points={pts} fill="none" stroke={lineCol} strokeWidth="1.5" strokeLinejoin="round" />
+          {hover && (
+            <g>
+              <line x1={hover.svgX} y1={Pt} x2={hover.svgX} y2={H - Pb} stroke="var(--text-faint)" strokeWidth="1" strokeDasharray="3 2" />
+              <circle cx={hover.svgX} cy={hover.svgY} r="3" fill={lineCol} />
+            </g>
+          )}
+        </svg>
+        {hover && (
+          <div style={{
+            position: "absolute", top: 2, left: `${Math.min((hover.svgX / W) * 100, 70)}%`,
+            transform: "translateX(-50%)", background: "var(--surface-2)", border: "1px solid var(--border)",
+            borderRadius: 6, padding: "3px 8px", fontSize: 10, color: "var(--text)",
+            pointerEvents: "none", whiteSpace: "nowrap",
+          }}>
+            <span style={{ color: "var(--text-faint)", marginRight: 4 }}>{hover.date}</span>
+            <span style={{ fontWeight: 600 }}>{fmt(hover.balance)}</span>
+          </div>
+        )}
+      </div>
     );
   };
 
@@ -5293,29 +6477,135 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
         <GettingStartedCard company={company} onOpenStep={onOpenWizard} onDismiss={onDismissGetStarted} />
       )}
 
-      {/* ── AI Summary Banner ── */}
-      <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", padding: "14px 18px", marginBottom: 16, display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
-        <span style={{ fontSize: 20, flexShrink: 0 }}>✨</span>
-        <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", flex: 1, minWidth: 180, lineHeight: 1.4 }}>
-          {loading ? "Analysing your finances…" : aiInsights[0] || "Financial data loaded — insights ready"}
-        </span>
-        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
-          {[
-            { text: `${btSparkline.length} transactions`, ok: true },
-            { text: runwayLabel, ok: cashRunway ? Number(cashRunway) >= 3 : null },
-            { text: soonestDays !== null ? `Deadline in ${soonestDays}d` : 'No deadlines', ok: soonestDays === null || soonestDays > 14 },
-            { text: overdueDeadlines > 0 ? `${overdueDeadlines} overdue` : 'On track', ok: overdueDeadlines === 0 },
-            ...(reconcStats.autoCount > 0 ? [{ text: `${reconcStats.autoCount} reconciled`, ok: true }] : []),
-          ].map((pill, i) => (
-            <span key={i} style={{
-              background: pill.ok === false ? "var(--danger-dim)" : pill.ok === true ? "var(--accent-dim)" : "var(--surface-2)",
-              color: pill.ok === false ? "var(--danger)" : pill.ok === true ? "var(--accent)" : "var(--text-muted)",
-              border: `1px solid ${pill.ok === false ? "rgba(248,113,113,0.25)" : pill.ok === true ? "rgba(52,211,153,0.25)" : "var(--border)"}`,
-              borderRadius: "var(--radius-pill)", padding: "3px 10px", fontSize: 11, fontWeight: 500, whiteSpace: "nowrap",
-            }}>{pill.text}</span>
-          ))}
+      {/* ── KPI Strip ── */}
+      {!loading && (
+        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 14 }}>
+          {/* CASH */}
+          <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", padding: "12px 14px" }}>
+            <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--text-faint)", marginBottom: 6 }}>Cash</div>
+            {currentBalance === null ? (
+              <div style={{ fontSize: 20, fontWeight: 700, color: "var(--text-muted)" }}>—</div>
+            ) : (
+              <>
+                <div style={{ display: "flex", alignItems: "center", gap: 6, marginBottom: 4 }}>
+                  <div style={{ fontSize: 18, fontWeight: 700, color: currentBalance >= 0 ? "var(--text)" : "var(--danger)", fontVariantNumeric: "tabular-nums", letterSpacing: "-0.02em" }}>
+                    {fmt(currentBalance)}
+                  </div>
+                  {kpiBalance30d !== null && (() => {
+                    const delta = currentBalance - kpiBalance30d;
+                    return (
+                      <span style={{ fontSize: 10, fontWeight: 600, background: delta >= 0 ? "var(--accent-dim)" : "var(--danger-dim)", color: delta >= 0 ? "var(--accent)" : "var(--danger)", border: `1px solid ${delta >= 0 ? "rgba(52,211,153,0.25)" : "rgba(248,113,113,0.25)"}`, borderRadius: "var(--radius-pill)", padding: "1px 6px", whiteSpace: "nowrap" }}>
+                        {delta >= 0 ? "↑" : "↓"} {fmt(Math.abs(delta))}
+                      </span>
+                    );
+                  })()}
+                </div>
+                {btSparkline.length >= 2 && (() => {
+                  const pts14 = btSparkline.slice(-14);
+                  const v14   = pts14.map(r => Number(r.balance || 0));
+                  const lo14  = Math.min(...v14), hi14 = Math.max(...v14), rng14 = hi14 - lo14 || 1;
+                  const W = 120, H = 22;
+                  const miniPts = v14.map((v, i) => `${(i / (v14.length - 1)) * W},${H - ((v - lo14) / rng14) * (H - 4) - 2}`).join(' ');
+                  const miniUp  = v14[v14.length - 1] >= v14[0];
+                  return (
+                    <svg width="100%" height={H} viewBox={`0 0 ${W} ${H}`} preserveAspectRatio="none" style={{ display: "block" }}>
+                      <polyline points={miniPts} fill="none" stroke={miniUp ? "var(--accent)" : "var(--danger)"} strokeWidth="1.5" strokeLinejoin="round" />
+                    </svg>
+                  );
+                })()}
+                <div style={{ fontSize: 9, color: "var(--text-faint)", marginTop: 2 }}>vs 30d ago</div>
+              </>
+            )}
+          </div>
+
+          {/* OWED TO YOU */}
+          <div onClick={() => onNavigate?.("invoices")} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", padding: "12px 14px", cursor: onNavigate ? "pointer" : "default" }}>
+            <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--text-faint)", marginBottom: 6 }}>Owed To You</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: kpiArTotal > 0 ? "var(--warn)" : "var(--text)", fontVariantNumeric: "tabular-nums", letterSpacing: "-0.02em" }}>
+              {fmt(kpiArTotal)}
+            </div>
+            <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 4 }}>
+              {kpiArCount === 0 ? "All paid up" : `${kpiArCount} invoice${kpiArCount !== 1 ? "s" : ""}${kpiArOldest !== null ? ` · oldest ${kpiArOldest}d` : ""}`}
+            </div>
+          </div>
+
+          {/* YOU OWE */}
+          <div onClick={() => onNavigate?.("ap-invoices")} style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", padding: "12px 14px", cursor: onNavigate ? "pointer" : "default" }}>
+            <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--text-faint)", marginBottom: 6 }}>You Owe</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: kpiApTotal > 0 ? "var(--warn)" : "var(--text)", fontVariantNumeric: "tabular-nums", letterSpacing: "-0.02em" }}>
+              {fmt(kpiApTotal)}
+            </div>
+            <div style={{ fontSize: 10, color: "var(--text-muted)", marginTop: 4 }}>
+              {kpiApCount30d === 0 ? "Nothing due soon" : `${kpiApCount30d} bill${kpiApCount30d !== 1 ? "s" : ""} due in 30d`}
+            </div>
+          </div>
+
+          {/* NEXT DEADLINE */}
+          {(() => {
+            const nd   = next3.find(d => daysDiff(d.due) >= 0);
+            const dDays = nd ? daysDiff(nd.due) : null;
+            const urgent = dDays !== null && dDays < 2;
+            const warn   = dDays !== null && dDays < 7;
+            const col   = urgent ? "var(--danger)" : warn ? "var(--warn)" : "var(--text)";
+            const bg    = urgent ? "rgba(248,113,113,0.07)" : warn ? "var(--warn-dim)" : "var(--surface)";
+            const bdr   = urgent ? "rgba(248,113,113,0.3)"  : warn ? "rgba(251,191,36,0.3)"  : "var(--border)";
+            const dest  = nd?.type === "VAT3" ? "vat-returns" : "compliance";
+            return (
+              <div onClick={() => nd && onNavigate?.(dest)} style={{ background: bg, border: `1px solid ${bdr}`, borderRadius: "var(--radius-card)", padding: "12px 14px", cursor: nd && onNavigate ? "pointer" : "default" }}>
+                <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--text-faint)", marginBottom: 6 }}>Next Deadline</div>
+                {nd ? (
+                  <>
+                    <div style={{ fontSize: 14, fontWeight: 700, color: col, lineHeight: 1.3 }}>
+                      {nd.type} · {nd.due.toLocaleDateString("en-IE", { day: "numeric", month: "short" })}
+                    </div>
+                    <div style={{ fontSize: 10, color: col, marginTop: 4, fontWeight: urgent || warn ? 600 : 400 }}>
+                      {dDays === 0 ? "Due today" : `${dDays}d away`}
+                    </div>
+                  </>
+                ) : (
+                  <div style={{ fontSize: 14, fontWeight: 700, color: "var(--text-muted)" }}>None upcoming</div>
+                )}
+              </div>
+            );
+          })()}
         </div>
-      </div>
+      )}
+
+      {/* ── AI Summary Banner ── */}
+      {currentBalance === null && !loading ? (
+        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", padding: "14px 18px", marginBottom: 16, display: "flex", alignItems: "center", gap: 14 }}>
+          <span style={{ fontSize: 20, flexShrink: 0 }}>✨</span>
+          <span style={{ fontSize: 13, color: "var(--text-muted)", lineHeight: 1.4 }}>
+            Import your first bank statement to unlock financial insights.{" "}
+            <button onClick={() => onNavigate?.("bank-import")} style={{ background: "none", border: "none", color: "var(--accent)", fontSize: 13, cursor: "pointer", padding: 0, fontWeight: 600 }}>
+              Go to Bank Import →
+            </button>
+          </span>
+        </div>
+      ) : (
+        <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", padding: "14px 18px", marginBottom: 16, display: "flex", alignItems: "center", gap: 14, flexWrap: "wrap" }}>
+          <span style={{ fontSize: 20, flexShrink: 0 }}>✨</span>
+          <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text)", flex: 1, minWidth: 180, lineHeight: 1.4 }}>
+            {loading ? "Analysing your finances…" : aiInsights[0] || "Financial data loaded — insights ready"}
+          </span>
+          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+            {[
+              { text: `${btSparkline.length} transactions`, ok: true },
+              { text: runwayLabel, ok: cashRunway ? Number(cashRunway) >= 3 : null },
+              { text: soonestDays !== null ? `Deadline in ${soonestDays}d` : "No deadlines", ok: soonestDays === null || soonestDays > 14 },
+              { text: overdueDeadlines > 0 ? `${overdueDeadlines} overdue` : "On track", ok: overdueDeadlines === 0 },
+              ...(reconcStats.autoCount > 0 ? [{ text: `${reconcStats.autoCount} reconciled`, ok: true }] : []),
+            ].map((pill, i) => (
+              <span key={i} style={{
+                background: pill.ok === false ? "var(--danger-dim)" : pill.ok === true ? "var(--accent-dim)" : "var(--surface-2)",
+                color: pill.ok === false ? "var(--danger)" : pill.ok === true ? "var(--accent)" : "var(--text-muted)",
+                border: `1px solid ${pill.ok === false ? "rgba(248,113,113,0.25)" : pill.ok === true ? "rgba(52,211,153,0.25)" : "var(--border)"}`,
+                borderRadius: "var(--radius-pill)", padding: "3px 10px", fontSize: 11, fontWeight: 500, whiteSpace: "nowrap",
+              }}>{pill.text}</span>
+            ))}
+          </div>
+        </div>
+      )}
 
       {/* ── Layout edit controls ── */}
       {editLayout ? (
@@ -5386,7 +6676,14 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
               <div className="card-header">
                 <span className="card-title">Cash Position</span>
                 {!loading && currentBalance !== null && (
-                  <span className="card-count">AIB · latest</span>
+                  <div style={{ display: "flex", gap: 6, alignItems: "center" }}>
+                    <button onClick={() => { setChartMode("line"); setChartHover(null); }} style={{ fontSize: 10, padding: "2px 8px", borderRadius: "var(--radius-pill)", border: `1px solid ${chartMode === "line" ? "rgba(52,211,153,0.4)" : "var(--border)"}`, background: chartMode === "line" ? "var(--accent-dim)" : "transparent", color: chartMode === "line" ? "var(--accent)" : "var(--text-muted)", cursor: "pointer" }}>
+                      Line
+                    </button>
+                    <button onClick={() => { setChartMode("bars"); setChartHover(null); }} style={{ fontSize: 10, padding: "2px 8px", borderRadius: "var(--radius-pill)", border: `1px solid ${chartMode === "bars" ? "rgba(52,211,153,0.4)" : "var(--border)"}`, background: chartMode === "bars" ? "var(--accent-dim)" : "transparent", color: chartMode === "bars" ? "var(--accent)" : "var(--text-muted)", cursor: "pointer" }}>
+                      Monthly
+                    </button>
+                  </div>
                 )}
               </div>
               <div style={{ padding: "16px 18px" }}>
@@ -5394,36 +6691,45 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
                   <div style={{ padding: "20px 0", textAlign: "center", color: "var(--text-faint)", fontSize: 12 }}>Loading…</div>
                 ) : currentBalance === null ? (
                   <div style={{ padding: "12px 0", fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6 }}>
-                    No bank data yet — import a CSV in Bank Import
+                    No bank data yet —{" "}
+                    <button onClick={() => onNavigate?.("bank-import")} style={{ background: "none", border: "none", color: "var(--accent)", fontSize: 12, cursor: "pointer", padding: 0 }}>
+                      import a CSV →
+                    </button>
                   </div>
                 ) : (
                   <>
                     <div style={{ display: "flex", alignItems: "baseline", gap: 10, marginBottom: 2 }}>
                       <div style={{ fontSize: 32, fontWeight: 700, color: currentBalance >= 0 ? "var(--text)" : "var(--danger)", lineHeight: 1, fontVariantNumeric: "tabular-nums", letterSpacing: "-0.02em" }}>
-                        {fmtEUR(currentBalance)}
+                        {fmt(currentBalance)}
                       </div>
-                      {btSparkline.length >= 2 && (() => {
-                        const diff = Number(btSparkline[btSparkline.length - 1].balance || 0) - Number(btSparkline[0].balance || 0);
+                      {kpiBalance30d !== null && (() => {
+                        const delta = currentBalance - kpiBalance30d;
                         return (
-                          <span style={{ fontSize: 11, fontWeight: 600, background: diff >= 0 ? "var(--accent-dim)" : "var(--danger-dim)", color: diff >= 0 ? "var(--accent)" : "var(--danger)", border: `1px solid ${diff >= 0 ? "rgba(52,211,153,0.25)" : "rgba(248,113,113,0.25)"}`, borderRadius: "var(--radius-pill)", padding: "2px 8px" }}>
-                            {diff >= 0 ? '↑' : '↓'} {fmtEUR(Math.abs(diff))}
+                          <span style={{ fontSize: 11, fontWeight: 600, background: delta >= 0 ? "var(--accent-dim)" : "var(--danger-dim)", color: delta >= 0 ? "var(--accent)" : "var(--danger)", border: `1px solid ${delta >= 0 ? "rgba(52,211,153,0.25)" : "rgba(248,113,113,0.25)"}`, borderRadius: "var(--radius-pill)", padding: "2px 8px" }}>
+                            {delta >= 0 ? "↑" : "↓"} {fmt(Math.abs(delta))}
                           </span>
                         );
                       })()}
                     </div>
-                    <div style={{ fontSize: 10, color: "var(--text-faint)", marginBottom: 12 }}>Bank balance (AIB) · {selPeriodLabel}</div>
-                    <div style={{ margin: "4px 0" }}><SparkLine /></div>
-                    <div style={{ display: "flex", justifyContent: "space-between", marginTop: 4, fontSize: 10, color: "var(--text-faint)" }}>
-                      <span>{selPeriodLabel.split(' ')[0]} 1</span>
-                      <span>Today</span>
+                    <div style={{ fontSize: 10, color: "var(--text-faint)", marginBottom: 10 }}>
+                      {isHistorical ? selPeriodLabel : "90-day rolling · latest balance"}
                     </div>
+                    <div style={{ margin: "4px -2px" }}>
+                      <CashPositionChart data={chartData} mode={chartMode} hover={chartHover} setHover={setChartHover} />
+                    </div>
+                    {chartMode === "bars" && (
+                      <div style={{ display: "flex", gap: 10, marginTop: 6, fontSize: 9, color: "var(--text-faint)", alignItems: "center" }}>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}><span style={{ width: 8, height: 8, background: "var(--accent)", opacity: 0.65, display: "inline-block", borderRadius: 1 }} />Money in</span>
+                        <span style={{ display: "inline-flex", alignItems: "center", gap: 3 }}><span style={{ width: 8, height: 8, background: "var(--danger)", opacity: 0.55, display: "inline-block", borderRadius: 1 }} />Money out</span>
+                      </div>
+                    )}
                     <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
                       <div style={{ fontSize: 12, color: "var(--text)", fontWeight: 500 }}>
                         {!hasJournalData ? "Import journal data to calculate runway" : monthlyBurn > 0 ? `${cashRunway}mo runway` : "No expense journals in last 30 days"}
                       </div>
                       {hasJournalData && monthlyBurn > 0 && (
                         <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
-                          Burn rate · {fmtEUR(monthlyBurn)}/mo
+                          Burn rate · {fmt(monthlyBurn)}/mo
                         </div>
                       )}
                     </div>
@@ -5436,24 +6742,33 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
             <div className="card" style={{ display: "flex", flexDirection: "column" }}>
               <div className="card-header">
                 <span className="card-title">Bank Health</span>
-                <span className="card-count" style={{ color: reconcStats.suggested > 0 ? "var(--warn)" : "var(--accent)", display:'flex', alignItems:'center', gap:5 }}>
-                  <HealthPulseDot healthy={bookHealthy} size={7} />
-                  {reconcStats.suggested > 0 ? `${reconcStats.suggested} pending` : "✓ clean"}
-                </span>
+                {currentBalance !== null && (
+                  <span className="card-count" style={{ color: reconcStats.suggested > 0 ? "var(--warn)" : "var(--accent)", display:"flex", alignItems:"center", gap:5 }}>
+                    <HealthPulseDot healthy={bookHealthy} size={7} />
+                    {reconcStats.suggested > 0 ? `${reconcStats.suggested} pending` : "✓ clean"}
+                  </span>
+                )}
               </div>
-              <div style={{ padding: "12px 16px", flex: 1, display: "flex", flexDirection: "column", gap: 10 }}>
-                {[
-                  { lbl: "AWAITING MATCH", val: loading ? "…" : String(reconcStats.suggested), col: reconcStats.suggested > 0 ? "var(--warn)" : "var(--accent)" },
-                  { lbl: "UNRECONCILED", val: loading ? "…" : fmtEUR(reconcStats.balance), col: "var(--text)" },
-                  { lbl: "AUTO CONFIDENCE", val: loading ? "…" : reconcStats.autoCount > 0 ? `${reconcStats.avgConf}%` : "—", col: reconcStats.avgConf >= 80 ? "var(--accent)" : reconcStats.avgConf >= 60 ? "var(--warn)" : "var(--text-muted)" },
-                ].map(r => (
-                  <div key={r.lbl}>
-                    <div style={{ fontSize: 9, fontWeight: 600, color: "var(--text-faint)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 2 }}>{r.lbl}</div>
-                    <div style={{ fontSize: 18, fontWeight: 700, color: r.col, fontVariantNumeric: "tabular-nums", letterSpacing: "-0.01em" }}>{r.val}</div>
-                  </div>
-                ))}
-              </div>
-              {onNavigate && (
+              {currentBalance === null && !loading ? (
+                <div style={{ padding: "20px 16px", flex: 1, fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6 }}>
+                  Import bank data to track reconciliation health.{" "}
+                  {onNavigate && <button onClick={() => onNavigate("bank-import")} style={{ background: "none", border: "none", color: "var(--accent)", fontSize: 12, cursor: "pointer", padding: 0 }}>Import →</button>}
+                </div>
+              ) : (
+                <div style={{ padding: "12px 16px", flex: 1, display: "flex", flexDirection: "column", gap: 10 }}>
+                  {[
+                    { lbl: "AWAITING MATCH", val: loading ? "…" : String(reconcStats.suggested), col: reconcStats.suggested > 0 ? "var(--warn)" : "var(--accent)" },
+                    { lbl: "UNRECONCILED", val: loading ? "…" : fmt(reconcStats.balance), col: "var(--text)" },
+                    { lbl: "AUTO CONFIDENCE", val: loading ? "…" : reconcStats.autoCount > 0 ? `${reconcStats.avgConf}%` : "—", col: reconcStats.avgConf >= 80 ? "var(--accent)" : reconcStats.avgConf >= 60 ? "var(--warn)" : "var(--text-muted)" },
+                  ].map(r => (
+                    <div key={r.lbl}>
+                      <div style={{ fontSize: 9, fontWeight: 600, color: "var(--text-faint)", letterSpacing: "0.1em", textTransform: "uppercase", marginBottom: 2 }}>{r.lbl}</div>
+                      <div style={{ fontSize: 18, fontWeight: 700, color: r.col, fontVariantNumeric: "tabular-nums", letterSpacing: "-0.01em" }}>{r.val}</div>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {onNavigate && currentBalance !== null && (
                 <div className="card-footer-link" onClick={() => onNavigate("reconciliation")}>
                   Go to reconciliation →
                 </div>
@@ -5593,6 +6908,25 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
             </div>
           ),
         };
+
+        // First-run: no bank data ever imported — show hero CTA instead of hollow tiles
+        if (!loading && currentBalance === null && automationStats.total === 0) {
+          return (
+            <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              <div style={{ border: "2px dashed var(--border)", borderRadius: "var(--radius-card)", padding: "40px 28px", textAlign: "center", background: "var(--surface)" }}>
+                <div style={{ fontSize: 38, marginBottom: 14, opacity: 0.6 }}>⇅</div>
+                <div style={{ fontSize: 18, fontWeight: 700, color: "var(--text)", marginBottom: 8, letterSpacing: "-0.01em" }}>Import your first bank statement</div>
+                <div style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 22, lineHeight: 1.6, maxWidth: 400, margin: "0 auto 22px" }}>
+                  Connect your bank data to unlock reconciliation, cash flow forecasting, and AI-powered insights.
+                </div>
+                <button onClick={() => onNavigate?.("bank-import")} className="btn btn-p" style={{ fontSize: 14, padding: "10px 28px" }}>
+                  Go to Bank Import →
+                </button>
+              </div>
+              {next3.length > 0 && tileContent['compliance']}
+            </div>
+          );
+        }
 
         return (
           <>
@@ -7147,6 +8481,21 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
     })();
   }, [companyId, selPeriod, ytdMode]); // eslint-disable-line
 
+  // Balance-sheet accounts (Asset/Liability/Equity) are cumulative from inception — unlike P&L
+  // accounts, they don't reset each fiscal year, so their balance must include everything up to
+  // the report date, not just the YTD-bounded `journals` above (which is correct for P&L, and
+  // stays as-is). This is what makes opening-balance journals dated before the fiscal year start
+  // (or any prior-year activity) show up on the Balance Sheet / Trial Balance.
+  const [bsJournals, setBsJournals] = useState([]);
+  useEffect(() => {
+    if (!companyId) return;
+    (async () => {
+      const { data, error } = await supabase.from('journals').select('*')
+        .eq('company_id', companyId).lte('date', periodEnd).order('date');
+      if (!error && data) setBsJournals(data);
+    })();
+  }, [companyId, selPeriod]); // eslint-disable-line
+
   useEffect(() => {
     if (!companyId || !showCmp || !cmpRangeStart) { setCmpJournals([]); return; }
     (async () => {
@@ -7164,39 +8513,83 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
     })();
   }, [companyId, tab]); // eslint-disable-line
 
-  const noJournals = journals.length === 0;
+  const noJournals   = journals.length === 0;
+  // TB/BS have data if EITHER the YTD set or the cumulative set has anything — a company with
+  // only an opening-balance journal dated before the fiscal year start has no YTD journals yet,
+  // but its Balance Sheet is not empty.
+  const noBsJournals = journals.length === 0 && bsJournals.length === 0;
 
-  // Expand each journal into two explicit ledger entries
-  const ledger = journals.flatMap(j => [
-    { account: j.debit_account,  side: 'debit',  amount: Number(j.amount), journal: j },
-    { account: j.credit_account, side: 'credit', amount: Number(j.amount), journal: j },
-  ]);
-
-  // Trial Balance — aggregate both sides per account, compute net balance
-  const tbMap = {};
-  ledger.forEach(e => {
-    if (!tbMap[e.account]) tbMap[e.account] = { debit: 0, credit: 0 };
-    if (e.side === 'debit') tbMap[e.account].debit  += e.amount;
-    else                    tbMap[e.account].credit += e.amount;
-  });
-  const tbRows = Object.entries(tbMap).map(([code, { debit, credit }]) => {
+  const resolveAccountMeta = (code) => {
     const coaA    = coaAccounts.find(a => a.code === code);
     const fallback = GL_ACCOUNTS.find(a => a.code === code);
     const name     = coaA?.name || fallback?.name || code;
     const type     = coaA ? (coaA.account_type.charAt(0).toUpperCase() + coaA.account_type.slice(1)) : (fallback?.type || '—');
+    return { name, type };
+  };
+  const BS_TYPES = ['Asset', 'Liability', 'Equity'];
+
+  // Expand each journal into two explicit ledger entries — YTD-bound (P&L reporting) and,
+  // separately, cumulative-from-inception (Balance Sheet / TB reporting of BS accounts).
+  const ledger = journals.flatMap(j => [
+    { account: j.debit_account,  side: 'debit',  amount: Number(j.amount), journal: j },
+    { account: j.credit_account, side: 'credit', amount: Number(j.amount), journal: j },
+  ]);
+  const bsLedger = bsJournals.flatMap(j => [
+    { account: j.debit_account,  side: 'debit',  amount: Number(j.amount) },
+    { account: j.credit_account, side: 'credit', amount: Number(j.amount) },
+  ]);
+
+  const aggregate = (entries) => {
+    const map = {};
+    entries.forEach(e => {
+      if (!map[e.account]) map[e.account] = { debit: 0, credit: 0 };
+      if (e.side === 'debit') map[e.account].debit  += e.amount;
+      else                    map[e.account].credit += e.amount;
+    });
+    return map;
+  };
+  const tbMap   = aggregate(ledger);   // YTD — P&L accounts read from here
+  const bsTbMap = aggregate(bsLedger); // cumulative from inception — BS accounts read from here
+
+  // Trial Balance / Balance Sheet rows — each account's debit/credit sourced from whichever
+  // dataset matches its type: cumulative for Asset/Liability/Equity, YTD for Income/Expense.
+  const tbRows = [...new Set([...Object.keys(tbMap), ...Object.keys(bsTbMap)])].map(code => {
+    const { name, type } = resolveAccountMeta(code);
+    const { debit, credit } = BS_TYPES.includes(type) ? (bsTbMap[code] || { debit: 0, credit: 0 }) : (tbMap[code] || { debit: 0, credit: 0 });
     const isDebitNormal = ['Asset', 'Expense'].includes(type);
     const net = isDebitNormal ? debit - credit : credit - debit;
     return { code, debit, credit, net, name, type };
   }).sort((a, b) => a.code.localeCompare(b.code));
-  const tbTotDr  = tbRows.reduce((s, r) => s + r.debit,  0);
-  const tbTotCr  = tbRows.reduce((s, r) => s + r.credit, 0);
 
-  // P&L — net credits for income, net debits for costs/expenses
+  // P&L — net credits for income, net debits for costs/expenses (YTD, unchanged — P&L is
+  // correctly period-bound and stays that way).
   const { revRows, cosRows, opexRows, totRev, gp, np } = buildPnL(journals, coaAccounts);
   const cmpPnl     = (showCmp && cmpJournals.length > 0) ? buildPnL(cmpJournals, coaAccounts) : null;
   const cmpRevMap  = cmpPnl ? Object.fromEntries(cmpPnl.revRows.map(r  => [r.code, r.amount])) : {};
   const cmpCosMap  = cmpPnl ? Object.fromEntries(cmpPnl.cosRows.map(r  => [r.code, r.amount])) : {};
   const cmpOpexMap = cmpPnl ? Object.fromEntries(cmpPnl.opexRows.map(r => [r.code, r.amount])) : {};
+
+  // Cumulative P&L (inception → report date) — this is what prior years' unclosed net
+  // profit/loss actually is. The gap between this and the YTD-only `np` above is exactly the
+  // amount that a formal year-end closing journal would have moved into Retained Earnings; since
+  // this system doesn't post automatic closing entries, the Balance Sheet must plug it in here
+  // instead, or Net Assets would never agree with Capital & Reserves once a fiscal year rolls.
+  const npAll          = buildPnL(bsJournals, coaAccounts).np;
+  const priorPeriodsNP = Math.round((npAll - np) * 100) / 100;
+
+  // Trial Balance display/export only: a mixed cumulative-BS + YTD-P&L trial balance won't
+  // balance in raw Dr/Cr unless that same prior-period P&L gap is shown explicitly as a
+  // Retained Earnings b/fwd line — otherwise the TB would falsely flag "out of balance".
+  const tbRowsDisplay = Math.abs(priorPeriodsNP) >= 0.005
+    ? [...tbRows, {
+        code: 'RE-PRIOR', name: 'Retained Earnings — Prior Periods (unclosed P&L)', type: 'Equity',
+        debit:  priorPeriodsNP < 0 ? -priorPeriodsNP : 0,
+        credit: priorPeriodsNP > 0 ?  priorPeriodsNP : 0,
+        net:    priorPeriodsNP,
+      }]
+    : tbRows;
+  const tbTotDr = tbRowsDisplay.reduce((s, r) => s + r.debit,  0);
+  const tbTotCr = tbRowsDisplay.reduce((s, r) => s + r.credit, 0);
 
   // Prior year P&L derived from uploaded trial balance
   const hasPY = pyBalances.length > 0;
@@ -7242,7 +8635,19 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
   const bsTotalAssets   = bsFixedTotal + bsCurrAssTotal;
   const bsNetAssets     = bsTotalAssets - bsCurrLiabTotal - bsLtLiabTotal;
   const bsShareCap      = tbRows.filter(r => r.type === 'Equity' && r.code >= '3000' && r.code < '3100').reduce((s, r) => s + r.net, 0);
-  const bsTotalCapital  = bsShareCap + np;
+  // Any equity account at 3100+ (e.g. "Retained Earnings") that's been posted to DIRECTLY —
+  // most commonly an Opening Balances entry that states the prior accountant's retained
+  // earnings figure outright, rather than requiring it to be inferred from historical P&L
+  // journals. This is cumulative (Equity, from inception) and is money the P&L-derived
+  // `priorPeriodsNP` below can never see, since it only scans Income/Expense accounts —
+  // without it, a direct RE posting is silently dropped from Capital & Reserves entirely.
+  const bsDirectRE      = tbRows.filter(r => r.type === 'Equity' && r.code >= '3100').reduce((s, r) => s + r.net, 0);
+  // Retained Earnings b/fwd = prior periods' unclosed P&L + any direct RE/reserves posting
+  // (opening balances). Current period = this fiscal year's P&L to date. Together they must
+  // account for ALL retained earnings, brought-forward and current, or Net Assets will never
+  // agree with Capital & Reserves.
+  const bsRetainedBfwd  = priorPeriodsNP + bsDirectRE;
+  const bsTotalCapital  = bsShareCap + bsRetainedBfwd + np;
 
   const exportDate = fmtIE(new Date().toISOString().slice(0, 10));
 
@@ -7251,7 +8656,7 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
     ["Exported", exportDate],
     [],
     ["Code", "Account", "Type", "Debit (€)", "Credit (€)", "Net Balance"],
-    ...tbRows.map(r => [r.code, r.name, r.type, r.debit > 0 ? fmtEUR(r.debit) : "—", r.credit > 0 ? fmtEUR(r.credit) : "—", (r.net < 0 ? "-" : "") + fmtEUR(Math.abs(r.net))]),
+    ...tbRowsDisplay.map(r => [r.code, r.name, r.type, r.debit > 0 ? fmtEUR(r.debit) : "—", r.credit > 0 ? fmtEUR(r.credit) : "—", (r.net < 0 ? "-" : "") + fmtEUR(Math.abs(r.net))]),
     ["", "TOTAL", "", fmtEUR(tbTotDr), fmtEUR(tbTotCr), Math.abs(tbTotDr - tbTotCr) < 0.005 ? "BALANCED" : fmtEUR(Math.abs(tbTotDr - tbTotCr))],
   ]);
 
@@ -7326,19 +8731,19 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
           <div className="card-header">
             <span className="card-title">Trial Balance — {reportLabel}</span>
             <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-              {!noJournals && <span style={{ fontSize: 10, fontFamily: "Source Code Pro, monospace", fontWeight: 600, color: Math.abs(tbTotDr - tbTotCr) < 0.005 ? "var(--green)" : "var(--red)" }}>{Math.abs(tbTotDr - tbTotCr) < 0.005 ? "✓ BALANCED" : "⚠ OUT OF BALANCE"}</span>}
-              {!noJournals && <ExportDropdown onCSV={exportTB} onPrint={() => window.print()} />}
+              {!noBsJournals && <span style={{ fontSize: 10, fontFamily: "Source Code Pro, monospace", fontWeight: 600, color: Math.abs(tbTotDr - tbTotCr) < 0.005 ? "var(--green)" : "var(--red)" }}>{Math.abs(tbTotDr - tbTotCr) < 0.005 ? "✓ BALANCED" : "⚠ OUT OF BALANCE"}</span>}
+              {!noBsJournals && <ExportDropdown onCSV={exportTB} onPrint={() => window.print()} />}
             </div>
           </div>
           <div className="print-only card-body">
             <div className="print-title">{companyName} — Trial Balance</div>
             <div className="print-meta">Period: {reportLabel} · Exported: {exportDate}</div>
           </div>
-          {noJournals ? emptyMsg(`No trial balance data for ${reportLabel}`, "Post journals to populate your trial balance.") : (
+          {noBsJournals ? emptyMsg(`No trial balance data for ${reportLabel}`, "Post journals to populate your trial balance.") : (
             <table className="gl-table">
               <thead><tr><th style={{ width: 55 }}>Code</th><th>Account Name</th><th>Type</th><th className="r">Debit (€)</th><th className="r">Credit (€)</th><th className="r">Net Balance</th></tr></thead>
               <tbody>
-                {tbRows.map((r, i) => (
+                {tbRowsDisplay.map((r, i) => (
                   <tr key={i}>
                     <td className="mono" style={{ color: "var(--dim)" }}>{r.code}</td><td>{r.name}</td>
                     <td><span style={{ fontSize: 10, color: "var(--dim)", fontFamily: "Source Code Pro, monospace" }}>{r.type}</span></td>
@@ -7492,9 +8897,9 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
           <div className="card">
             <div className="card-header">
               <span className="card-title">Balance Sheet — {reportLabel}</span>
-              {!noJournals && <span style={{ fontSize: 10, fontFamily: "'Source Code Pro',monospace", color: "var(--muted)", letterSpacing: "0.06em" }}>AS AT {periodEnd.toUpperCase()}</span>}
+              {!noBsJournals && <span style={{ fontSize: 10, fontFamily: "'Source Code Pro',monospace", color: "var(--muted)", letterSpacing: "0.06em" }}>AS AT {periodEnd.toUpperCase()}</span>}
             </div>
-            {noJournals ? emptyMsg(`No balance sheet data for ${reportLabel}`, "Post journals to populate your balance sheet.") : (
+            {noBsJournals ? emptyMsg(`No balance sheet data for ${reportLabel}`, "Post journals to populate your balance sheet.") : (
               <div className="card-body" style={{ maxWidth: 560 }}>
                 {/* Fixed Assets */}
                 {bsFixed.length > 0 && (
@@ -7536,7 +8941,8 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
                 {/* Capital & Reserves */}
                 {bsHead("Capital and Reserves")}
                 {bsShareCap !== 0 && bsRow("Share Capital", bsShareCap, false, 1)}
-                {bsRow("Retained Earnings (current period)", np, false, 1)}
+                {Math.abs(bsRetainedBfwd) >= 0.005 && bsRow("Retained Earnings — brought forward", bsRetainedBfwd, false, 1)}
+                {bsRow("Retained Earnings — current period", np, false, 1)}
                 {bsDiv(false)}
                 {bsRow("Total Capital and Reserves", bsTotalCapital, true)}
                 {bsDiv(true)}
@@ -7820,6 +9226,7 @@ function FullGLReport({ companyId, companyName, company, coaAccounts }) {
   const [mode, setMode]         = useState("ytd"); // "month" | "ytd"
   const [journals, setJournals] = useState([]);
   const [loading, setLoading]   = useState(true);
+  const [reclassTarget, setReclassTarget] = useState(null); // { journal, side } | null
 
   const yearEndMonth  = company?.year_end_month || 12;
   const yearStartMonth = (yearEndMonth % 12) + 1;
@@ -7835,7 +9242,7 @@ function FullGLReport({ companyId, companyName, company, coaAccounts }) {
     ? `YTD to ${now.toLocaleDateString("en-IE", { month: "long", year: "numeric" })}`
     : now.toLocaleDateString("en-IE", { month: "long", year: "numeric" });
 
-  useEffect(() => {
+  const loadJournals = () => {
     if (!companyId) { setLoading(false); return; }
     setLoading(true);
     supabase.from('journals').select('*')
@@ -7844,7 +9251,9 @@ function FullGLReport({ companyId, companyName, company, coaAccounts }) {
         if (!error && data) setJournals(data);
         setLoading(false);
       });
-  }, [companyId, mode]);
+  };
+
+  useEffect(loadJournals, [companyId, mode]); // eslint-disable-line
 
   const resolveName = (code) => {
     const coa = coaAccounts?.find(a => a.code === code);
@@ -7852,7 +9261,8 @@ function FullGLReport({ companyId, companyName, company, coaAccounts }) {
     return GL_ACCOUNTS.find(a => a.code === code)?.name || code;
   };
 
-  // Two rows per journal: debit leg then credit leg
+  // Two rows per journal: debit leg then credit leg. Each row keeps the full original
+  // journal + which side it represents, so "Reclassify" knows exactly what it's correcting.
   const rows = journals.flatMap(j => [
     {
       date: j.date, ref: j.reference || "", description: j.description || "",
@@ -7860,6 +9270,7 @@ function FullGLReport({ companyId, companyName, company, coaAccounts }) {
       crCode: j.credit_account, crName: resolveName(j.credit_account),
       debit: Number(j.amount), credit: 0,
       postedBy: j.posted_by || "",
+      origJournal: j, side: 'debit',
     },
     {
       date: j.date, ref: j.reference || "", description: j.description || "",
@@ -7867,6 +9278,7 @@ function FullGLReport({ companyId, companyName, company, coaAccounts }) {
       crCode: j.credit_account, crName: resolveName(j.credit_account),
       debit: 0, credit: Number(j.amount),
       postedBy: j.posted_by || "",
+      origJournal: j, side: 'credit',
     },
   ]);
 
@@ -7956,13 +9368,19 @@ function FullGLReport({ companyId, companyName, company, coaAccounts }) {
                 <th className="r" style={{ width: 96 }}>Debit (€)</th>
                 <th className="r" style={{ width: 96 }}>Credit (€)</th>
                 <th style={{ width: 80 }}>Posted By</th>
+                <th style={{ width: 90 }} className="no-print">Actions</th>
               </tr>
             </thead>
             <tbody>
               {rows.map((r, i) => (
                 <tr key={i} style={{ background: i % 2 === 0 ? "transparent" : "rgba(0,0,0,0.015)" }}>
                   <td className="mono" style={{ color: "var(--dim)", fontSize: 11 }}>{fmtIE(r.date)}</td>
-                  <td className="mono" style={{ color: "var(--text-muted)", fontSize: 10 }}>{r.ref || "—"}</td>
+                  <td className="mono" style={{ color: "var(--text-muted)", fontSize: 10 }}>
+                    {r.ref || "—"}
+                    {r.origJournal.reclass_of_journal_id && (
+                      <span style={{ marginLeft: 5, fontSize: 9, color: "var(--accent)" }} title="Correcting journal from a GL reclassification">↩ correction</span>
+                    )}
+                  </td>
                   <td style={{ color: "var(--muted)", fontSize: 12 }}>{r.description || "—"}</td>
                   <td className="mono" style={{ color: "var(--dim)", fontSize: 11 }}>{r.drCode}</td>
                   <td style={{ fontSize: 12 }}>{r.drName}</td>
@@ -7971,6 +9389,14 @@ function FullGLReport({ companyId, companyName, company, coaAccounts }) {
                   <td className="r mono dr">{r.debit  > 0 ? fmt(r.debit)  : ""}</td>
                   <td className="r mono cr">{r.credit > 0 ? fmt(r.credit) : ""}</td>
                   <td className="mono" style={{ fontSize: 10, color: "var(--dim)" }}>{r.postedBy || ""}</td>
+                  <td className="no-print">
+                    <button
+                      onClick={() => setReclassTarget({ journal: r.origJournal, side: r.side })}
+                      style={{ fontSize: 10, padding: "3px 8px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--surface-2)", color: "var(--text-muted)", cursor: "pointer" }}
+                    >
+                      Reclassify
+                    </button>
+                  </td>
                 </tr>
               ))}
             </tbody>
@@ -7985,11 +9411,336 @@ function FullGLReport({ companyId, companyName, company, coaAccounts }) {
                 <td className="r mono" style={{ fontWeight: 700 }}>{fmt(totalDr)}</td>
                 <td className="r mono" style={{ fontWeight: 700, color: "var(--teal)" }}>{fmt(totalCr)}</td>
                 <td />
+                <td className="no-print" />
               </tr>
             </tfoot>
           </table>
         </>
       )}
+      {reclassTarget && (
+        <GLReclassModal
+          companyId={companyId}
+          company={company}
+          coaAccounts={coaAccounts}
+          journal={reclassTarget.journal}
+          side={reclassTarget.side}
+          onClose={() => setReclassTarget(null)}
+          onDone={() => { setReclassTarget(null); loadJournals(); }}
+        />
+      )}
+    </div>
+  );
+}
+
+// ── GL Reclassify modal ─────────────────────────────────────────────────────
+// Moves a posted transaction to a different nominal via a CORRECTING JOURNAL — the
+// original journal is never modified. See computeReclassLegs()/hasRealVatCode() above for
+// the accounting derivation, and the period-lock / VAT-filed gating this enforces.
+function GLReclassModal({ companyId, company, coaAccounts, journal, side, onClose, onDone }) {
+  const today   = new Date().toISOString().slice(0, 10);
+  const oldCode = side === 'debit' ? journal.debit_account : journal.credit_account;
+  const oldName = (coaAccounts?.find(a => a.code === oldCode)?.name) || GL_ACCOUNTS.find(a => a.code === oldCode)?.name || oldCode;
+
+  const [narrative,  setNarrative]  = useState('');
+  const [newCode,    setNewCode]    = useState('');
+  const [vatCode,    setVatCode]    = useState(journal.vat_code ?? null);
+  const [vatTouched, setVatTouched] = useState(false);
+  const [dateChoice, setDateChoice] = useState('original'); // 'original' | 'today' — only matters when period is open
+  const [lockInfo,   setLockInfo]   = useState(null); // { locked, filedAt } | null while loading
+  const [posting,    setPosting]    = useState(false);
+  const [error,      setError]      = useState(null);
+  const [ruleOptIn,  setRuleOptIn]  = useState(false);
+
+  // Bulk "move related" state
+  const [bulkLoading,   setBulkLoading]   = useState(false);
+  const [bulkCandidates,setBulkCandidates]= useState(null); // null = not searched yet
+  const [bulkSelected,  setBulkSelected]  = useState(new Set());
+
+  useEffect(() => {
+    let cancelled = false;
+    isPeriodLocked(companyId, journal.date)
+      .then(info => { if (!cancelled) setLockInfo(info); })
+      .catch(e => { if (!cancelled) { setLockInfo({ locked: false, filedAt: null }); setError(`Could not verify period lock — ${e.message}`); } });
+    return () => { cancelled = true; };
+  }, [companyId, journal.date]); // eslint-disable-line
+
+  const origHasRealVat = hasRealVatCode(journal.vat_code);
+  const vatIsFrozen = !!(lockInfo?.locked && origHasRealVat && company?.vat_registered);
+
+  // Auto-suggest the new nominal's default VAT code as it's picked — unless the user has
+  // manually touched the VAT dropdown, or the original period's VAT is frozen (below).
+  useEffect(() => {
+    if (vatIsFrozen) { setVatCode(journal.vat_code ?? null); return; }
+    if (vatTouched || !newCode) return;
+    const acct = coaAccounts?.find(a => a.code === newCode);
+    setVatCode(acct?.default_vat_code ?? null);
+  }, [newCode, vatIsFrozen]); // eslint-disable-line
+
+  const finalDate = lockInfo?.locked ? today : (dateChoice === 'today' ? today : journal.date);
+  const legs      = newCode ? computeReclassLegs(journal, side, newCode) : null;
+  const nomOptions = (coaAccounts?.filter(a => a.is_active !== false).length > 0
+    ? coaAccounts.filter(a => a.is_active !== false) : GL_ACCOUNTS);
+
+  const canSubmit = !!newCode && newCode !== oldCode && narrative.trim().length > 0 && lockInfo !== null && !posting;
+
+  // ── Bulk: find other bank transactions coded to the same (wrong) nominal, matching the
+  // same cleaned payee/description pattern. Excludes the triggering transaction itself and
+  // any already covered by an existing correction.
+  const findRelated = async () => {
+    setBulkLoading(true); setError(null);
+    try {
+      const pattern = preCleanDesc(journal.description) || (journal.description || '').toLowerCase().slice(0, 40);
+      if (!pattern) { setBulkCandidates([]); setBulkLoading(false); return; }
+
+      const { data: btRows, error: btErr } = await supabase
+        .from('bank_transactions')
+        .select('revolut_id, description, amount, date, nominal_account')
+        .eq('company_id', companyId)
+        .eq('nominal_account', oldCode)
+        .ilike('description', `%${pattern}%`);
+      if (btErr) throw new Error(btErr.message);
+
+      const others = (btRows || []).filter(bt => bt.revolut_id !== journal.reference);
+      if (!others.length) { setBulkCandidates([]); setBulkLoading(false); return; }
+
+      const refs = others.map(bt => bt.revolut_id);
+      const { data: jRows, error: jErr } = await supabase
+        .from('journals').select('*')
+        .eq('company_id', companyId).in('reference', refs);
+      if (jErr) throw new Error(jErr.message);
+      const jByRef = Object.fromEntries((jRows || []).map(j => [j.reference, j]));
+
+      // Exclude any journal that's already been reclassified (a correction already targets it).
+      const candidateJournalIds = Object.values(jByRef).map(j => j.id);
+      const { data: existingCorrections } = candidateJournalIds.length
+        ? await supabase.from('journals').select('reclass_of_journal_id')
+            .eq('company_id', companyId).in('reclass_of_journal_id', candidateJournalIds)
+        : { data: [] };
+      const alreadyCorrected = new Set((existingCorrections || []).map(r => r.reclass_of_journal_id));
+
+      const candidates = others
+        .map(bt => ({ bt, j: jByRef[bt.revolut_id] }))
+        .filter(({ j }) => j && !alreadyCorrected.has(j.id));
+
+      setBulkCandidates(candidates);
+      setBulkSelected(new Set(candidates.map(c => c.bt.revolut_id)));
+    } catch (e) {
+      setError(`Could not search related transactions — ${e.message}`);
+      setBulkCandidates([]);
+    }
+    setBulkLoading(false);
+  };
+
+  const toggleBulkItem = (revolutId) => {
+    setBulkSelected(prev => {
+      const next = new Set(prev);
+      if (next.has(revolutId)) next.delete(revolutId); else next.add(revolutId);
+      return next;
+    });
+  };
+
+  const bulkSelectedItems = (bulkCandidates || []).filter(c => bulkSelected.has(c.bt.revolut_id));
+  const bulkTotal = bulkSelectedItems.reduce((s, c) => s + Math.abs(Number(c.bt.amount)), 0);
+
+  // Builds one correcting-journal row for a given original journal + the leg being corrected.
+  // `explicitVat` — pass the user's own VAT-dropdown choice for the triggering transaction
+  // (ignored, and the original's VAT code used instead, when that transaction's period is
+  // VAT-frozen). Bulk-related items omit it and get their own per-item default instead, since
+  // each item's frozen status can differ from the triggering item's.
+  const buildCorrectionRow = async (origJournal, origSide, explicitVat) => {
+    const lock = await isPeriodLocked(companyId, origJournal.date);
+    const date = lock.locked ? today : origJournal.date;
+    const itemHasRealVat = hasRealVatCode(origJournal.vat_code);
+    const itemVatFrozen = lock.locked && itemHasRealVat && company?.vat_registered;
+    const itemVat = itemVatFrozen
+      ? (origJournal.vat_code ?? null)
+      : (explicitVat !== undefined ? explicitVat : (coaAccounts?.find(a => a.code === newCode)?.default_vat_code ?? null));
+    const itemLegs = computeReclassLegs(origJournal, origSide, newCode);
+    return {
+      company_id: companyId,
+      date,
+      description: `Reclass: ${narrative.trim()}`,
+      debit_account: itemLegs.debit_account,
+      credit_account: itemLegs.credit_account,
+      amount: Math.abs(Number(origJournal.amount)),
+      vat_code: itemVat,
+      reference: `RCL-${origJournal.reference || origJournal.id.slice(0, 8)}`,
+      reclass_of_journal_id: origJournal.id,
+      posted_by: 'GL Reclass',
+      import_batch_id: null,
+      source_recurring_id: null,
+      is_accrual_reversal: false,
+    };
+  };
+
+  const submit = async () => {
+    if (!canSubmit) return;
+    setPosting(true); setError(null);
+    try {
+      // Re-verify the lock right before posting — closes a race window if a VAT return was
+      // filed while this modal was open.
+      const rows = [await buildCorrectionRow(journal, side, vatCode)];
+      for (const { j } of bulkSelectedItems) {
+        // j's own side may differ from the triggering journal's — find which leg holds oldCode.
+        const itemSide = j.debit_account === oldCode ? 'debit' : (j.credit_account === oldCode ? 'credit' : null);
+        if (!itemSide) continue; // shouldn't happen given the nominal_account filter above
+        rows.push(await buildCorrectionRow(j, itemSide));
+      }
+
+      const { error: insErr } = await supabase.from('journals').insert(rows);
+      if (insErr) throw new Error(insErr.message);
+
+      if (ruleOptIn) {
+        const pattern = preCleanDesc(journal.description) || (journal.description || '').toLowerCase().slice(0, 40);
+        const isIncome = side === 'credit'; // matches the app-wide convention: income nominal sits on the credit side
+        const nomName  = coaAccounts?.find(a => a.code === newCode)?.name || newCode;
+        // The rule applies to FUTURE transactions, so its VAT should reflect the new nominal's
+        // normal treatment — not this specific transaction's frozen/original VAT code.
+        const ruleVat  = vatIsFrozen ? (coaAccounts?.find(a => a.code === newCode)?.default_vat_code ?? null) : vatCode;
+        const ruleRow  = {
+          company_id: companyId, pattern, match_type: 'contains', direction: isIncome ? 'in' : 'out',
+          nominal_code: newCode, nominal_name: nomName, vat_code: ruleVat,
+          confidence: 'high', source: 'user', created_from: 'learned', is_active: true,
+        };
+        const { error: rInsErr } = await supabase.from('transaction_rules').insert(ruleRow);
+        if (rInsErr) {
+          if (rInsErr.code === '23505') {
+            await supabase.from('transaction_rules')
+              .update({ nominal_code: newCode, nominal_name: nomName, vat_code: ruleRow.vat_code, confidence: 'high', source: 'user', created_from: 'learned', is_active: true })
+              .eq('company_id', companyId).eq('pattern', pattern).eq('direction', ruleRow.direction);
+          } else {
+            console.warn('[GLReclass] rule save failed (reclass still succeeded):', rInsErr.message);
+          }
+        }
+      }
+
+      onDone();
+    } catch (e) {
+      setError(e.message);
+    }
+    setPosting(false);
+  };
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 1000, display: 'flex', alignItems: 'flex-start', justifyContent: 'center', overflowY: 'auto', padding: 24 }}>
+      <div style={{ background: 'var(--surface)', borderRadius: 'var(--radius-card)', border: '1px solid var(--border)', width: '100%', maxWidth: 560, marginTop: 30 }}>
+        <div style={{ padding: '16px 18px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center' }}>
+          <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text)' }}>Reclassify transaction</div>
+          <button onClick={onClose} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--text-faint)', cursor: 'pointer', fontSize: 18 }}>×</button>
+        </div>
+
+        <div style={{ padding: '16px 18px', fontSize: 12.5, color: 'var(--text)' }}>
+          <div style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 12px', marginBottom: 14 }}>
+            <div style={{ fontWeight: 600, marginBottom: 2 }}>{journal.description || '—'}</div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)' }}>
+              {fmtIE(journal.date)} · €{Math.abs(Number(journal.amount)).toLocaleString('en-IE', { minimumFractionDigits: 2 })} · currently <span style={{ fontFamily: 'monospace' }}>{oldCode}</span> {oldName}
+            </div>
+          </div>
+
+          {error && (
+            <div style={{ background: 'var(--danger-dim)', color: 'var(--danger)', borderRadius: 8, padding: '8px 10px', fontSize: 11.5, marginBottom: 12 }}>{error}</div>
+          )}
+
+          {lockInfo === null ? (
+            <div style={{ fontSize: 11.5, color: 'var(--text-faint)', marginBottom: 12 }}>Checking period status…</div>
+          ) : lockInfo.locked ? (
+            <div style={{ background: 'var(--warn-dim)', color: 'var(--warn)', borderRadius: 8, padding: '8px 10px', fontSize: 11.5, marginBottom: 12 }}>
+              ⚠ This period's VAT return was filed on {new Date(lockInfo.filedAt).toLocaleDateString('en-IE')} — it's closed. The correcting journal will be dated <strong>{fmtIE(today)}</strong> (current open period) instead of {fmtIE(journal.date)}.
+            </div>
+          ) : (
+            <label style={{ fontSize: 11.5, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+              Date:
+              <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                <input type="radio" checked={dateChoice === 'original'} onChange={() => setDateChoice('original')} /> {fmtIE(journal.date)} (original)
+              </span>
+              <span style={{ display: 'flex', gap: 4, alignItems: 'center' }}>
+                <input type="radio" checked={dateChoice === 'today'} onChange={() => setDateChoice('today')} /> {fmtIE(today)} (today)
+              </span>
+            </label>
+          )}
+
+          {vatIsFrozen && (
+            <div style={{ background: 'var(--warn-dim)', color: 'var(--warn)', borderRadius: 8, padding: '8px 10px', fontSize: 11.5, marginBottom: 12 }}>
+              ⚠ VAT on this transaction (code {journal.vat_code}) was already reported in the filed return above. The correction keeps the same VAT code and posts in the current open period — it does not restate the filed return.
+            </div>
+          )}
+
+          <div style={{ marginBottom: 12 }}>
+            <label style={{ display: 'block', fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>Move to nominal</label>
+            <select value={newCode} onChange={e => setNewCode(e.target.value)}
+              style={{ width: '100%', padding: '7px 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--surface-2)', color: 'var(--text)', fontSize: 13, boxSizing: 'border-box' }}>
+              <option value="">Select nominal…</option>
+              {nomOptions.filter(a => a.code !== oldCode).map(a => <option key={a.code} value={a.code}>{a.code} — {a.name}</option>)}
+            </select>
+          </div>
+
+          <div style={{ marginBottom: 12 }}>
+            <label style={{ display: 'block', fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>VAT code {vatIsFrozen && '(locked — see above)'}</label>
+            <select value={vatCode ?? ''} disabled={vatIsFrozen}
+              onChange={e => { setVatTouched(true); setVatCode(e.target.value || null); }}
+              style={{ width: '100%', padding: '7px 10px', borderRadius: 8, border: '1px solid var(--border)', background: vatIsFrozen ? 'var(--surface)' : 'var(--surface-2)', color: 'var(--text)', fontSize: 13, boxSizing: 'border-box', opacity: vatIsFrozen ? 0.7 : 1 }}>
+              <option value="">—</option>
+              {Object.entries(COA_VAT_LABELS).map(([code, label]) => <option key={code} value={code}>{code} ({label})</option>)}
+            </select>
+          </div>
+
+          <div style={{ marginBottom: 12 }}>
+            <label style={{ display: 'block', fontSize: 11, color: 'var(--text-muted)', marginBottom: 4 }}>Reason for reclassification (required)</label>
+            <textarea value={narrative} onChange={e => setNarrative(e.target.value)} rows={2} placeholder="e.g. Miscoded to Sundry — actually a Telecoms & IT expense"
+              style={{ width: '100%', padding: '7px 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--surface-2)', color: 'var(--text)', fontSize: 13, boxSizing: 'border-box', resize: 'vertical' }} />
+          </div>
+
+          {legs && (
+            <div style={{ fontSize: 11, color: 'var(--text-faint)', marginBottom: 14, fontFamily: 'monospace' }}>
+              Correcting journal: Dr {legs.debit_account} / Cr {legs.credit_account} — €{Math.abs(Number(journal.amount)).toLocaleString('en-IE', { minimumFractionDigits: 2 })} on {fmtIE(finalDate)}
+            </div>
+          )}
+
+          {/* Bulk move related */}
+          <div style={{ borderTop: '1px solid var(--border)', paddingTop: 12, marginBottom: 12 }}>
+            {bulkCandidates === null ? (
+              <button onClick={findRelated} disabled={!newCode || bulkLoading}
+                style={{ fontSize: 11.5, padding: '6px 10px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--surface-2)', color: 'var(--text-muted)', cursor: newCode ? 'pointer' : 'default' }}>
+                {bulkLoading ? 'Searching…' : `Find other "${oldName}" transactions from this payee`}
+              </button>
+            ) : bulkCandidates.length === 0 ? (
+              <div style={{ fontSize: 11, color: 'var(--text-faint)' }}>No other matching transactions found in {oldCode} {oldName}.</div>
+            ) : (
+              <div>
+                <div style={{ fontSize: 11.5, fontWeight: 600, color: 'var(--text)', marginBottom: 6 }}>
+                  {bulkSelectedItems.length} of {bulkCandidates.length} related transaction{bulkCandidates.length !== 1 ? 's' : ''} selected — €{bulkTotal.toLocaleString('en-IE', { minimumFractionDigits: 2 })} total will move {oldCode} → {newCode}
+                </div>
+                <div style={{ maxHeight: 160, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 6 }}>
+                  {bulkCandidates.map(({ bt, j }) => (
+                    <label key={bt.revolut_id} style={{ display: 'flex', alignItems: 'center', gap: 8, padding: '5px 8px', fontSize: 11, borderBottom: '1px solid var(--border)', cursor: 'pointer' }}>
+                      <input type="checkbox" checked={bulkSelected.has(bt.revolut_id)} onChange={() => toggleBulkItem(bt.revolut_id)} />
+                      <span style={{ color: 'var(--text-faint)', whiteSpace: 'nowrap' }}>{fmtIE(bt.date)}</span>
+                      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={bt.description}>{bt.description}</span>
+                      <span style={{ fontFamily: 'monospace' }}>€{Math.abs(Number(bt.amount)).toLocaleString('en-IE', { minimumFractionDigits: 2 })}</span>
+                    </label>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+
+          <label style={{ fontSize: 11.5, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 6, cursor: 'pointer', marginBottom: 4 }}>
+            <input type="checkbox" checked={ruleOptIn} onChange={e => setRuleOptIn(e.target.checked)} />
+            Save a rule so future transactions from this payee auto-code to {newCode || '…'}
+          </label>
+        </div>
+
+        <div style={{ display: 'flex', gap: 10, padding: '14px 18px', borderTop: '1px solid var(--border)' }}>
+          <button onClick={onClose} disabled={posting}
+            style={{ flex: 1, padding: '10px 16px', borderRadius: 'var(--radius-sm)', fontSize: 13, fontWeight: 700, border: '1px solid var(--border)', background: 'var(--surface-2)', color: 'var(--text)', cursor: posting ? 'default' : 'pointer' }}>
+            Cancel
+          </button>
+          <button onClick={submit} disabled={!canSubmit}
+            style={{ flex: 1, padding: '10px 16px', borderRadius: 'var(--radius-sm)', fontSize: 13, fontWeight: 700, border: 'none', background: canSubmit ? 'var(--teal)' : 'var(--border)', color: 'white', cursor: canSubmit ? 'pointer' : 'default' }}>
+            {posting ? 'Posting…' : bulkSelectedItems.length ? `Post ${1 + bulkSelectedItems.length} correcting journals` : 'Post correcting journal'}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }
@@ -8394,7 +10145,7 @@ function JournalAttachments({ journalId, companyId, userId }) {
   );
 }
 
-function Journals({ period, selPeriod, companyName, companyId: propCompanyId, readOnly = false }) {
+function Journals({ period, selPeriod, companyName, companyId: propCompanyId, readOnly = false, company }) {
   const { user } = useUser();
   const { accounts: coaAccounts } = useChartOfAccounts(propCompanyId);
   const now = new Date();
@@ -8402,6 +10153,7 @@ function Journals({ period, selPeriod, companyName, companyId: propCompanyId, re
   const [activeTab, setActiveTab] = useState('journals');
   const [journals, setJournals]   = useState([]);
   const [companyId, setCompanyId] = useState(null);
+  const [upgradeFeature_journals, setUpgradeFeature_journals] = useState(null);
   const [loading, setLoading]     = useState(true);
   const [expanded, setExpanded]   = useState(null);
   const [showForm, setShowForm]   = useState(false);
@@ -8499,6 +10251,7 @@ function Journals({ period, selPeriod, companyName, companyId: propCompanyId, re
     try {
       lockCheck = await isPeriodLocked(cid, dateStr);
     } catch (e) {
+      captureError(e, { company_id: cid, operation: 'period-lock-check' });
       setPostError(`Couldn't verify period lock — ${e.message}. Try again.`);
       return;
     }
@@ -8522,6 +10275,7 @@ function Journals({ period, selPeriod, companyName, companyId: propCompanyId, re
       reference: ref,
     }).select().single();
     if (error) {
+      captureError(error, { company_id: cid, operation: 'journal-post' });
       setPostError(`Save failed: ${error.message}`);
       return;
     }
@@ -8545,17 +10299,26 @@ function Journals({ period, selPeriod, companyName, companyId: propCompanyId, re
 
       {/* Tab bar */}
       <div style={{ display: "flex", gap: 0, borderBottom: "1px solid var(--border)", marginBottom: 14 }}>
-        {[['journals', 'Journals'], ['recurring', 'Recurring']].map(([id, label]) => (
-          <button key={id} onClick={() => setActiveTab(id)} style={{
-            padding: "7px 16px", fontSize: 12, fontWeight: 600, border: "none",
-            borderBottom: activeTab === id ? "2px solid var(--accent)" : "2px solid transparent",
-            background: "transparent", color: activeTab === id ? "var(--accent)" : "var(--text-muted)",
-            cursor: "pointer", transition: "color 0.15s",
-          }}>{label}</button>
-        ))}
+        {[['journals', 'Journals', null], ['recurring', 'Recurring', 'recurring_journals']].map(([id, label, feat]) => {
+          const tabLocked = feat && !can(company, feat);
+          return (
+            <button key={id} onClick={() => { if (tabLocked) { setUpgradeFeature_journals(feat); } else { setActiveTab(id); } }} style={{
+              padding: "7px 16px", fontSize: 12, fontWeight: 600, border: "none",
+              borderBottom: activeTab === id ? "2px solid var(--accent)" : "2px solid transparent",
+              background: "transparent",
+              color: tabLocked ? "var(--text-faint)" : activeTab === id ? "var(--accent)" : "var(--text-muted)",
+              cursor: "pointer", transition: "color 0.15s", display: "flex", alignItems: "center", gap: 5,
+            }}>
+              {label}{tabLocked && <span style={{ fontSize: 9 }}>🔒</span>}
+            </button>
+          );
+        })}
       </div>
 
-      {activeTab === 'recurring' && (
+      {upgradeFeature_journals && (
+        <UpgradeCard feature={upgradeFeature_journals} onClose={() => setUpgradeFeature_journals(null)} />
+      )}
+      {activeTab === 'recurring' && can(company, 'recurring_journals') && (
         <RecurringTab companyId={companyId} coaAccounts={coaAccounts} readOnly={readOnly} />
       )}
 
@@ -8681,6 +10444,26 @@ function parseCsvLine(line) {
   return result;
 }
 
+// Revolut Business "Date completed (UTC)" column is DD/MM/YYYY HH:MM:SS (Irish/EU format).
+// Some older exports use ISO (YYYY-MM-DD...) instead — handle both explicitly, never guess via Date().
+function parseRevolutDate(raw) {
+  const s = (raw || "").trim();
+  const datePart = s.split(" ")[0];
+  const iso = datePart.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (iso) return iso[0];
+  const dmy = datePart.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+  if (dmy) {
+    const day = parseInt(dmy[1], 10), month = parseInt(dmy[2], 10), year = dmy[3];
+    if (month < 1 || month > 12 || day < 1 || day > 31) {
+      console.warn("[parseRevolutDate] invalid date (expected DD/MM/YYYY):", JSON.stringify(s));
+      return "";
+    }
+    return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
+  }
+  if (s) console.warn("[parseRevolutDate] could not parse date:", JSON.stringify(s));
+  return "";
+}
+
 function parseRevolutCSV(text) {
   const lines = text.split("\n").filter(l => l.trim());
   if (lines.length < 2) return [];
@@ -8694,9 +10477,11 @@ function parseRevolutCSV(text) {
     const c = parseCsvLine(lines[i]);
     if (!c.length || c.every(x => !x)) continue;
     if ((c[stateI] || "").trim().toUpperCase() !== "COMPLETED") continue;
+    const date = parseRevolutDate(c[dateI]);
+    if (!date) { console.warn("[parseRevolutCSV] row", i, "skipped — bad date:", JSON.stringify(c[dateI])); continue; }
     rows.push({
       revolut_id: (c[idI] || `ROW-${i}`).trim(),
-      date: (c[dateI] || "").trim().slice(0, 10),
+      date,
       description: (c[descI] || "").trim(),
       amount: parseFloat((c[amtI] || "0").trim()) || 0,
       currency: (c[currI] || "EUR").trim(),
@@ -8830,6 +10615,35 @@ function wordOverlap(a, b) {
   let common = 0;
   wa.forEach(w => { if (wb.has(w)) common++; });
   return common / Math.max(wa.size, wb.size);
+}
+
+// Words that appear in virtually every bank reference but carry no payee identity.
+// Stripped before sibling-matching so "INET HERORENT" and "INET HEROSPONSOR" reduce to
+// distinct tokens ("herorent" / "herosponsor") instead of sharing the "inet" word.
+const BANK_BOILERPLATE_WORDS = new Set([
+  'inet', 'txndate', 'online', 'payment', 'purchase', 'transfer',
+  'direct', 'debit', 'credit', 'standing', 'order', 'sepa', 'bacs',
+  'charge', 'fee', 'via', 'bank', 'card', 'pos', 'atm', 'ref',
+]);
+
+function extractDistinctiveToken(description) {
+  const cleaned = cleanPayee(description);
+  const words = cleaned.split(' ').filter(w => w && !BANK_BOILERPLATE_WORDS.has(w));
+  return words.join(' ');
+}
+
+// Returns true only when two descriptions share the same distinctive payee identity.
+// Requires the leading distinctive word to match exactly (prevents HERORENT matching HEROSPONSOR)
+// and overall token overlap ≥ 0.9 for multi-word tokens.
+function isSiblingMatch(descA, descB) {
+  const tokA = extractDistinctiveToken(descA);
+  const tokB = extractDistinctiveToken(descB);
+  if (!tokA || !tokB) return false;
+  if (tokA === tokB) return true;
+  const wA = tokA.split(' ');
+  const wB = tokB.split(' ');
+  if (wA[0] !== wB[0]) return false;
+  return wordOverlap(tokA, tokB) >= 0.9;
 }
 
 function suggestNominalFallback(description, amount) {
@@ -9076,10 +10890,10 @@ class BankImportErrorBoundary extends React.Component {
   }
 }
 
-const BankImport = React.memo(function BankImport({ companyId }) {
+const BankImport = React.memo(function BankImport({ companyId, isActive, company }) {
   const { user } = useUser();
-  const { accounts: coaAccounts } = useChartOfAccounts(companyId);
-  const { rules: txRules } = useTransactionRules(companyId);
+  const { accounts: coaAccounts, refetch: coaRefetch } = useChartOfAccounts(companyId);
+  const { rules: txRules, refetch: txRulesRefetch } = useTransactionRules(companyId);
   const [rows, setRows] = useState([]);
   const [selected, setSelected] = useState(new Set());
   const [nominals, setNominals] = useState({});
@@ -9123,6 +10937,10 @@ const BankImport = React.memo(function BankImport({ companyId }) {
   const [learnApplied, setLearnApplied]   = useState(null); // { count, ruleId, appliedIds, originalCode, nominalCode }
   const [learnConflict, setLearnConflict] = useState(false);
 
+  // Sibling-apply opt-in prompt state
+  // null | { revolut_id, code, nominalName, siblings: [{revolut_id, description, amount}], reviewing: bool }
+  const [siblingPrompt, setSiblingPrompt] = useState(null);
+
   const learnCurrent = learnQueue[0] ?? null;
   useEffect(() => {
     if (learnCurrent) setLearnKwEdit(learnCurrent.keyword);
@@ -9132,6 +10950,17 @@ const BankImport = React.memo(function BankImport({ companyId }) {
     isMountedRef.current = true;
     return () => { isMountedRef.current = false; };
   }, []);
+
+  // Refresh COA and transaction rules whenever the bank-import page becomes visible.
+  // BankImport stays mounted behind display:none, so its useChartOfAccounts / useTransactionRules
+  // data is never automatically re-fetched after Settings changes. Without this, vat_code written
+  // by post() comes from stale coaAccounts (e.g. STD23 instead of RED9 after a COA update).
+  useEffect(() => {
+    if (isActive) {
+      coaRefetch();
+      txRulesRefetch();
+    }
+  }, [isActive]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Eagerly load review count so the tab badge is visible on mount.
   // Clears state immediately on company switch so stale rows from the previous
@@ -9738,40 +11567,29 @@ const BankImport = React.memo(function BankImport({ companyId }) {
       const changedRow = rows.find(r => r.revolut_id === revolut_id);
       if (!changedRow) {
         console.warn("[handleNominalChange] row not found for revolut_id:", revolut_id);
-        // Still update the nominal even if we can't find siblings
         setNominals(p => ({ ...p, [revolut_id]: code }));
         setConfidence(p => ({ ...p, [revolut_id]: "high" }));
         return;
       }
-      const changedPayee = cleanPayee(changedRow.description || "");
+      setNominals(p => ({ ...p, [revolut_id]: code }));
+      setConfidence(p => ({ ...p, [revolut_id]: "high" }));
 
-      // Find similar unimported rows — cap at 100 to avoid blocking the UI on large imports
-      let siblings = [];
-      if (changedPayee.length >= 3) {
-        siblings = rows.filter(r =>
-          r.revolut_id !== revolut_id &&
-          !r.imported &&
-          r.description != null &&
-          wordOverlap(cleanPayee(r.description), changedPayee) >= 0.7
-        ).slice(0, 100);
-      }
-      console.log(`[handleNominalChange] ${revolut_id} → ${code} | payee="${changedPayee}" | ${siblings.length} sibling(s)`);
+      // Find genuinely similar unimported rows using tightened distinctive-token matching.
+      // Does NOT auto-apply — sets siblingPrompt so the user can confirm.
+      const siblings = rows.filter(r =>
+        r.revolut_id !== revolut_id &&
+        !r.imported &&
+        r.description != null &&
+        isSiblingMatch(changedRow.description, r.description)
+      ).slice(0, 50);
 
-      setNominals(p => {
-        const u = { ...p, [revolut_id]: code };
-        siblings.forEach(r => { u[r.revolut_id] = code; });
-        return u;
-      });
-      setConfidence(p => {
-        const u = { ...p, [revolut_id]: "high" };
-        siblings.forEach(r => { u[r.revolut_id] = "high"; });
-        return u;
-      });
       if (siblings.length > 0) {
-        clearTimeout(toastTimer.current);
-        setToast(`Applied to ${siblings.length} similar transaction${siblings.length !== 1 ? "s" : ""}`);
-        toastTimer.current = setTimeout(() => setToast(null), 3000);
+        const nomName = GL_ACCOUNTS.find(a => a.code === code)?.name || code;
+        setSiblingPrompt({ revolut_id, code, nominalName: nomName, siblings, reviewing: false });
+      } else {
+        setSiblingPrompt(null);
       }
+
       // Queue a learn prompt so user can confirm whether to always code this payee
       if (changedRow) {
         const kw = extractKeyword(changedRow.description || '');
@@ -9792,7 +11610,18 @@ const BankImport = React.memo(function BankImport({ companyId }) {
         console.error("[handleNominalChange] fallback state update also failed:", innerErr);
       }
     }
-  }, [rows, toastTimer]);
+  }, [rows]);
+
+  const applyToSiblings = () => {
+    if (!siblingPrompt) return;
+    const { code, siblings } = siblingPrompt;
+    setNominals(p => { const u = { ...p }; siblings.forEach(r => { u[r.revolut_id] = code; }); return u; });
+    setConfidence(p => { const u = { ...p }; siblings.forEach(r => { u[r.revolut_id] = "high"; }); return u; });
+    setSiblingPrompt(null);
+    clearTimeout(toastTimer.current);
+    setToast(`Applied to ${siblings.length} similar transaction${siblings.length !== 1 ? 's' : ''}`);
+    toastTimer.current = setTimeout(() => setToast(null), 3000);
+  };
 
   const toggle = (id) => setSelected(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
 
@@ -9808,6 +11637,20 @@ const BankImport = React.memo(function BankImport({ companyId }) {
     setPosting(true); setAlert(null);
     try {
       const cid = getCid();
+      // ── Monthly transaction limit check ──────────────────────────────────────
+      const txLimit = limit(company, 'bank_txns_per_month');
+      if (txLimit !== null) {
+        const monthStart = new Date();
+        monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
+        const { count: usedThisMonth } = await supabase
+          .from('bank_transactions').select('id', { count: 'exact', head: true })
+          .eq('company_id', cid).gte('created_at', monthStart.toISOString());
+        const used = usedThisMonth || 0;
+        if (used + toPost.length > txLimit) {
+          setAlert(`You've imported ${used} of ${txLimit} transactions this month on ${planLabel(company)}. Upgrade to keep going — none of the selected rows have been imported.`);
+          setPosting(false); return;
+        }
+      }
       const db = supabase;
       const batchId = crypto.randomUUID();
       const journals = toPost.map(r => {
@@ -10264,6 +12107,40 @@ const BankImport = React.memo(function BankImport({ companyId }) {
         ))}
       </div>
 
+      {/* ── Sibling-apply opt-in prompt ── */}
+      {siblingPrompt && (
+        <div style={{ background: "var(--accent-dim)", border: "1px solid rgba(16,185,129,0.3)", borderRadius: 8, padding: "10px 14px", marginBottom: 12, fontSize: 12 }}>
+          {siblingPrompt.reviewing ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+              <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+                <span style={{ color: "var(--text-muted)", flex: 1 }}>
+                  These <strong style={{ color: "var(--text)" }}>{siblingPrompt.siblings.length}</strong> similar transaction{siblingPrompt.siblings.length !== 1 ? 's' : ''} will also become <strong style={{ color: "var(--text)" }}>{siblingPrompt.nominalName}</strong>:
+                </span>
+                <button className="btn btn-p btn-sm" style={{ fontSize: 11 }} onClick={applyToSiblings}>Apply all</button>
+                <button className="btn btn-s btn-sm" style={{ fontSize: 11 }} onClick={() => setSiblingPrompt(null)}>Not now</button>
+              </div>
+              <div style={{ maxHeight: 140, overflowY: "auto", display: "flex", flexDirection: "column", gap: 3 }}>
+                {siblingPrompt.siblings.map(r => (
+                  <div key={r.revolut_id} style={{ display: "flex", justifyContent: "space-between", padding: "3px 8px", background: "var(--surface)", borderRadius: 4, fontFamily: "'Source Code Pro', monospace", fontSize: 11 }}>
+                    <span style={{ color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "70%" }}>{r.description}</span>
+                    <span style={{ color: r.amount < 0 ? "var(--red)" : "var(--green)", marginLeft: 8, flexShrink: 0 }}>{fmtEUR(r.amount)}</span>
+                  </div>
+                ))}
+              </div>
+            </div>
+          ) : (
+            <div style={{ display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+              <span style={{ color: "var(--text-muted)", flex: 1 }}>
+                Apply <strong style={{ color: "var(--text)" }}>{siblingPrompt.nominalName}</strong> to <strong style={{ color: "var(--text)" }}>{siblingPrompt.siblings.length}</strong> other similar transaction{siblingPrompt.siblings.length !== 1 ? 's' : ''}?
+              </span>
+              <button className="btn btn-s btn-sm" style={{ fontSize: 11 }} onClick={() => setSiblingPrompt(s => ({ ...s, reviewing: true }))}>Review</button>
+              <button className="btn btn-p btn-sm" style={{ fontSize: 11 }} onClick={applyToSiblings}>Apply</button>
+              <button className="btn btn-s btn-sm" style={{ fontSize: 11 }} onClick={() => setSiblingPrompt(null)}>Not now</button>
+            </div>
+          )}
+        </div>
+      )}
+
       {/* ── Rules learn prompt ── */}
       {learnCurrent && (
         <div style={{ background: "var(--accent-dim)", border: "1px solid rgba(52,211,153,0.3)", borderRadius: 8, padding: "10px 14px", marginBottom: 12, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", fontSize: 12 }}>
@@ -10698,7 +12575,7 @@ const BankImport = React.memo(function BankImport({ companyId }) {
       )}
     </div>
   );
-}, (prev, next) => prev.companyId === next.companyId); // React.memo(BankImport)
+}, (prev, next) => prev.companyId === next.companyId && prev.isActive === next.isActive); // React.memo(BankImport)
 
 const SUGGS = ["Will I have enough cash for payroll?", "What journals should I post at month end?", "What's net profit vs budget?", "Which invoices are most at risk?"];
 
@@ -10757,15 +12634,22 @@ function Chat({ page, companyName, period, selPeriod, companyId, company, onClos
           const monthMap = {};
           for (const j of (trail12Journals.data || [])) {
             const mo = j.date.slice(0, 7); // YYYY-MM
-            if (!monthMap[mo]) monthMap[mo] = { income: 0, expenses: 0, count: 0 };
+            if (!monthMap[mo]) monthMap[mo] = { income: 0, expenses: 0, byAcct: {} };
             const amt = Math.abs(Number(j.amount));
             if (j.credit_account >= '4000' && j.credit_account < '5000') monthMap[mo].income += amt;
-            if (j.debit_account  >= '5000' && j.debit_account  < '7000') monthMap[mo].expenses += amt;
-            monthMap[mo].count++;
+            if (j.debit_account  >= '5000' && j.debit_account  < '7000') {
+              monthMap[mo].expenses += amt;
+              monthMap[mo].byAcct[j.debit_account] = (monthMap[mo].byAcct[j.debit_account] || 0) + amt;
+            }
           }
           const months12 = Object.entries(monthMap).sort(([a], [b]) => a.localeCompare(b));
+          const chatAcctName = code => GL_ACCOUNTS.find(a => a.code === code)?.name || code;
           const monthly12Table = months12.length > 0
-            ? months12.map(([mo, v]) => `  ${mo}: income ${fmtE(v.income)}, expenses ${fmtE(v.expenses)}, net ${fmtE(v.income - v.expenses)} (${v.count} journals)`).join('\n')
+            ? months12.map(([mo, v]) => {
+                const top5 = Object.entries(v.byAcct).sort(([,x],[,y]) => y - x).slice(0, 5)
+                  .map(([acct, total]) => `    ${acct} ${chatAcctName(acct)}: ${fmtE(total)}`).join('\n');
+                return `  ${mo}: income ${fmtE(v.income)}, expenses ${fmtE(v.expenses)}, net ${fmtE(v.income - v.expenses)}${top5 ? '\n  top expense accounts:\n' + top5 : ''}`;
+              }).join('\n')
             : "  No journal data in trailing 12 months";
 
           // Period journal detail
@@ -10881,7 +12765,40 @@ const SETTINGS_MONTHS    = ["January","February","March","April","May","June","J
 const SETTINGS_TYPES     = ["Limited Company","Sole Trader","Partnership","LLP"];
 const SETTINGS_CURRENCIES = ["EUR","GBP","USD"];
 
-function Settings({ company, onUpdate }) {
+// VAT code labels used in the COA VAT rate column
+const COA_VAT_LABELS = {
+  STD23: '23%', RED13: '13.5%', RED9: '9%', ZERO: '0%',
+  EXEMPT: 'Exempt', NONE: 'None', RCT: 'RCT', RC_EU: 'RC EU',
+};
+
+// Known Irish VAT treatments for specific purchase/balance-sheet nominals.
+// Everything else in the 5xxx–6xxx expense range defaults to STD23.
+const PURCHASE_VAT_DEFAULTS = {
+  '4300': 'EXEMPT',  // Interest Received
+  '5300': 'NONE',    // Direct Labour (wages)
+  '6000': 'NONE',    // Payroll & PAYE
+  '6100': 'EXEMPT',  // Rent & Rates
+  '6500': 'EXEMPT',  // Bank Charges & Interest
+  '6800': 'EXEMPT',  // Insurance
+  '6950': 'NONE',    // Depreciation
+};
+
+// Returns the recommended default_vat_code for a chart-of-accounts entry.
+// salesVatCode = vatCodeForRate(company.sales_vat_rate), e.g. 'RED9'.
+function guessVatCode(code, salesVatCode) {
+  if (!code) return null;
+  const c = String(code);
+  // Income accounts → company sales rate
+  if (c >= '4000' && c < '5000') return salesVatCode || 'STD23';
+  // Balance sheet (assets, liabilities, equity)
+  if (c < '4000' || (c >= '7000')) return 'NONE';
+  // Known purchase overrides
+  if (PURCHASE_VAT_DEFAULTS[c]) return PURCHASE_VAT_DEFAULTS[c];
+  // Remaining expense accounts
+  return 'STD23';
+}
+
+function Settings({ company, onUpdate, onNavigate }) {
   const { user } = useUser();
   const blank = () => ({
     name:            company?.name            || "",
@@ -11055,9 +12972,12 @@ function Settings({ company, onUpdate }) {
   const coaAdd = async () => {
     if (!coaForm?.code || !coaForm.name || !company?.id) return;
     setCoaSaving(true);
+    const salesVc = vatCodeForRate(company?.sales_vat_rate) || 'STD23';
+    const defaultVc = coaForm.default_vat_code || guessVatCode(coaForm.code.trim(), salesVc);
     await supabase.from("chart_of_accounts").insert({
       company_id: company.id, code: coaForm.code.trim(), name: coaForm.name.trim(),
-      account_type: coaForm.account_type, category: coaForm.category || "", is_active: true, is_system: false,
+      account_type: coaForm.account_type, category: coaForm.category || "",
+      default_vat_code: defaultVc, is_active: true, is_system: false,
     });
     setCoaForm(null); setCoaSaving(false); coaRefetch();
   };
@@ -11066,8 +12986,17 @@ function Settings({ company, onUpdate }) {
     if (!company?.id) return;
     setCoaSaving(true);
     await supabase.from("chart_of_accounts")
-      .update({ name: coaEditForm.name, category: coaEditForm.category || "" }).eq("id", id);
+      .update({ name: coaEditForm.name, category: coaEditForm.category || "", default_vat_code: coaEditForm.default_vat_code || null })
+      .eq("id", id);
     setCoaEdit(null); setCoaSaving(false); coaRefetch();
+  };
+
+  const coaSaveVatCode = async (id, vatCode) => {
+    if (!company?.id) return;
+    await supabase.from("chart_of_accounts")
+      .update({ default_vat_code: vatCode || null }).eq("id", id);
+    // Optimistic local update so the dropdown reflects instantly
+    coaRefetch();
   };
 
   const coaDelete = async (id) => {
@@ -11180,8 +13109,23 @@ function Settings({ company, onUpdate }) {
       .eq("id", company.id)
       .select()
       .single();
-    if (err) { setError(err.message); }
-    else     { setSaved(true); onUpdate(data); setTimeout(() => setSaved(false), 3000); }
+    if (err) { setError(err.message); setSaving(false); return; }
+    // Sync COA sales accounts (4xxx) to match the saved sales VAT rate.
+    // Only updates accounts whose current default is a rate code (not EXEMPT/NONE/RCT),
+    // so manually-overridden accounts like 4300 Interest (EXEMPT) are preserved.
+    const salesVc = vatCodeForRate(Number(form.sales_vat_rate) || 23);
+    if (salesVc && !coa.some(a => a._static)) {
+      const rateSet = new Set(['STD23', 'RED13', 'RED9', 'ZERO', null]);
+      const toSync  = coa.filter(a => a.code >= '4000' && a.code < '5000' && rateSet.has(a.default_vat_code));
+      if (toSync.length) {
+        await supabase.from('chart_of_accounts')
+          .update({ default_vat_code: salesVc })
+          .eq('company_id', company.id)
+          .in('id', toSync.map(a => a.id));
+        coaRefetch();
+      }
+    }
+    setSaved(true); onUpdate(data); setTimeout(() => setSaved(false), 3000);
     setSaving(false);
   };
 
@@ -11197,6 +13141,26 @@ function Settings({ company, onUpdate }) {
       <div style={{ marginBottom: 18 }}>
         <div style={{ fontSize: 17, fontWeight: 700, color: "var(--text)", marginBottom: 2 }}>Company Settings</div>
         <div style={{ fontSize: 12, color: "var(--muted)" }}>Update your company profile, tax settings, and compliance dates.</div>
+      </div>
+
+      {/* ── Plan badge ── */}
+      <div style={{ marginBottom: 16, display: 'flex', alignItems: 'center', gap: 12, background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-card)', padding: '12px 16px' }}>
+        <div>
+          <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text-faint)', marginBottom: 4 }}>CURRENT PLAN</div>
+          <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--accent)', background: 'var(--accent-dim)', border: '1px solid rgba(52,211,153,0.25)', borderRadius: 'var(--radius-pill)', padding: '3px 12px', display: 'inline-block' }}>
+            {planLabel(company)}
+          </span>
+        </div>
+        <div style={{ fontSize: 11, color: 'var(--text-faint)', flex: 1, lineHeight: 1.5 }}>
+          {company?.plan === 'pending' && 'Account awaiting activation — contact peter@ledgrly.ie to go live.'}
+          {company?.plan === 'personal' && 'Bank import, journals, GL, and reconciliation. Upgrade for VAT, invoicing, expenses, and more.'}
+          {(company?.plan === 'founder' || !company?.plan) && 'Full access — all features included.'}
+          {company?.plan === 'practice' && 'Full access — multi-client practice management included.'}
+          {company?.plan === 'enterprise' && 'Full access — API access included.'}
+        </div>
+        <a href="mailto:peter@ledgrly.ie?subject=Plan+enquiry" style={{ fontSize: 11, color: 'var(--accent)', textDecoration: 'none', whiteSpace: 'nowrap', flexShrink: 0 }}>
+          Contact us →
+        </a>
       </div>
 
       {/* ── Company Details ── */}
@@ -11234,6 +13198,22 @@ function Settings({ company, onUpdate }) {
               </select>
             </div>
           </div>
+        </div>
+      </div>
+
+      {/* ── Client Setup ── */}
+      <div className="card" style={{ marginBottom: 13 }}>
+        <div className="card-header"><span className="card-title">Client Setup</span></div>
+        <div style={{ padding: "16px 15px", display: "flex", alignItems: "center", justifyContent: "space-between", gap: 16 }}>
+          <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.5 }}>
+            <div style={{ fontWeight: 600, color: "var(--text)", marginBottom: 2 }}>Opening Balances</div>
+            One-time setup when onboarding a new client — enter the opening trial balance to start the ledger from the correct position.
+          </div>
+          {onNavigate && (
+            <button className="btn btn-s btn-sm" style={{ flexShrink: 0 }} onClick={() => onNavigate('opening-balances')}>
+              Opening Balances →
+            </button>
+          )}
         </div>
       </div>
 
@@ -11520,10 +13500,10 @@ function Settings({ company, onUpdate }) {
         </div>
       </div>
 
-      {/* ── Prior Year Data ── */}
+      {/* ── Prior Year Comparatives (report comparison only — NOT opening balances) ── */}
       <div className="card" style={{ marginBottom: 13 }}>
         <div className="card-header">
-          <span className="card-title">Prior Year Data</span>
+          <span className="card-title">Prior Year Comparatives</span>
           {pyMeta && (
             <span style={{ fontSize: 10, fontFamily: "Source Code Pro, monospace", color: "var(--teal)", background: "rgba(29,107,114,0.08)", padding: "2px 8px", borderRadius: 20, border: "1px solid rgba(29,107,114,0.2)" }}>
               {pyMeta.count} accounts loaded
@@ -11531,6 +13511,9 @@ function Settings({ company, onUpdate }) {
           )}
         </div>
         <div style={{ padding: "16px 15px" }}>
+          <div style={{ fontSize: 11.5, color: "var(--dim)", background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 6, padding: "8px 12px", marginBottom: 14, lineHeight: 1.5 }}>
+            Comparative figures shown alongside the current year in reports. This does <strong>NOT</strong> set your opening position — use <strong>Opening Balances</strong> for that.
+          </div>
           {pyMeta ? (
             <div>
               <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 14 }}>
@@ -11552,18 +13535,18 @@ function Settings({ company, onUpdate }) {
               </div>
               {pyConfirmDelete ? (
                 <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-                  <span style={{ fontSize: 12, color: "var(--red)" }}>Delete all prior year data?</span>
+                  <span style={{ fontSize: 12, color: "var(--red)" }}>Delete all prior year comparatives?</span>
                   <button className="btn btn-d btn-sm" onClick={deletePY}>Yes, Delete</button>
                   <button className="btn btn-s btn-sm" onClick={() => setPyConfirmDelete(false)}>Cancel</button>
                 </div>
               ) : (
-                <button className="btn btn-d btn-sm" onClick={() => setPyConfirmDelete(true)}>Delete Prior Year Data</button>
+                <button className="btn btn-d btn-sm" onClick={() => setPyConfirmDelete(true)}>Delete Prior Year Comparatives</button>
               )}
             </div>
           ) : (
             <div>
               <div style={{ fontSize: 13, color: "var(--muted)", marginBottom: 12, lineHeight: 1.6 }}>
-                Upload a prior year trial balance CSV to show a comparison column in GL Reports P&L. Once uploaded, prior year figures will appear alongside current year figures.
+                Upload prior year closing figures (CSV) to show a comparison column in GL Reports P&L. This is for report comparison only — it does not affect your ledger or Balance Sheet. Once uploaded, prior year figures will appear alongside current year figures.
               </div>
               <div style={{ fontSize: 12, color: "var(--dim)", marginBottom: 14, fontFamily: "Source Code Pro, monospace", background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 6, padding: "10px 13px", lineHeight: 1.8 }}>
                 CSV format: <strong>Account Code, Account Name, Debit Balance, Credit Balance</strong><br />
@@ -11572,7 +13555,7 @@ function Settings({ company, onUpdate }) {
               </div>
               <div className="f-row" style={{ marginBottom: 12 }}>
                 <div className="f-group">
-                  <label className="f-label">Prior Year End Date</label>
+                  <label className="f-label">Comparative Year End Date</label>
                   <input type="date" className="f-input" value={pyYearEndDate} onChange={e => { setPyYearEndDate(e.target.value); setPyUploadError(null); }} />
                 </div>
               </div>
@@ -11767,7 +13750,7 @@ function Settings({ company, onUpdate }) {
             <input className="f-input" style={{ width: 180, fontSize: 12, padding: "4px 9px" }}
               placeholder="Search…" value={coaSearch} onChange={e => setCoaSearch(e.target.value)} />
             <button className="btn btn-p btn-sm"
-              onClick={() => setCoaForm({ code: "", name: "", account_type: "expense", category: "" })}>
+              onClick={() => setCoaForm({ code: "", name: "", account_type: "expense", category: "", default_vat_code: "" })}>
               + Add Account
             </button>
           </div>
@@ -11775,8 +13758,8 @@ function Settings({ company, onUpdate }) {
 
         {coaForm && (
           <div style={{ padding: "12px 15px", borderBottom: "1px solid var(--border)", background: "rgba(26,39,68,0.02)" }}>
-            <div className="f-row" style={{ gridTemplateColumns: "90px 1fr 120px 1fr" }}>
-              <div className="f-group"><label className="f-label">Code</label><input className="f-input" value={coaForm.code} onChange={e => setCoaForm(p => ({ ...p, code: e.target.value }))} placeholder="7000" /></div>
+            <div className="f-row" style={{ gridTemplateColumns: "90px 1fr 120px 1fr 110px" }}>
+              <div className="f-group"><label className="f-label">Code</label><input className="f-input" value={coaForm.code} onChange={e => { const code = e.target.value; const salesVc = vatCodeForRate(company?.sales_vat_rate) || 'STD23'; setCoaForm(p => ({ ...p, code, default_vat_code: p.default_vat_code || guessVatCode(code, salesVc) })); }} placeholder="7000" /></div>
               <div className="f-group"><label className="f-label">Name</label><input className="f-input" value={coaForm.name} onChange={e => setCoaForm(p => ({ ...p, name: e.target.value }))} placeholder="Account name" /></div>
               <div className="f-group">
                 <label className="f-label">Type</label>
@@ -11785,6 +13768,13 @@ function Settings({ company, onUpdate }) {
                 </select>
               </div>
               <div className="f-group"><label className="f-label">Category</label><input className="f-input" value={coaForm.category} onChange={e => setCoaForm(p => ({ ...p, category: e.target.value }))} placeholder="e.g. Overheads" /></div>
+              <div className="f-group">
+                <label className="f-label">VAT Rate</label>
+                <select className="f-input" value={coaForm.default_vat_code || ''} onChange={e => setCoaForm(p => ({ ...p, default_vat_code: e.target.value }))}>
+                  <option value="">— auto —</option>
+                  {Object.entries(COA_VAT_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                </select>
+              </div>
             </div>
             <div style={{ display: "flex", gap: 8 }}>
               <button className="btn btn-p btn-sm" onClick={coaAdd} disabled={coaSaving || !coaForm.code || !coaForm.name}>{coaSaving ? "Saving…" : "Save Account"}</button>
@@ -11804,7 +13794,7 @@ function Settings({ company, onUpdate }) {
         ) : (
           <div style={{ overflowX: "auto" }}>
             <table className="gl-table" style={{ minWidth: 560 }}>
-              <thead><tr><th>Code</th><th>Name</th><th>Type</th><th>Category</th><th style={{ textAlign: "center" }}>Active</th><th></th></tr></thead>
+              <thead><tr><th>Code</th><th>Name</th><th>Type</th><th>Category</th><th>VAT Rate</th><th style={{ textAlign: "center" }}>Active</th><th></th></tr></thead>
               <tbody>
                 {["asset","liability","equity","income","expense"].flatMap(typeKey => {
                   const rows = filteredCoa.filter(a => a.account_type === typeKey);
@@ -11832,6 +13822,21 @@ function Settings({ company, onUpdate }) {
                             ? <input className="f-input" style={{ padding: "3px 7px", fontSize: 12 }} value={coaEditForm.category} onChange={e => setCoaEditForm(p => ({ ...p, category: e.target.value }))} />
                             : <span style={{ fontSize: 11, color: "var(--muted)" }}>{a.category || "—"}</span>}
                         </td>
+                        <td>
+                          {coaIsStatic(a) ? (
+                            <span style={{ fontSize: 11, color: "var(--muted)" }}>{COA_VAT_LABELS[a.default_vat_code] || a.default_vat_code || '—'}</span>
+                          ) : (
+                            <select
+                              className="f-input"
+                              style={{ padding: "2px 4px", fontSize: 11, width: "100%" }}
+                              value={a.default_vat_code || ''}
+                              onChange={e => coaSaveVatCode(a.id, e.target.value)}
+                            >
+                              <option value="">—</option>
+                              {Object.entries(COA_VAT_LABELS).map(([k, v]) => <option key={k} value={k}>{v}</option>)}
+                            </select>
+                          )}
+                        </td>
                         <td style={{ textAlign: "center" }}>
                           <button onClick={() => !coaIsStatic(a) && coaToggleActive(a.id, a.is_active)}
                             title={coaIsStatic(a) ? "Run SQL migration to enable" : (a.is_active ? "Deactivate" : "Activate")}
@@ -11845,7 +13850,7 @@ function Settings({ company, onUpdate }) {
                               {coaEdit === a.id ? (
                                 <><button className="btn btn-p btn-sm" onClick={() => coaSaveEdit(a.id)} disabled={coaSaving}>Save</button><button className="btn btn-s btn-sm" onClick={() => setCoaEdit(null)}>Cancel</button></>
                               ) : (
-                                <><button className="btn btn-s btn-sm" onClick={() => { setCoaEdit(a.id); setCoaEditForm({ name: a.name, category: a.category || "" }); }}>Edit</button>
+                                <><button className="btn btn-s btn-sm" onClick={() => { setCoaEdit(a.id); setCoaEditForm({ name: a.name, category: a.category || "", default_vat_code: a.default_vat_code || "" }); }}>Edit</button>
                                 {!a.is_system && (coaConfirmDelete === a.id
                                   ? <><button className="btn btn-d btn-sm" onClick={() => coaDelete(a.id)}>Confirm</button><button className="btn btn-s btn-sm" onClick={() => setCoaConfirmDelete(null)}>No</button></>
                                   : <button className="btn btn-d btn-sm" onClick={() => setCoaConfirmDelete(a.id)}>Delete</button>)}</>
@@ -12500,6 +14505,74 @@ function AddCompanyModal({ user, onSuccess, onClose }) {
   );
 }
 
+// ─── PENDING GATE ─────────────────────────────────────────────────────────────
+function PendingGate() {
+  return (
+    <div style={{ minHeight: '100vh', display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center', background: 'var(--bg)', gap: 24, padding: 32 }}>
+      <svg width="42" height="42" viewBox="0 0 100 100" fill="none">
+        <rect x="22" y="12" width="16" height="76" rx="8" fill="#e8edeb"/>
+        <rect x="22" y="72" width="56" height="16" rx="8" fill="#e8edeb"/>
+        <rect x="46" y="24" width="13" height="46" rx="6.5" fill="#10b981"/>
+        <rect x="46" y="57" width="32" height="13" rx="6.5" fill="#10b981"/>
+      </svg>
+      <div style={{ textAlign: 'center', maxWidth: 380 }}>
+        <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--text)', marginBottom: 10 }}>Thanks for signing up</div>
+        <div style={{ fontSize: 14, color: 'var(--text-muted)', lineHeight: 1.7, marginBottom: 24 }}>
+          Your Ledgrly account is being set up. We'll email you as soon as it's ready to use.
+        </div>
+        <a href="mailto:peter@ledgrly.ie?subject=Account+setup+query" style={{ fontSize: 13, color: 'var(--accent)', textDecoration: 'none', borderBottom: '1px solid rgba(52,211,153,0.4)', paddingBottom: 2 }}>
+          Questions? Email peter@ledgrly.ie
+        </a>
+      </div>
+    </div>
+  );
+}
+
+// ─── UPGRADE CARD ─────────────────────────────────────────────────────────────
+function UpgradeCard({ feature, onClose, inline = false }) {
+  const label = FEATURE_LABELS[feature] || feature;
+  const value = FEATURE_VALUE[feature] || '';
+  const inPlan = planFor(feature);
+  const card = (
+    <div style={{
+      background: 'var(--surface)', border: '1px solid var(--border)',
+      borderRadius: 'var(--radius-card)', padding: inline ? '18px 20px' : '28px 32px',
+      maxWidth: inline ? undefined : 400, width: '100%', position: 'relative',
+      boxShadow: inline ? 'none' : '0 12px 48px rgba(0,0,0,0.5)',
+      textAlign: 'center',
+    }}>
+      {!inline && onClose && (
+        <button onClick={onClose} style={{ position: 'absolute', top: 14, right: 16, background: 'none', border: 'none', color: 'var(--text-faint)', fontSize: 18, cursor: 'pointer', lineHeight: 1 }}>×</button>
+      )}
+      <div style={{ fontSize: 28, marginBottom: 12 }}>🔒</div>
+      <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text)', marginBottom: 8 }}>{label}</div>
+      {value && <div style={{ fontSize: 13, color: 'var(--text-muted)', lineHeight: 1.6, marginBottom: 14 }}>{value}</div>}
+      <div style={{ fontSize: 11, color: 'var(--accent)', background: 'var(--accent-dim)', border: '1px solid rgba(52,211,153,0.25)', borderRadius: 'var(--radius-pill)', padding: '3px 10px', display: 'inline-block', marginBottom: 18, fontWeight: 600 }}>
+        Included in {inPlan}
+      </div>
+      <div>
+        <a
+          href={`mailto:peter@ledgrly.ie?subject=Upgrade+enquiry+—+${encodeURIComponent(label)}`}
+          style={{ display: 'inline-block', background: 'var(--accent)', color: '#000', fontWeight: 700, fontSize: 12, borderRadius: 'var(--radius-pill)', padding: '8px 20px', textDecoration: 'none', letterSpacing: '0.02em' }}
+        >
+          Contact us — peter@ledgrly.ie
+        </a>
+      </div>
+      {inline && onClose && (
+        <button onClick={onClose} style={{ marginTop: 12, fontSize: 11, color: 'var(--text-faint)', background: 'none', border: 'none', cursor: 'pointer', textDecoration: 'underline' }}>Dismiss</button>
+      )}
+    </div>
+  );
+  if (inline) return card;
+  return createPortal(
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 2000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}
+      onClick={onClose}>
+      <div onClick={e => e.stopPropagation()}>{card}</div>
+    </div>,
+    document.body
+  );
+}
+
 // ─── COMPANY SWITCHER ─────────────────────────────────────────────────────────
 function CompanySwitcher({ companies, company, onSwitch, onPractice, onAddCompany }) {
   const [open, setOpen] = useState(false);
@@ -12529,8 +14602,12 @@ function CompanySwitcher({ companies, company, onSwitch, onPractice, onAddCompan
               key={c.id}
               className={`co-menu-item ${c.id === company?.id ? "active" : ""}`}
               onClick={() => { onSwitch(c); setOpen(false); }}
+              style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}
             >
-              {c.id === company?.id ? "✓ " : "  "}{c.name}
+              <span>{c.id === company?.id ? "✓ " : "  "}{c.name}</span>
+              <span style={{ fontSize: 9, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: isPending(c) ? 'var(--warn)' : 'var(--text-faint)', opacity: 0.8, flexShrink: 0 }}>
+                {planLabel(c)}
+              </span>
             </button>
           ))}
           <button className="co-menu-item" style={{ borderTop: "1px solid rgba(255,255,255,0.08)", color: "var(--accent)", fontSize: 11, fontFamily: "'Source Code Pro', monospace", letterSpacing: "0.04em" }}
@@ -12809,9 +14886,9 @@ function PracticeDashboard({ companies, onSelectCompany, onAddCompany }) {
 }
 
 // ─── EXPENSES PAGE ───────────────────────────────────────────────────────────
-function Expenses({ companyName = "Company", isAdmin = false, companyId }) {
+function Expenses({ companyName = "Company", isAdmin = false, companyId, isActive }) {
   const { user } = useUser();
-  const { accounts: coaAccounts }   = useChartOfAccounts(companyId);
+  const { accounts: coaAccounts, refetch: coaRefetch }   = useChartOfAccounts(companyId);
   const [expenses, setExpenses]     = useState([]);
   const [loading, setLoading]       = useState(true);
   const [view, setView]             = useState("mine");
@@ -12867,6 +14944,12 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId }) {
       setLoading(false);
     })();
   }, [companyId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Expenses stays mounted behind display:none — refresh COA on activation so
+  // the account dropdown always reflects the latest chart_of_accounts.
+  useEffect(() => {
+    if (isActive) coaRefetch();
+  }, [isActive]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleFile = async file => {
     if (!file) return;
@@ -13445,6 +15528,7 @@ function Reconciliation({ companyId, onNavigate }) {
       showToast('Match confirmed');
       await loadAll();
     } catch (err) {
+      captureError(err, { company_id: companyId, operation: 'confirm-journal-match' });
       showToast('Error: ' + err.message);
     }
   };
@@ -13539,8 +15623,8 @@ function Reconciliation({ companyId, onNavigate }) {
           };
 
       const { data, error } = await supabase.rpc('confirm_settlement', payload);
-      if (error) throw new Error(error.message);
-      if (data?.error) throw new Error(data.error);
+      if (error) { captureError(error, { company_id: companyId, operation: 'settlement-rpc' }); throw new Error(error.message); }
+      if (data?.error) { captureError(new Error(data.error), { company_id: companyId, operation: 'settlement-rpc' }); throw new Error(data.error); }
 
       showToast(settleMode === 'on_account'
         ? 'Recorded on account'
@@ -14071,37 +16155,2500 @@ function Reconciliation({ companyId, onNavigate }) {
   );
 }
 
+// ─────────────────────────────────────────────────────────────────────────────
+// BrightPayImporter — parse, validate, preview, post BrightPay payroll CSVs
+// ─────────────────────────────────────────────────────────────────────────────
+
+function _parseCsvRow(line) {
+  const cols = []; let cur = ''; let inQ = false;
+  for (const ch of line) {
+    if (ch === '"') { inQ = !inQ; }
+    else if (ch === ',' && !inQ) { cols.push(cur); cur = ''; }
+    else cur += ch;
+  }
+  cols.push(cur);
+  return cols;
+}
+
+function parseBrightPayCSV(text, coaAccounts) {
+  const lines = text.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+  if (lines.length < 2) return { errors: ['File is empty or contains no data rows.'] };
+
+  const hdr     = _parseCsvRow(lines[0]).map(h => h.toLowerCase().trim());
+  const dateIdx = hdr.indexOf('date');
+  const refIdx  = hdr.indexOf('reference');
+  const codeIdx = hdr.indexOf('code');
+  const descIdx = hdr.indexOf('description');
+  const amtIdx  = hdr.indexOf('amount');
+
+  if ([dateIdx, refIdx, codeIdx, descIdx, amtIdx].some(i => i === -1))
+    return { errors: ['CSV header must contain: Date, Reference, Code, Description, Amount'] };
+
+  const rows = []; const parseErrors = [];
+  for (let i = 1; i < lines.length; i++) {
+    const cols    = _parseCsvRow(lines[i]);
+    if (cols.length < Math.max(dateIdx, refIdx, codeIdx, descIdx, amtIdx) + 1) continue;
+    const rawDate = cols[dateIdx]?.trim() || '';
+    const ref     = cols[refIdx]?.trim()  || '';
+    const code    = cols[codeIdx]?.trim() || '';
+    const desc    = cols[descIdx]?.trim() || '';
+    const rawAmt  = (cols[amtIdx]?.trim() || '').replace(/[,€£$\s]/g, '');
+    if (!rawDate && !code && !rawAmt) continue;
+
+    const dp = rawDate.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
+    if (!dp) { parseErrors.push(`Row ${i + 1}: invalid date "${rawDate}" — expected DD/MM/YYYY`); continue; }
+    const date = `${dp[3]}-${dp[2].padStart(2,'0')}-${dp[1].padStart(2,'0')}`;
+
+    const amount = parseFloat(rawAmt);
+    if (isNaN(amount)) { parseErrors.push(`Row ${i + 1}: amount "${cols[amtIdx]}" is not a valid number`); continue; }
+    if (amount === 0) continue;
+
+    rows.push({ date, reference: ref, code, description: desc, amount });
+  }
+
+  if (parseErrors.length) return { errors: parseErrors };
+  if (rows.length === 0)  return { errors: ['No valid data rows found — check the file is a BrightPay nominal export.'] };
+
+  // Guard: sum to zero
+  const sum = rows.reduce((s, r) => s + r.amount, 0);
+  if (Math.abs(sum) >= 0.01)
+    return { errors: [`Journal does not balance (off by €${Math.abs(sum).toFixed(2)}) — check the BrightPay export settings.`] };
+
+  // Guard: all codes must be in the chart of accounts
+  const coa = new Set(coaAccounts.map(a => a.code));
+  const unknown = [...new Set(rows.map(r => r.code).filter(c => !coa.has(c)))];
+  if (unknown.length)
+    return { errors: unknown.map(c => `Code ${c} not found in your chart of accounts — map it in BrightPay or add it to Ledgrly first.`) };
+
+  return { errors: [], date: rows[0].date, reference: rows[0].reference || 'PAYROLL', lines: rows };
+}
+
+// Converts a compound multi-leg journal into 2-account rows for the journals table.
+// Uses a waterfall queue to pair each credit against debits in order.
+// Preserves each account's exact net amount in the GL.
+function _buildPayrollRows(companyId, date, reference, lines, batchId) {
+  const debits  = lines.filter(l => l.amount > 0).map(l => ({ ...l, rem: l.amount }));
+  const credits = lines.filter(l => l.amount < 0).map(l => ({ ...l, rem: Math.abs(l.amount) }));
+  const rows = []; let di = 0, ci = 0;
+  while (di < debits.length && ci < credits.length) {
+    const matched = Math.round(Math.min(debits[di].rem, credits[ci].rem) * 100) / 100;
+    if (matched > 0) {
+      rows.push({
+        company_id: companyId, date,
+        description: `Payroll — ${reference}`,
+        debit_account: debits[di].code, credit_account: credits[ci].code,
+        amount: matched,
+        vat_code: null, reference,
+        source_recurring_id: null, is_accrual_reversal: false,
+        import_batch_id: batchId,
+      });
+    }
+    debits[di].rem  = Math.round((debits[di].rem  - matched) * 100) / 100;
+    credits[ci].rem = Math.round((credits[ci].rem - matched) * 100) / 100;
+    if (debits[di].rem  < 0.005) di++;
+    if (credits[ci].rem < 0.005) ci++;
+  }
+  return rows;
+}
+
+function BrightPayImporter({ companyId }) {
+  const { accounts: coaAccounts } = useChartOfAccounts(companyId);
+  const [parsed,   setParsed]  = useState(null);
+  const [errors,   setErrors]  = useState([]);
+  const [dupe,     setDupe]    = useState(null);   // { count, dates[] }
+  const [dupeAck,  setDupeAck] = useState(false);
+  const [posting,  setPosting] = useState(false);
+  const [postErr,  setPostErr] = useState(null);
+  const [posted,   setPosted]  = useState(null);   // { rows, reference, date }
+  const [dragging, setDragging]= useState(false);
+  const [fileKey,  setFileKey] = useState(0);
+  const fileRef = useRef(null);
+
+  const coaMap = Object.fromEntries(coaAccounts.map(a => [a.code, a.name || a.code]));
+
+  const processFile = async (file) => {
+    if (!file || !companyId) return;
+    setErrors([]); setParsed(null); setDupe(null); setDupeAck(false); setPostErr(null); setPosted(null);
+    const text   = await file.text();
+    const result = parseBrightPayCSV(text, coaAccounts);
+    if (result.errors.length) { setErrors(result.errors); return; }
+    setParsed(result);
+    // Idempotency check: existing journal with same reference for this company
+    const { data: existing } = await supabase
+      .from('journals').select('id, date')
+      .eq('company_id', companyId).eq('reference', result.reference).limit(10);
+    if (existing?.length)
+      setDupe({ count: existing.length, dates: [...new Set(existing.map(j => j.date))].slice(0, 3) });
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault(); setDragging(false);
+    const f = e.dataTransfer.files[0];
+    if (f) processFile(f);
+  };
+
+  const handlePost = async () => {
+    if (!companyId || !parsed) return;
+    if (dupe && !dupeAck) return;
+    setPosting(true); setPostErr(null);
+    try {
+      let lockCheck;
+      try { lockCheck = await isPeriodLocked(companyId, parsed.date); }
+      catch (e) {
+        captureError(e, { company_id: companyId, operation: 'brightpay-period-lock-check' });
+        setPostErr(`Couldn't verify period lock — ${e.message}. Try again.`); setPosting(false); return;
+      }
+      if (lockCheck.locked) {
+        const filed = lockCheck.filedAt ? new Date(lockCheck.filedAt).toLocaleDateString('en-IE') : 'a previous date';
+        setPostErr(`Period locked — VAT3 filed on ${filed}. Post to the current period or unlock first.`);
+        setPosting(false); return;
+      }
+      const batchId = crypto.randomUUID();
+      const rows    = _buildPayrollRows(companyId, parsed.date, parsed.reference, parsed.lines, batchId);
+      const { error } = await supabase.from('journals').insert(rows);
+      if (error) {
+        captureError(error, { company_id: companyId, operation: 'brightpay-journal-post', reference: parsed.reference });
+        throw new Error(error.message);
+      }
+      setPosted({ rows: rows.length, reference: parsed.reference, date: parsed.date });
+    } catch (e) { setPostErr(e.message); }
+    setPosting(false);
+  };
+
+  const reset = () => {
+    setParsed(null); setErrors([]); setDupe(null); setDupeAck(false);
+    setPostErr(null); setPosted(null); setFileKey(k => k + 1);
+  };
+
+  const debits  = (parsed?.lines || []).filter(l => l.amount > 0);
+  const credits = (parsed?.lines || []).filter(l => l.amount < 0);
+  const total   = debits.reduce((s, l) => s + l.amount, 0);
+  const canPost = !!parsed && (!dupe || dupeAck);
+
+  if (posted) return (
+    <div className="card bpi-wrap">
+      <div className="card-body">
+        <div className="bpi-success">
+          <div className="bpi-success-icon">✓</div>
+          <div className="bpi-success-ref">{posted.reference}</div>
+          <div className="bpi-success-sub">
+            Payroll journal posted — {posted.rows} journal row{posted.rows !== 1 ? 's' : ''} · {new Date(posted.date + 'T12:00:00').toLocaleDateString('en-IE', { day: 'numeric', month: 'long', year: 'numeric' })}<br />
+            Visible in GL Reports → Journals. DR/CR 2200/2250/2260 control accounts updated.
+          </div>
+        </div>
+        <div className="bpi-actions" style={{ justifyContent: 'center', marginTop: 20 }}>
+          <button className="btn btn-p" onClick={reset}>Import Another</button>
+          </div>
+      </div>
+    </div>
+  );
+
+  return (
+    <div className="card bpi-wrap">
+      <div className="card-hdr-row" style={{ padding: '16px 20px 0' }}>
+        <div>
+          <div className="card-title">BrightPay Payroll Import</div>
+          <div className="card-sub" style={{ marginTop: 3 }}>Upload a BrightPay nominal CSV export to validate and post the payroll journal</div>
+        </div>
+      </div>
+      <div className="card-body">
+
+        {/* Drop zone */}
+        {!parsed && (
+          <div
+            className={`bpi-drop${dragging ? ' drag' : ''}`}
+            onClick={() => fileRef.current?.click()}
+            onDragOver={e => { e.preventDefault(); setDragging(true); }}
+            onDragLeave={() => setDragging(false)}
+            onDrop={handleDrop}
+          >
+            <input key={fileKey} ref={fileRef} type="file" accept=".csv,text/csv" style={{ display: 'none' }}
+              onChange={e => { const f = e.target.files?.[0]; if (f) processFile(f); }} />
+            <div className="bpi-drop-icon">⇅</div>
+            <div className="bpi-drop-text">Click to select or drag a BrightPay CSV</div>
+            <div className="bpi-drop-hint">Date · Reference · Code · Description · Amount</div>
+          </div>
+        )}
+
+        {/* Validation errors */}
+        {errors.length > 0 && (
+          <div className="bpi-errors">
+            <div className="bpi-errors-hdr">Cannot post — {errors.length} error{errors.length > 1 ? 's' : ''}</div>
+            <ul>{errors.map((e, i) => <li key={i}>{e}</li>)}</ul>
+            <div style={{ marginTop: 10 }}>
+              <button className="btn btn-s" onClick={reset}>Try another file</button>
+            </div>
+          </div>
+        )}
+
+        {/* Duplicate warning */}
+        {dupe && (
+          <div className="bpi-warn">
+            <strong>Duplicate warning:</strong> {dupe.count} journal row{dupe.count > 1 ? 's' : ''} with reference <strong>{parsed?.reference}</strong> already exist in the GL
+            {dupe.dates.length ? ` (dates: ${dupe.dates.map(d => new Date(d+'T12:00:00').toLocaleDateString('en-IE',{day:'numeric',month:'short',year:'numeric'})).join(', ')})` : ''}.
+            Only continue if you are reversing or restating a payroll run.
+            <label>
+              <input type="checkbox" checked={dupeAck} onChange={e => setDupeAck(e.target.checked)} />
+              I understand — post anyway
+            </label>
+          </div>
+        )}
+
+        {/* Preview */}
+        {parsed && (
+          <>
+            <div className="bpi-meta">
+              <div className="bpi-meta-item">Date <strong>{new Date(parsed.date+'T12:00:00').toLocaleDateString('en-IE',{day:'numeric',month:'long',year:'numeric'})}</strong></div>
+              <div className="bpi-meta-item">Reference <strong>{parsed.reference}</strong></div>
+              <div className="bpi-meta-item">Lines <strong>{parsed.lines.length}</strong></div>
+              <div className="bpi-meta-item">Total <strong>{fmtEUR(total)}</strong></div>
+            </div>
+
+            <div className="bpi-preview-hdr">Journal Preview</div>
+            <table className="bpi-tbl">
+              <thead>
+                <tr>
+                  <th style={{ width: 36 }}></th>
+                  <th>Code</th>
+                  <th>Account</th>
+                  <th>Description</th>
+                  <th style={{ textAlign: 'right' }}>Amount</th>
+                </tr>
+              </thead>
+              <tbody>
+                {debits.map((l, i) => (
+                  <tr key={`dr-${i}`}>
+                    <td><span className="bpi-badge-dr">DR</span></td>
+                    <td className="bpi-code">{l.code}</td>
+                    <td style={{ fontSize: 12 }}>{coaMap[l.code] || l.code}</td>
+                    <td style={{ fontSize: 11, color: 'var(--text-muted)' }}>{l.description}</td>
+                    <td className="bpi-amt bpi-amt-dr">{fmtEUR(l.amount)}</td>
+                  </tr>
+                ))}
+                {credits.map((l, i) => (
+                  <tr key={`cr-${i}`}>
+                    <td><span className="bpi-badge-cr">CR</span></td>
+                    <td className="bpi-code">{l.code}</td>
+                    <td style={{ fontSize: 12 }}>{coaMap[l.code] || l.code}</td>
+                    <td style={{ fontSize: 11, color: 'var(--text-muted)' }}>{l.description}</td>
+                    <td className="bpi-amt bpi-amt-cr">{fmtEUR(Math.abs(l.amount))}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+
+            <div className="bpi-balance-bar">
+              ✓ Balanced &nbsp;·&nbsp; Debits = Credits = {fmtEUR(total)}
+              &nbsp;·&nbsp; All codes verified against chart of accounts
+            </div>
+
+            {postErr && <div className="bpi-post-err">{postErr}</div>}
+
+            <div className="bpi-actions">
+              <button className="btn btn-p" onClick={handlePost} disabled={posting || !canPost}>
+                {posting ? 'Posting…' : 'Post Payroll Journal'}
+              </button>
+              <button className="btn btn-s" onClick={reset}>Cancel</button>
+              {!canPost && dupe && !dupeAck && (
+                <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Acknowledge the duplicate warning above to enable posting.</span>
+              )}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function _newAR() { return { id: crypto.randomUUID(), customer: '', ref: '', date: '', vat_amount: '', gross: '' }; }
+function _newAP() { return { id: crypto.randomUUID(), supplier: '', ref: '', date: '', nominal_code: '', vat_code: 'STD23', vat_amount: '', gross: '' }; }
+
+function OpeningBalances({ companyId, onPosted }) {
+  const { accounts: coaAccounts, loading: coaLoading } = useChartOfAccounts(companyId);
+
+  const [step, setStep]         = useState('date');
+  const [openingDate, setODate] = useState('');
+  const [tbEntries, setTbE]     = useState({});
+  const [showFilled, setSF]     = useState(false);
+  const [arItems, setAR]        = useState([_newAR()]);
+  const [apItems, setAP]        = useState([_newAP()]);
+  const [posting, setPosting]   = useState(false);
+  const [postError, setPostErr] = useState(null);
+  const [result, setResult]     = useState(null);
+
+  const getDr = code => parseFloat(tbEntries[code]?.dr) || 0;
+  const getCr = code => parseFloat(tbEntries[code]?.cr) || 0;
+
+  const totalDr = Math.round(coaAccounts.reduce((s, a) => s + getDr(a.code), 0) * 100) / 100;
+  const totalCr = Math.round(coaAccounts.reduce((s, a) => s + getCr(a.code), 0) * 100) / 100;
+  const imbalance = Math.round((totalDr - totalCr) * 100) / 100;
+  const tbOk = Math.abs(imbalance) < 0.005 && totalDr > 0;
+
+  const debtorsBal   = Math.round((getDr('1100') - getCr('1100')) * 100) / 100;
+  const creditorsBal = Math.round((getCr('2000') - getDr('2000')) * 100) / 100;
+  const needsAR = debtorsBal > 0.005;
+  const needsAP = creditorsBal > 0.005;
+
+  const arTotal = Math.round(arItems.reduce((s, i) => s + (parseFloat(i.gross) || 0), 0) * 100) / 100;
+  const apTotal = Math.round(apItems.reduce((s, i) => s + (parseFloat(i.gross) || 0), 0) * 100) / 100;
+  const arDiff  = Math.round((debtorsBal - arTotal) * 100) / 100;
+  const apDiff  = Math.round((creditorsBal - apTotal) * 100) / 100;
+  const arOk    = !needsAR || Math.abs(arDiff) < 0.005;
+  const apOk    = !needsAP || Math.abs(apDiff) < 0.005;
+
+  const stepKeys = useMemo(() => {
+    const s = ['date', 'tb'];
+    if (needsAR) s.push('ar');
+    if (needsAP) s.push('ap');
+    s.push('review');
+    return s;
+  }, [needsAR, needsAP]);
+
+  const STEP_LABEL = { date: 'Opening Date', tb: 'Trial Balance', ar: 'Open Debtors', ap: 'Open Creditors', review: 'Review & Post' };
+  const curIdx = stepKeys.indexOf(step);
+
+  const goNext = () => { const next = stepKeys[curIdx + 1]; if (next) setStep(next); };
+  const goBack = () => { const prev = stepKeys[curIdx - 1]; if (prev) setStep(prev); };
+
+  const canNext = (
+    (step === 'date' && !!openingDate) ||
+    (step === 'tb'   && tbOk) ||
+    (step === 'ar'   && arOk) ||
+    (step === 'ap'   && apOk)
+  );
+
+  const getType = a => (a.account_type || a.type || '').toLowerCase();
+
+  const coaGrouped = useMemo(() => {
+    const GROUPS = [
+      { key: 'asset',     label: 'Assets' },
+      { key: 'liability', label: 'Liabilities' },
+      { key: 'equity',    label: 'Equity & Reserves' },
+      { key: 'revenue',   label: 'Revenue' },
+      { key: 'expense',   label: 'Expenses' },
+    ];
+    return GROUPS.map(g => ({
+      ...g,
+      accounts: coaAccounts.filter(a => getType(a) === g.key && a.is_active !== false).sort((a, b) => a.code.localeCompare(b.code)),
+    })).filter(g => g.accounts.length > 0);
+  }, [coaAccounts]);
+
+  const visibleGroups = useMemo(() => (
+    showFilled
+      ? coaGrouped.map(g => ({ ...g, accounts: g.accounts.filter(a => getDr(a.code) > 0 || getCr(a.code) > 0) })).filter(g => g.accounts.length)
+      : coaGrouped
+  ), [coaGrouped, showFilled, tbEntries]);
+
+  const expenseAccounts = useMemo(() => (
+    coaAccounts.filter(a => { const t = getType(a); return (t === 'expense' || t === 'asset') && a.is_active !== false; }).sort((a, b) => a.code.localeCompare(b.code))
+  ), [coaAccounts]);
+
+  const setDr  = (code, v) => setTbE(p => ({ ...p, [code]: { dr: v,  cr: '' } }));
+  const setCrE = (code, v) => setTbE(p => ({ ...p, [code]: { dr: '', cr: v  } }));
+  const setARI = (id, f, v) => setAR(p => p.map(i => i.id === id ? { ...i, [f]: v } : i));
+  const setAPI = (id, f, v) => setAP(p => p.map(i => i.id === id ? { ...i, [f]: v } : i));
+
+  const OB_VAT = [
+    { code: 'STD23', label: '23%' }, { code: 'RED13', label: '13.5%' },
+    { code: 'RED9',  label: '9%'  }, { code: 'ZERO',  label: '0% Zero' },
+    { code: 'EXEMPT',label: 'Exempt' },
+  ];
+
+  const handlePost = async () => {
+    setPosting(true); setPostErr(null);
+    try {
+      if (Math.abs(imbalance) >= 0.01) throw new Error(`Trial balance does not balance — off by ${fmtEUR(Math.abs(imbalance))} ${imbalance > 0 ? '(Dr excess)' : '(Cr excess)'}`);
+      if (needsAR && Math.abs(arDiff) >= 0.01) throw new Error(`AR items total ${fmtEUR(arTotal)} but Debtors control (1100) is ${fmtEUR(debtorsBal)} — difference: ${fmtEUR(Math.abs(arDiff))}`);
+      if (needsAP && Math.abs(apDiff) >= 0.01) throw new Error(`AP items total ${fmtEUR(apTotal)} but Creditors control (2000) is ${fmtEUR(creditorsBal)} — difference: ${fmtEUR(Math.abs(apDiff))}`);
+
+      const { data: dup } = await supabase.from('journals').select('id').eq('company_id', companyId).eq('reference', 'OPENING').limit(1);
+      if (dup?.length) throw new Error('Opening balances already posted for this company. Contact support to reverse the existing OPENING journals before re-posting.');
+
+      const batchId = crypto.randomUUID();
+      const deb  = coaAccounts.filter(a => getDr(a.code) > 0).map(a => ({ code: a.code, rem: Math.round(getDr(a.code) * 100) / 100 }));
+      const cred = coaAccounts.filter(a => getCr(a.code) > 0).map(a => ({ code: a.code, rem: Math.round(getCr(a.code) * 100) / 100 }));
+      const jRows = [];
+      let di = 0, ci = 0;
+      while (di < deb.length && ci < cred.length) {
+        const matched = Math.round(Math.min(deb[di].rem, cred[ci].rem) * 100) / 100;
+        if (matched > 0) jRows.push({ company_id: companyId, date: openingDate, description: 'Opening Balances', debit_account: deb[di].code, credit_account: cred[ci].code, amount: matched, vat_code: null, reference: 'OPENING', source_recurring_id: null, is_accrual_reversal: false, import_batch_id: batchId });
+        deb[di].rem  = Math.round((deb[di].rem  - matched) * 100) / 100;
+        cred[ci].rem = Math.round((cred[ci].rem - matched) * 100) / 100;
+        if (deb[di].rem  < 0.005) di++;
+        if (cred[ci].rem < 0.005) ci++;
+      }
+      const { error: jErr } = await supabase.from('journals').insert(jRows);
+      if (jErr) throw new Error('Journal insert failed: ' + jErr.message);
+
+      const validAR = arItems.filter(i => (parseFloat(i.gross) || 0) > 0 && i.customer.trim());
+      if (validAR.length) {
+        const arRows = validAR.map(i => ({
+          company_id: companyId, type: 'invoice', status: 'sent',
+          client: i.customer.trim(), customer_id: null,
+          invoice_number: i.ref.trim() || 'OPENING', invoice_ref: i.ref.trim() || 'OPENING',
+          issue_date: i.date || openingDate, invoice_date: i.date || openingDate,
+          amount: parseFloat(i.gross), total: parseFloat(i.gross),
+          subtotal: Math.round((parseFloat(i.gross) - (parseFloat(i.vat_amount) || 0)) * 100) / 100,
+          vat_total: parseFloat(i.vat_amount) || 0,
+          currency: 'EUR', reference: 'OPENING', notes: 'Migrated opening balance',
+          journal_ids: null, amount_paid: 0,
+          sent_at: new Date().toISOString(), payment_terms: 30,
+        }));
+        const { error: arErr } = await supabase.from('invoices').insert(arRows);
+        if (arErr) throw new Error('AR invoice insert failed: ' + arErr.message);
+      }
+
+      const validAP = apItems.filter(i => (parseFloat(i.gross) || 0) > 0 && i.supplier.trim());
+      if (validAP.length) {
+        const apRows = validAP.map(i => ({
+          company_id: companyId, source: 'opening', status: 'pending',
+          supplier: i.supplier.trim(),
+          invoice_ref: i.ref.trim() || 'OPENING', invoice_date: i.date || openingDate,
+          due_date: i.date || openingDate,
+          amount: parseFloat(i.gross), gross_amount: parseFloat(i.gross),
+          net_amount: Math.round((parseFloat(i.gross) - (parseFloat(i.vat_amount) || 0)) * 100) / 100,
+          vat_amount: parseFloat(i.vat_amount) || 0, vat_rate: i.vat_code || null,
+          currency: 'EUR', notes: 'Migrated opening balance',
+          nominal_code: i.nominal_code || null, vat_code: i.vat_code || null,
+          payment_method: 'bank transfer', raw_email_id: null,
+          new_supplier_flag: false, line_items: null, suggested_nominal: null,
+        }));
+        const { error: apErr } = await supabase.from('ap_invoices').insert(apRows);
+        if (apErr) throw new Error('AP bill insert failed: ' + apErr.message);
+      }
+
+      setResult({ journals: jRows.length, ar: validAR.length, ap: validAP.length });
+      setStep('done');
+      onPosted?.();
+    } catch (e) {
+      captureError(e, { company_id: companyId, operation: 'opening-balances-post' });
+      setPostErr(e.message);
+    }
+    setPosting(false);
+  };
+
+  const fmtD = d => d ? new Date(d + 'T12:00:00').toLocaleDateString('en-IE', { day: 'numeric', month: 'long', year: 'numeric' }) : '';
+
+  if (step === 'done' && result) {
+    return (
+      <div className="card obal-wrap">
+        <div className="card-body">
+          <div className="ob-done">
+            <div className="ob-done-icon">✓</div>
+            <div className="ob-done-title">Opening Balances Posted</div>
+            <div className="ob-done-sub">
+              {result.journals} journal row{result.journals !== 1 ? 's' : ''} posted as at {fmtD(openingDate)}<br />
+              {result.ar > 0 && <>{result.ar} open AR invoice{result.ar !== 1 ? 's' : ''} created — available in Reconciliation for settlement<br /></>}
+              {result.ap > 0 && <>{result.ap} open AP bill{result.ap !== 1 ? 's' : ''} created — available in AP Invoices for payment<br /></>}
+              The Balance Sheet now reflects your opening position. Reference <strong>OPENING</strong> identifies all migrated entries.
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="card obal-wrap">
+      <div style={{ padding: '16px 20px 0' }}>
+        <div className="card-title">Opening Balances</div>
+        <div className="card-sub" style={{ marginTop: 3 }}>Set the company's opening trial balance and migrate outstanding AR/AP items</div>
+      </div>
+      <div className="card-body">
+
+        <div className="ob-stepper">
+          {stepKeys.map((key, i) => (
+            <div key={key} className={`ob-stp${i === curIdx ? ' cur' : i < curIdx ? ' done' : ''}`}>
+              {i < curIdx ? '✓ ' : ''}{STEP_LABEL[key]}
+            </div>
+          ))}
+        </div>
+
+        {/* Step 1: Opening Date */}
+        {step === 'date' && (
+          <div style={{ maxWidth: 360 }}>
+            <p style={{ fontSize: 13, color: 'var(--text-muted)', lineHeight: 1.65, margin: '0 0 20px' }}>
+              Enter the date <strong style={{ color: 'var(--text)' }}>immediately before</strong> your first live transaction. All opening journal entries will be dated here — e.g. enter <em>31 Dec 2024</em> if your first live period starts 1 Jan 2025.
+            </p>
+            <label className="f-label">Opening balance date</label>
+            <input className="f-input" type="date" value={openingDate} onChange={e => setODate(e.target.value)} style={{ width: '100%', marginTop: 4 }} />
+            <div style={{ marginTop: 20 }}>
+              <button className="btn btn-p" onClick={goNext} disabled={!openingDate}>Next →</button>
+            </div>
+          </div>
+        )}
+
+        {/* Step 2: Trial Balance */}
+        {step === 'tb' && (
+          <>
+            <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+              <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: 0 }}>Enter each account's opening balance as at {fmtD(openingDate)}. Debits must equal credits before you can proceed.</p>
+              <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 5, cursor: 'pointer', flexShrink: 0, marginLeft: 16 }}>
+                <input type="checkbox" checked={showFilled} onChange={e => setSF(e.target.checked)} />
+                Show filled only
+              </label>
+            </div>
+
+            {coaLoading
+              ? <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-faint)', fontSize: 12 }}>Loading chart of accounts…</div>
+              : (
+              <div className="ob-tb-scroll">
+                <table className="ob-tbl">
+                  <thead>
+                    <tr>
+                      <th style={{ width: 64 }}>Code</th>
+                      <th>Account</th>
+                      <th style={{ textAlign: 'right', width: 130 }}>Debit (€)</th>
+                      <th style={{ textAlign: 'right', width: 130 }}>Credit (€)</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {visibleGroups.map(g => (
+                      <React.Fragment key={g.key}>
+                        <tr className="ob-grp"><td colSpan={4}>{g.label}</td></tr>
+                        {g.accounts.map(a => {
+                          const drVal = tbEntries[a.code]?.dr ?? '';
+                          const crVal = tbEntries[a.code]?.cr ?? '';
+                          return (
+                            <tr key={a.code}>
+                              <td style={{ fontFamily: 'Source Code Pro, monospace', fontSize: 11, color: 'var(--accent)', paddingLeft: 10 }}>{a.code}</td>
+                              <td style={{ fontSize: 12 }}>{a.name}</td>
+                              <td style={{ textAlign: 'right' }}>
+                                <input className={`ob-num${drVal ? ' has-val' : ''}`} type="number" step="0.01" min="0" placeholder="0.00" value={drVal} onChange={e => setDr(a.code, e.target.value)} />
+                              </td>
+                              <td style={{ textAlign: 'right' }}>
+                                <input className={`ob-num${crVal ? ' has-val' : ''}`} type="number" step="0.01" min="0" placeholder="0.00" value={crVal} onChange={e => setCrE(a.code, e.target.value)} />
+                              </td>
+                            </tr>
+                          );
+                        })}
+                      </React.Fragment>
+                    ))}
+                    {visibleGroups.length === 0 && showFilled && (
+                      <tr><td colSpan={4} style={{ textAlign: 'center', padding: 20, fontSize: 12, color: 'var(--text-faint)' }}>No balances entered yet — uncheck "Show filled only" to see all accounts.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            )}
+
+            <div className={`ob-bal ${tbOk ? 'ok' : 'err'}`}>
+              <div className="ob-bal-item">
+                <span className="ob-bal-lbl">Total Debits</span>
+                <span className="ob-bal-v">{fmtEUR(totalDr)}</span>
+              </div>
+              <div className="ob-bal-item">
+                <span className="ob-bal-lbl">Total Credits</span>
+                <span className="ob-bal-v">{fmtEUR(totalCr)}</span>
+              </div>
+              <div className="ob-bal-item" style={{ marginLeft: 'auto' }}>
+                {tbOk
+                  ? <span className="ob-bal-v ok">✓ Balanced</span>
+                  : totalDr === 0 && totalCr === 0
+                    ? <span className="ob-bal-v" style={{ color: 'var(--text-faint)', fontWeight: 400 }}>Enter balances above</span>
+                    : <span className="ob-bal-v err">Off by {fmtEUR(Math.abs(imbalance))} — {imbalance > 0 ? 'Dr excess' : 'Cr excess'}</span>
+                }
+              </div>
+            </div>
+
+            <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
+              <button className="btn btn-s" onClick={goBack}>← Back</button>
+              <button className="btn btn-p" onClick={goNext} disabled={!tbOk}>
+                {needsAR ? 'Next: Open Debtors →' : needsAP ? 'Next: Open Creditors →' : 'Next: Review →'}
+              </button>
+            </div>
+          </>
+        )}
+
+        {/* Step 3: Open AR */}
+        {step === 'ar' && (
+          <>
+            <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '0 0 14px', lineHeight: 1.65 }}>
+              Enter each open sales invoice included in <strong style={{ color: 'var(--text)' }}>Trade Debtors (1100)</strong> — control balance <strong style={{ color: 'var(--accent)' }}>{fmtEUR(debtorsBal)}</strong>. These invoices appear in Reconciliation for settlement and do <em>not</em> re-post revenue.
+            </p>
+
+            <table className="ob-open-tbl">
+              <thead>
+                <tr>
+                  <th>Customer</th>
+                  <th>Invoice Ref</th>
+                  <th>Invoice Date</th>
+                  <th style={{ textAlign: 'right' }}>VAT (€)</th>
+                  <th style={{ textAlign: 'right' }}>Gross (€)</th>
+                  <th style={{ width: 28 }}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {arItems.map(i => (
+                  <tr key={i.id}>
+                    <td><input className="ob-fi" placeholder="Customer name" value={i.customer} onChange={e => setARI(i.id, 'customer', e.target.value)} /></td>
+                    <td><input className="ob-fi" placeholder="INV-001" value={i.ref} onChange={e => setARI(i.id, 'ref', e.target.value)} /></td>
+                    <td><input className="ob-fi" type="date" value={i.date} onChange={e => setARI(i.id, 'date', e.target.value)} /></td>
+                    <td><input className="ob-num" type="number" step="0.01" min="0" placeholder="0.00" style={{ width: 100 }} value={i.vat_amount} onChange={e => setARI(i.id, 'vat_amount', e.target.value)} /></td>
+                    <td><input className={`ob-num${i.gross ? ' has-val' : ''}`} type="number" step="0.01" min="0" placeholder="0.00" style={{ width: 110 }} value={i.gross} onChange={e => setARI(i.id, 'gross', e.target.value)} /></td>
+                    <td>
+                      {arItems.length > 1 && <button onClick={() => setAR(p => p.filter(x => x.id !== i.id))} style={{ background: 'none', border: 'none', color: 'var(--text-faint)', cursor: 'pointer', fontSize: 14, padding: '0 4px', lineHeight: 1 }}>✕</button>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <button className="btn btn-s" style={{ fontSize: 11, marginBottom: 12 }} onClick={() => setAR(p => [...p, _newAR()])}>+ Add invoice</button>
+
+            <div className={`ob-tie ${arOk ? 'ok' : 'err'}`}>
+              <span>{arOk ? '✓' : '⚠'} Open AR total: <strong>{fmtEUR(arTotal)}</strong></span>
+              <span>Debtors control (1100): <strong>{fmtEUR(debtorsBal)}</strong></span>
+              {!arOk && <span>Difference: <strong>{fmtEUR(Math.abs(arDiff))}</strong> {arDiff > 0 ? '— items are short' : '— items exceed control'}</span>}
+            </div>
+
+            <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
+              <button className="btn btn-s" onClick={goBack}>← Back</button>
+              <button className="btn btn-p" onClick={goNext} disabled={!arOk}>
+                {needsAP ? 'Next: Open Creditors →' : 'Next: Review →'}
+              </button>
+            </div>
+          </>
+        )}
+
+        {/* Step 4: Open AP */}
+        {step === 'ap' && (
+          <>
+            <p style={{ fontSize: 12, color: 'var(--text-muted)', margin: '0 0 14px', lineHeight: 1.65 }}>
+              Enter each open purchase bill included in <strong style={{ color: 'var(--text)' }}>Trade Creditors (2000)</strong> — control balance <strong style={{ color: 'var(--accent)' }}>{fmtEUR(creditorsBal)}</strong>. These bills appear in AP Invoices for payment and do <em>not</em> re-post expenses.
+            </p>
+
+            <table className="ob-open-tbl">
+              <thead>
+                <tr>
+                  <th>Supplier</th>
+                  <th>Ref</th>
+                  <th>Date</th>
+                  <th>Nominal</th>
+                  <th>VAT Code</th>
+                  <th style={{ textAlign: 'right' }}>VAT (€)</th>
+                  <th style={{ textAlign: 'right' }}>Gross (€)</th>
+                  <th style={{ width: 28 }}></th>
+                </tr>
+              </thead>
+              <tbody>
+                {apItems.map(i => (
+                  <tr key={i.id}>
+                    <td><input className="ob-fi" placeholder="Supplier name" value={i.supplier} onChange={e => setAPI(i.id, 'supplier', e.target.value)} /></td>
+                    <td><input className="ob-fi" placeholder="BILL-001" value={i.ref} onChange={e => setAPI(i.id, 'ref', e.target.value)} /></td>
+                    <td><input className="ob-fi" type="date" value={i.date} onChange={e => setAPI(i.id, 'date', e.target.value)} /></td>
+                    <td>
+                      <select className="ob-fi" style={{ padding: '4px 4px' }} value={i.nominal_code} onChange={e => setAPI(i.id, 'nominal_code', e.target.value)}>
+                        <option value="">— select —</option>
+                        {expenseAccounts.map(a => <option key={a.code} value={a.code}>{a.code} — {a.name}</option>)}
+                      </select>
+                    </td>
+                    <td>
+                      <select className="ob-fi" style={{ padding: '4px 4px' }} value={i.vat_code} onChange={e => setAPI(i.id, 'vat_code', e.target.value)}>
+                        {OB_VAT.map(o => <option key={o.code} value={o.code}>{o.label}</option>)}
+                      </select>
+                    </td>
+                    <td><input className="ob-num" type="number" step="0.01" min="0" placeholder="0.00" style={{ width: 90 }} value={i.vat_amount} onChange={e => setAPI(i.id, 'vat_amount', e.target.value)} /></td>
+                    <td><input className={`ob-num${i.gross ? ' has-val' : ''}`} type="number" step="0.01" min="0" placeholder="0.00" style={{ width: 110 }} value={i.gross} onChange={e => setAPI(i.id, 'gross', e.target.value)} /></td>
+                    <td>
+                      {apItems.length > 1 && <button onClick={() => setAP(p => p.filter(x => x.id !== i.id))} style={{ background: 'none', border: 'none', color: 'var(--text-faint)', cursor: 'pointer', fontSize: 14, padding: '0 4px', lineHeight: 1 }}>✕</button>}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+            <button className="btn btn-s" style={{ fontSize: 11, marginBottom: 12 }} onClick={() => setAP(p => [...p, _newAP()])}>+ Add bill</button>
+
+            <div className={`ob-tie ${apOk ? 'ok' : 'err'}`}>
+              <span>{apOk ? '✓' : '⚠'} Open AP total: <strong>{fmtEUR(apTotal)}</strong></span>
+              <span>Creditors control (2000): <strong>{fmtEUR(creditorsBal)}</strong></span>
+              {!apOk && <span>Difference: <strong>{fmtEUR(Math.abs(apDiff))}</strong> {apDiff > 0 ? '— items are short' : '— items exceed control'}</span>}
+            </div>
+
+            <div style={{ display: 'flex', gap: 10, marginTop: 14 }}>
+              <button className="btn btn-s" onClick={goBack}>← Back</button>
+              <button className="btn btn-p" onClick={goNext} disabled={!apOk}>Next: Review →</button>
+            </div>
+          </>
+        )}
+
+        {/* Step 5: Review & Post */}
+        {step === 'review' && (
+          <>
+            <p style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 16 }}>All checks are satisfied — review the summary below and post when ready.</p>
+
+            <div className="ob-review-grid">
+              <div className="ob-rc">
+                <div className="ob-rc-title">Trial Balance</div>
+                <div className="ob-rc-row"><span className="ob-rc-lbl">Opening date</span><span className="ob-rc-val">{fmtD(openingDate)}</span></div>
+                <div className="ob-rc-row"><span className="ob-rc-lbl">Total debits</span><span className="ob-rc-val">{fmtEUR(totalDr)}</span></div>
+                <div className="ob-rc-row"><span className="ob-rc-lbl">Total credits</span><span className="ob-rc-val">{fmtEUR(totalCr)}</span></div>
+                <div className="ob-rc-row"><span className="ob-rc-lbl">Accounts filled</span><span className="ob-rc-val">{coaAccounts.filter(a => getDr(a.code) > 0 || getCr(a.code) > 0).length}</span></div>
+                <div className="ob-rc-ok">✓ Balanced</div>
+              </div>
+
+              <div className="ob-rc">
+                <div className="ob-rc-title">Open Debtors (AR)</div>
+                {!needsAR
+                  ? <div className="ob-rc-row"><span className="ob-rc-lbl" style={{ fontStyle: 'italic' }}>No debtors balance — skipped</span></div>
+                  : <>
+                      <div className="ob-rc-row"><span className="ob-rc-lbl">Invoice count</span><span className="ob-rc-val">{arItems.filter(i => parseFloat(i.gross) > 0).length}</span></div>
+                      <div className="ob-rc-row"><span className="ob-rc-lbl">AR total</span><span className="ob-rc-val">{fmtEUR(arTotal)}</span></div>
+                      <div className="ob-rc-row"><span className="ob-rc-lbl">1100 control</span><span className="ob-rc-val">{fmtEUR(debtorsBal)}</span></div>
+                      <div className="ob-rc-ok">✓ Ties out</div>
+                    </>
+                }
+              </div>
+
+              <div className="ob-rc">
+                <div className="ob-rc-title">Open Creditors (AP)</div>
+                {!needsAP
+                  ? <div className="ob-rc-row"><span className="ob-rc-lbl" style={{ fontStyle: 'italic' }}>No creditors balance — skipped</span></div>
+                  : <>
+                      <div className="ob-rc-row"><span className="ob-rc-lbl">Bill count</span><span className="ob-rc-val">{apItems.filter(i => parseFloat(i.gross) > 0).length}</span></div>
+                      <div className="ob-rc-row"><span className="ob-rc-lbl">AP total</span><span className="ob-rc-val">{fmtEUR(apTotal)}</span></div>
+                      <div className="ob-rc-row"><span className="ob-rc-lbl">2000 control</span><span className="ob-rc-val">{fmtEUR(creditorsBal)}</span></div>
+                      <div className="ob-rc-ok">✓ Ties out</div>
+                    </>
+                }
+              </div>
+            </div>
+
+            <div className="ob-warn">
+              <strong>Posting is permanent via the UI.</strong> The OPENING journal and migrated AR/AP items are created immediately. To reverse, you would need to delete the OPENING journals from GL and the migrated invoices/bills directly from the database.
+            </div>
+
+            {postError && <div className="ob-err">{postError}</div>}
+
+            <div style={{ display: 'flex', gap: 10, marginTop: 4 }}>
+              <button className="btn btn-s" onClick={goBack} disabled={posting}>← Back</button>
+              <button className="btn btn-p" onClick={handlePost} disabled={posting}>{posting ? 'Posting…' : 'Post Opening Balances'}</button>
+            </div>
+          </>
+        )}
+
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// FixedAssets — asset register, depreciation catch-up, disposals, W&T
+// ─────────────────────────────────────────────────────────────────────────────
+function FixedAssets({ companyId, company, selPeriod }) {
+  const baseCurrency = company?.base_currency || company?.currency || 'EUR';
+  const fmt  = (n) => fmtCurrency(n, baseCurrency);
+  const fmtN = (n, dp = 2) => Number(n || 0).toLocaleString('en-IE', { minimumFractionDigits: dp, maximumFractionDigits: dp });
+  const fmtD = (d) => d ? new Date(d).toLocaleDateString('en-IE', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
+
+  const [assets,         setAssets]         = useState([]);
+  const [loading,        setLoading]         = useState(true);
+  const [catchingUp,     setCatchingUp]      = useState(false);
+  const [depToast,       setDepToast]        = useState(null);
+  const [depSkipped,     setDepSkipped]      = useState(0);
+  const [depWarning,     setDepWarning]      = useState(false);
+  const [activeTab,      setActiveTab]       = useState('register');
+  const [selectedId,     setSelectedId]      = useState(null);
+  const [assetSubTab,    setAssetSubTab]     = useState('schedule');
+  const [showModal,      setShowModal]       = useState(false);
+  const [editAsset,      setEditAsset]       = useState(null); // null = add new
+  const [assetForm,      setAssetForm]       = useState(null);
+  const [saving,         setSaving]          = useState(false);
+  const [saveErr,        setSaveErr]         = useState(null);
+  const [showDisposal,   setShowDisposal]    = useState(false);
+  const [disposalAsset,  setDisposalAsset]   = useState(null);
+  const [disposalForm,   setDisposalForm]    = useState({ date: '', proceeds: '', proceeds_nominal: '1000' });
+  const [disposalPosting,setDisposalPosting] = useState(false);
+  const [disposalErr,    setDisposalErr]     = useState(null);
+  const [deleting,       setDeleting]        = useState(null); // asset.id being deleted
+  const { accounts: coaAccounts } = useChartOfAccounts(companyId);
+
+  // ── Load assets ────────────────────────────────────────────────────────────
+  const loadAssets = async () => {
+    if (!companyId) { setLoading(false); return; }
+    setLoading(true);
+    const { data } = await supabase.from('fixed_assets')
+      .select('*').eq('company_id', companyId).order('purchase_date');
+    setAssets(data || []);
+    setLoading(false);
+  };
+
+  useEffect(() => { loadAssets(); }, [companyId]); // eslint-disable-line
+
+  // ── Check for manual depreciation recurring template ──────────────────────
+  useEffect(() => {
+    if (!companyId) return;
+    supabase.from('recurring_journals')
+      .select('id').eq('company_id', companyId).eq('active', true)
+      .in('debit_account', ['6950'])
+      .limit(1)
+      .then(({ data }) => setDepWarning(!!(data?.length)));
+  }, [companyId]); // eslint-disable-line
+
+  // ── Depreciation catch-up (same idempotent pattern as recurring journals) ─
+  const runCatchUp = async (assetList) => {
+    if (!companyId || !assetList.length) return;
+    setCatchingUp(true);
+    try {
+      const earliestYM = assetList.reduce((min, a) => {
+        const ym = a.purchase_date.slice(0, 7);
+        return ym < min ? ym : min;
+      }, assetList[0].purchase_date.slice(0, 7));
+
+      const [{ data: existingRuns }, lockedPeriods] = await Promise.all([
+        supabase.from('asset_depreciation_runs').select('period').eq('company_id', companyId),
+        getLockedPeriods(companyId),
+      ]);
+      const posted = new Set((existingRuns || []).map(r => r.period));
+
+      const todayYM = new Date().toISOString().slice(0, 7);
+      let ym = earliestYM, postedCount = 0, skippedCount = 0;
+      const postedLabels = [];
+
+      while (ym <= todayYM) {
+        if (posted.has(ym)) { ym = faNextYM(ym); continue; }
+        const [y, m] = ym.split('-').map(Number);
+        const periodEnd = new Date(y, m, 0).toISOString().slice(0, 10);
+        if (isDateLocked(periodEnd, lockedPeriods)) { skippedCount++; ym = faNextYM(ym); continue; }
+
+        // Compute charges across active assets
+        const charges = assetList
+          .filter(a => a.status === 'active' || (a.disposal_date && a.disposal_date.slice(0, 7) > ym))
+          .map(a => ({ a, charge: faMonthlyDep(a, ym) }))
+          .filter(x => x.charge > 0.001);
+
+        if (!charges.length) { ym = faNextYM(ym); continue; }
+
+        const total = charges.reduce((s, x) => s + x.charge, 0);
+        const { error: runErr, data: runRow } = await supabase.from('asset_depreciation_runs')
+          .insert({ company_id: companyId, period: ym, total: Math.round(total * 100) / 100 })
+          .select('id').single();
+        if (runErr) { ym = faNextYM(ym); continue; } // 23505 = already exists
+
+        // Group by accum_dep_nominal and post one journal row per unique account
+        const byNom = {};
+        charges.forEach(({ a, charge }) => {
+          const nom = a.accum_dep_nominal || '1501';
+          byNom[nom] = (byNom[nom] || 0) + charge;
+        });
+        const monthLabel = new Date(y, m - 1, 1).toLocaleDateString('en-IE', { month: 'long', year: 'numeric' });
+        const jIds = [];
+        for (const [nom, amt] of Object.entries(byNom)) {
+          const { data: jnl } = await supabase.from('journals').insert({
+            company_id: companyId, date: periodEnd,
+            description: `Depreciation — ${monthLabel} (asset register)`,
+            debit_account: '6950', credit_account: nom,
+            amount: Math.round(amt * 100) / 100,
+            vat_code: null, reference: `DEP-${ym}`, is_accrual_reversal: false,
+          }).select('id').single();
+          if (jnl?.id) jIds.push(jnl.id);
+        }
+        if (jIds.length) await supabase.from('asset_depreciation_runs').update({ journal_ids: jIds }).eq('id', runRow.id);
+
+        postedCount++;
+        postedLabels.push(monthLabel);
+        ym = faNextYM(ym);
+      }
+      if (postedCount > 0) {
+        const label = postedLabels.length === 1 ? postedLabels[0] : `${postedLabels.length} periods`;
+        setDepToast(`${postedCount} depreciation journal${postedCount !== 1 ? 's' : ''} posted for ${label}`);
+        setTimeout(() => setDepToast(null), 6000);
+      }
+      setDepSkipped(skippedCount);
+    } catch (e) { console.error('[FA catch-up]', e.message); }
+    setCatchingUp(false);
+  };
+
+  useEffect(() => {
+    if (assets.length) runCatchUp(assets);
+  }, [assets]); // eslint-disable-line
+
+  // ── Computed summaries ─────────────────────────────────────────────────────
+  const periodYM = selPeriod || new Date().toISOString().slice(0, 7);
+  const thisYear = String(new Date().getFullYear());
+  const ytdStart = `${thisYear}-01`;
+
+  const summaries = assets.reduce((acc, a) => {
+    const ad = faAccumDep(a, periodYM);
+    const nbv = Math.max(0, Number(a.cost) - ad);
+    acc.totalCost += Number(a.cost);
+    acc.totalAccum += ad;
+    if (a.status === 'active') acc.nbv += nbv;
+    // YTD charge: sum of monthly charges from Jan through periodYM
+    let ym = ytdStart;
+    while (ym <= periodYM) { acc.ytd += faMonthlyDep(a, ym); ym = faNextYM(ym); }
+    return acc;
+  }, { totalCost: 0, totalAccum: 0, nbv: 0, ytd: 0 });
+
+  // ── Asset form helpers ─────────────────────────────────────────────────────
+  const openAdd = () => {
+    const def = FA_CATEGORY_DEFAULTS.plant_machinery;
+    setAssetForm({
+      name: '', description: '', category: 'plant_machinery',
+      cost: '', purchase_date: new Date().toISOString().slice(0, 10),
+      method: 'straight_line', useful_life_months: '60', rate_percent: '25',
+      residual_value: '0',
+      asset_nominal: def.asset_nominal, accum_dep_nominal: def.accum_dep_nominal,
+      source_ap_invoice_id: '', source_bank_transaction_id: '',
+    });
+    setEditAsset(null); setSaveErr(null); setShowModal(true);
+  };
+  const openEdit = (a) => {
+    setAssetForm({
+      name: a.name, description: a.description || '', category: a.category,
+      cost: String(a.cost), purchase_date: a.purchase_date,
+      method: a.method,
+      useful_life_months: String(a.useful_life_months || ''),
+      rate_percent: String(a.rate_percent || ''),
+      residual_value: String(a.residual_value || 0),
+      asset_nominal: a.asset_nominal, accum_dep_nominal: a.accum_dep_nominal,
+      source_ap_invoice_id: a.source_ap_invoice_id || '',
+      source_bank_transaction_id: a.source_bank_transaction_id || '',
+    });
+    setEditAsset(a); setSaveErr(null); setShowModal(true);
+  };
+  const af = (k) => (e) => {
+    const v = e.target.value;
+    setAssetForm(prev => {
+      const next = { ...prev, [k]: v };
+      if (k === 'category') {
+        const def = FA_CATEGORY_DEFAULTS[v] || FA_CATEGORY_DEFAULTS.other;
+        next.asset_nominal = def.asset_nominal;
+        next.accum_dep_nominal = def.accum_dep_nominal;
+      }
+      return next;
+    });
+  };
+  const saveAsset = async () => {
+    if (!companyId || !assetForm) return;
+    const cost = parseFloat(assetForm.cost);
+    if (!assetForm.name || isNaN(cost) || cost <= 0 || !assetForm.purchase_date) {
+      setSaveErr('Name, cost, and purchase date are required.'); return;
+    }
+    if (assetForm.method === 'straight_line' && !Number(assetForm.useful_life_months)) {
+      setSaveErr('Useful life in months is required for straight-line method.'); return;
+    }
+    if (assetForm.method === 'reducing_balance' && !Number(assetForm.rate_percent)) {
+      setSaveErr('Annual rate % is required for reducing balance method.'); return;
+    }
+    setSaving(true); setSaveErr(null);
+    const payload = {
+      company_id: companyId,
+      name: assetForm.name.trim(), description: assetForm.description.trim() || null,
+      category: assetForm.category, cost,
+      purchase_date: assetForm.purchase_date, method: assetForm.method,
+      useful_life_months: assetForm.method === 'straight_line' ? Number(assetForm.useful_life_months) : null,
+      rate_percent: assetForm.method === 'reducing_balance' ? Number(assetForm.rate_percent) : null,
+      residual_value: parseFloat(assetForm.residual_value) || 0,
+      asset_nominal: assetForm.asset_nominal || '1500',
+      accum_dep_nominal: assetForm.accum_dep_nominal || '1501',
+      source_ap_invoice_id: assetForm.source_ap_invoice_id || null,
+      source_bank_transaction_id: assetForm.source_bank_transaction_id || null,
+    };
+    if (editAsset) {
+      const { error } = await supabase.from('fixed_assets').update(payload).eq('id', editAsset.id);
+      if (error) { setSaveErr(error.message); setSaving(false); return; }
+      setAssets(prev => prev.map(a => a.id === editAsset.id ? { ...a, ...payload } : a));
+    } else {
+      const { data, error } = await supabase.from('fixed_assets').insert(payload).select().single();
+      if (error) { setSaveErr(error.message); setSaving(false); return; }
+      setAssets(prev => [...prev, data].sort((a, b) => a.purchase_date.localeCompare(b.purchase_date)));
+    }
+    setSaving(false); setShowModal(false);
+  };
+
+  const deleteAsset = async (a) => {
+    if (!window.confirm(`Delete "${a.name}"? This cannot be undone.`)) return;
+    setDeleting(a.id);
+    await supabase.from('fixed_assets').delete().eq('id', a.id).eq('company_id', companyId);
+    setAssets(prev => prev.filter(x => x.id !== a.id));
+    if (selectedId === a.id) setSelectedId(null);
+    setDeleting(null);
+  };
+
+  // ── Disposal ───────────────────────────────────────────────────────────────
+  const openDisposal = (a) => {
+    setDisposalAsset(a);
+    setDisposalForm({ date: new Date().toISOString().slice(0, 10), proceeds: '0', proceeds_nominal: '1000' });
+    setDisposalErr(null);
+    setShowDisposal(true);
+  };
+  const dispPreview = disposalAsset ? (() => {
+    const ym    = disposalForm.date ? disposalForm.date.slice(0, 7) : periodYM;
+    const ad    = faAccumDep(disposalAsset, ym);
+    const nbv   = Math.max(0, Number(disposalAsset.cost) - ad);
+    const proc  = parseFloat(disposalForm.proceeds) || 0;
+    return { ad, nbv, gain: proc - nbv };
+  })() : null;
+
+  const postDisposal = async () => {
+    if (!disposalAsset || !disposalForm.date) { setDisposalErr('Date is required.'); return; }
+    setDisposalPosting(true); setDisposalErr(null);
+    try {
+      const { ad, nbv, gain } = dispPreview;
+      const proc   = parseFloat(disposalForm.proceeds) || 0;
+      const ref    = `DISP-${disposalAsset.id.slice(0, 6)}`;
+      const jIds   = [];
+      // Row 1: clear accumulated depreciation
+      if (ad > 0.005) {
+        const { data: j } = await supabase.from('journals').insert({
+          company_id: companyId, date: disposalForm.date,
+          description: `Disposal — ${disposalAsset.name} — clear accum dep`,
+          debit_account: disposalAsset.accum_dep_nominal, credit_account: disposalAsset.asset_nominal,
+          amount: Math.round(ad * 100) / 100, reference: ref, vat_code: null, is_accrual_reversal: false,
+        }).select('id').single();
+        if (j?.id) jIds.push(j.id);
+      }
+      // Row 2: record proceeds (Dr bank / Cr asset cost)
+      if (proc > 0.005) {
+        const { data: j } = await supabase.from('journals').insert({
+          company_id: companyId, date: disposalForm.date,
+          description: `Disposal — ${disposalAsset.name} — proceeds`,
+          debit_account: disposalForm.proceeds_nominal || '1000', credit_account: disposalAsset.asset_nominal,
+          amount: Math.round(proc * 100) / 100, reference: ref, vat_code: null, is_accrual_reversal: false,
+        }).select('id').single();
+        if (j?.id) jIds.push(j.id);
+      }
+      // Row 3: gain or loss
+      const absGL = Math.abs(gain);
+      if (absGL > 0.005) {
+        const isGain = gain > 0;
+        const { data: j } = await supabase.from('journals').insert({
+          company_id: companyId, date: disposalForm.date,
+          description: `Disposal — ${disposalAsset.name} — ${isGain ? 'gain on disposal' : 'loss on disposal'}`,
+          debit_account:  isGain ? disposalAsset.asset_nominal : '6910',
+          credit_account: isGain ? '4200' : disposalAsset.asset_nominal,
+          amount: Math.round(absGL * 100) / 100, reference: ref, vat_code: null, is_accrual_reversal: false,
+        }).select('id').single();
+        if (j?.id) jIds.push(j.id);
+      }
+      // Mark asset disposed
+      const { error } = await supabase.from('fixed_assets').update({
+        status: 'disposed', disposal_date: disposalForm.date,
+        disposal_proceeds: proc, disposal_journal_ids: jIds,
+      }).eq('id', disposalAsset.id).eq('company_id', companyId);
+      if (error) throw error;
+      setAssets(prev => prev.map(a => a.id === disposalAsset.id
+        ? { ...a, status: 'disposed', disposal_date: disposalForm.date, disposal_proceeds: proc, disposal_journal_ids: jIds }
+        : a));
+      setShowDisposal(false); setDisposalAsset(null);
+    } catch (e) { setDisposalErr(e.message); }
+    setDisposalPosting(false);
+  };
+
+  // ── Render ─────────────────────────────────────────────────────────────────
+  const cardStyle = { background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-card)', padding: '14px 18px' };
+  const tabBtn = (id, label) => (
+    <button onClick={() => setActiveTab(id)} style={{ fontSize: 12, fontWeight: activeTab === id ? 700 : 400, color: activeTab === id ? 'var(--accent)' : 'var(--text-muted)', background: 'none', border: 'none', borderBottom: `2px solid ${activeTab === id ? 'var(--accent)' : 'transparent'}`, padding: '6px 14px', cursor: 'pointer' }}>
+      {label}
+    </button>
+  );
+  const subTabBtn = (id, label) => (
+    <button onClick={() => setAssetSubTab(id)} style={{ fontSize: 11, fontWeight: assetSubTab === id ? 700 : 400, color: assetSubTab === id ? 'var(--accent)' : 'var(--text-muted)', background: assetSubTab === id ? 'var(--accent-dim)' : 'transparent', border: `1px solid ${assetSubTab === id ? 'rgba(52,211,153,0.3)' : 'var(--border)'}`, borderRadius: 'var(--radius-pill)', padding: '3px 10px', cursor: 'pointer' }}>
+      {label}
+    </button>
+  );
+
+  const selectedAsset = selectedId ? assets.find(a => a.id === selectedId) : null;
+  const schedule = selectedAsset ? faMonthlySchedule(selectedAsset) : [];
+  const wtRows   = selectedAsset ? faWearAndTear(selectedAsset) : [];
+
+  // W&T totals by year across all assets
+  const wtByYear = {};
+  assets.forEach(a => {
+    faWearAndTear(a).forEach(r => {
+      if (!wtByYear[r.year]) wtByYear[r.year] = 0;
+      wtByYear[r.year] += r.annual;
+    });
+  });
+
+  if (!can(company, 'fixed_assets')) {
+    return <div style={{ maxWidth: 520, margin: '40px auto' }}><UpgradeCard feature="fixed_assets" inline /></div>;
+  }
+
+  return (
+    <div className="fade-up" style={{ maxWidth: 1100 }}>
+      {/* Header */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+        <div>
+          {depToast && (
+            <div style={{ fontSize: 11, color: 'var(--accent)', background: 'var(--accent-dim)', border: '1px solid rgba(52,211,153,0.25)', borderRadius: 'var(--radius-pill)', padding: '3px 10px', display: 'inline-flex', alignItems: 'center', gap: 6 }}>
+              <span>↻</span>{depToast}
+            </div>
+          )}
+          {depSkipped > 0 && (
+            <div style={{ fontSize: 11, color: 'var(--warn)', marginTop: 4 }}>
+              ⚠ {depSkipped} depreciation period{depSkipped !== 1 ? 's' : ''} skipped — period locked.
+            </div>
+          )}
+          {catchingUp && <div style={{ fontSize: 11, color: 'var(--text-faint)' }}>Posting catch-up depreciation…</div>}
+        </div>
+        <button className="btn btn-p btn-sm" onClick={openAdd}>+ Add Asset</button>
+      </div>
+
+      {/* Manual dep warning */}
+      {depWarning && (
+        <div style={{ background: 'var(--warn-dim)', border: '1px solid rgba(251,191,36,0.3)', borderRadius: 'var(--radius-card)', padding: '10px 14px', marginBottom: 14, fontSize: 12, color: 'var(--warn)', display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+          <span style={{ flexShrink: 0 }}>⚠</span>
+          <span>You have an active recurring journal that posts to account 6950 Depreciation. Deactivate it in <strong>Journals → Recurring</strong> to avoid double-posting now that the asset register is in use.</span>
+        </div>
+      )}
+
+      {/* Summary cards */}
+      {!loading && (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginBottom: 16 }}>
+          {[
+            { label: 'TOTAL COST', value: fmt(summaries.totalCost), sub: `${assets.length} asset${assets.length !== 1 ? 's' : ''}` },
+            { label: 'ACCUM DEP', value: fmt(summaries.totalAccum), sub: periodYM },
+            { label: 'NET BOOK VALUE', value: fmt(summaries.nbv), sub: 'Active assets only', col: 'var(--accent)' },
+            { label: 'YTD CHARGE', value: fmt(summaries.ytd), sub: `${thisYear} to ${periodYM}` },
+          ].map(c => (
+            <div key={c.label} style={cardStyle}>
+              <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: '0.1em', textTransform: 'uppercase', color: 'var(--text-faint)', marginBottom: 6 }}>{c.label}</div>
+              <div style={{ fontSize: 20, fontWeight: 700, color: c.col || 'var(--text)', fontVariantNumeric: 'tabular-nums', letterSpacing: '-0.02em' }}>{c.value}</div>
+              <div style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 2 }}>{c.sub}</div>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Tabs */}
+      <div style={{ display: 'flex', borderBottom: '1px solid var(--border)', marginBottom: 16 }}>
+        {tabBtn('register', 'Asset Register')}
+        {tabBtn('wear-tear', 'Tax — Wear & Tear')}
+      </div>
+
+      {/* ── Register tab ── */}
+      {activeTab === 'register' && (
+        loading ? <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-faint)', fontSize: 12 }}>Loading…</div>
+        : assets.length === 0 ? (
+          <div style={{ ...cardStyle, textAlign: 'center', padding: 40 }}>
+            <div style={{ fontSize: 32, opacity: 0.3, marginBottom: 12 }}>⊟</div>
+            <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text)', marginBottom: 6 }}>No assets yet</div>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 18 }}>Add your first fixed asset to start tracking depreciation.</div>
+            <button className="btn btn-p btn-sm" onClick={openAdd}>Add your first asset</button>
+          </div>
+        ) : (
+          <div>
+            {/* Asset table */}
+            <div style={cardStyle}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                    {['Name', 'Category', 'Cost', 'Accum Dep', 'NBV', 'Method', 'Status', ''].map(h => (
+                      <th key={h} style={{ padding: '6px 10px', textAlign: 'left', fontSize: 9, fontWeight: 600, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{h}</th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {assets.map(a => {
+                    const ad  = faAccumDep(a, periodYM);
+                    const nbv = Math.max(0, Number(a.cost) - ad);
+                    const isSelected = selectedId === a.id;
+                    return (
+                      <React.Fragment key={a.id}>
+                        <tr
+                          onClick={() => { setSelectedId(isSelected ? null : a.id); setAssetSubTab('schedule'); }}
+                          style={{ borderBottom: '1px solid var(--border)', cursor: 'pointer', background: isSelected ? 'var(--surface-2)' : undefined, opacity: a.status === 'disposed' ? 0.55 : 1 }}
+                        >
+                          <td style={{ padding: '9px 10px', fontWeight: 600, color: 'var(--text)' }}>{a.name}</td>
+                          <td style={{ padding: '9px 10px', color: 'var(--text-muted)' }}>{FA_CATEGORY_LABELS[a.category] || a.category}</td>
+                          <td style={{ padding: '9px 10px', fontVariantNumeric: 'tabular-nums' }}>{fmt(a.cost)}</td>
+                          <td style={{ padding: '9px 10px', fontVariantNumeric: 'tabular-nums', color: 'var(--text-muted)' }}>{fmt(ad)}</td>
+                          <td style={{ padding: '9px 10px', fontVariantNumeric: 'tabular-nums', fontWeight: 600, color: nbv > 0 ? 'var(--accent)' : 'var(--text-faint)' }}>{fmt(nbv)}</td>
+                          <td style={{ padding: '9px 10px', color: 'var(--text-muted)', fontSize: 11 }}>{a.method === 'straight_line' ? `SL ${a.useful_life_months}mo` : `RB ${a.rate_percent}%`}</td>
+                          <td style={{ padding: '9px 10px' }}>
+                            <span style={{ fontSize: 10, fontWeight: 600, borderRadius: 'var(--radius-pill)', padding: '2px 8px', background: a.status === 'disposed' ? 'var(--surface-2)' : 'var(--accent-dim)', color: a.status === 'disposed' ? 'var(--text-faint)' : 'var(--accent)', border: `1px solid ${a.status === 'disposed' ? 'var(--border)' : 'rgba(52,211,153,0.25)'}` }}>
+                              {a.status === 'disposed' ? 'Disposed' : 'Active'}
+                            </span>
+                          </td>
+                          <td style={{ padding: '9px 10px' }}>
+                            <div style={{ display: 'flex', gap: 6 }}>
+                              {a.status === 'active' && <button className="btn btn-s btn-sm" onClick={e => { e.stopPropagation(); openEdit(a); }}>Edit</button>}
+                              {a.status === 'active' && <button className="btn btn-s btn-sm" onClick={e => { e.stopPropagation(); openDisposal(a); }} style={{ color: 'var(--warn)' }}>Dispose</button>}
+                              {a.status !== 'disposed' && <button className="btn btn-s btn-sm" onClick={e => { e.stopPropagation(); deleteAsset(a); }} style={{ color: 'var(--danger)', opacity: deleting === a.id ? 0.5 : 1 }} disabled={deleting === a.id}>✕</button>}
+                            </div>
+                          </td>
+                        </tr>
+                        {/* Drill-down row */}
+                        {isSelected && (
+                          <tr>
+                            <td colSpan={8} style={{ padding: '0 10px 14px', background: 'var(--surface-2)' }}>
+                              <div style={{ paddingTop: 10, borderTop: '1px solid var(--border)' }}>
+                                <div style={{ display: 'flex', gap: 8, marginBottom: 10, alignItems: 'center' }}>
+                                  {subTabBtn('schedule', 'Book Depreciation Schedule')}
+                                  {subTabBtn('wear-tear', 'Tax — Wear & Tear')}
+                                  {a.disposal_date && <span style={{ fontSize: 10, color: 'var(--text-faint)', marginLeft: 8 }}>Disposed {fmtD(a.disposal_date)} · proceeds {fmt(a.disposal_proceeds || 0)} · {dispPreview && a.status === 'disposed' ? '' : ''}{(() => { const ad2 = faAccumDep(a, a.disposal_date.slice(0,7)); const nbv2 = Math.max(0, Number(a.cost) - ad2); const g = (parseFloat(a.disposal_proceeds) || 0) - nbv2; return `${g >= 0 ? 'Gain' : 'Loss'}: ${fmt(Math.abs(g))}`; })()}</span>}
+                                </div>
+                                {assetSubTab === 'schedule' && (
+                                  <div style={{ maxHeight: 300, overflowY: 'auto' }}>
+                                    <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+                                      <thead style={{ position: 'sticky', top: 0, background: 'var(--surface-2)' }}>
+                                        <tr>
+                                          {['Period', 'Charge', 'Accum Dep', 'NBV'].map(h => <th key={h} style={{ padding: '4px 8px', textAlign: 'left', fontSize: 9, fontWeight: 600, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{h}</th>)}
+                                        </tr>
+                                      </thead>
+                                      <tbody>
+                                        {schedule.map((r, i) => (
+                                          <tr key={r.ym} style={{ borderBottom: '1px solid var(--border)', opacity: r.ym > periodYM ? 0.45 : 1 }}>
+                                            <td style={{ padding: '4px 8px', color: 'var(--text-muted)' }}>{r.ym}</td>
+                                            <td style={{ padding: '4px 8px', fontVariantNumeric: 'tabular-nums' }}>{fmt(r.charge)}</td>
+                                            <td style={{ padding: '4px 8px', fontVariantNumeric: 'tabular-nums', color: 'var(--text-muted)' }}>{fmt(r.accum)}</td>
+                                            <td style={{ padding: '4px 8px', fontVariantNumeric: 'tabular-nums', color: r.nbv > 0 ? 'var(--text)' : 'var(--text-faint)' }}>{fmt(Math.max(0, r.nbv))}</td>
+                                          </tr>
+                                        ))}
+                                      </tbody>
+                                    </table>
+                                    {schedule.length === 0 && <div style={{ padding: 12, fontSize: 11, color: 'var(--text-faint)' }}>No schedule — check method and useful life.</div>}
+                                  </div>
+                                )}
+                                {assetSubTab === 'wear-tear' && (
+                                  <div>
+                                    {wtRows.length === 0 ? <div style={{ fontSize: 11, color: 'var(--text-faint)', padding: 8 }}>No W&T data.</div> : (
+                                      <table style={{ fontSize: 11, borderCollapse: 'collapse' }}>
+                                        <thead>
+                                          <tr>{['Year', 'Annual W&T (12.5%)', 'TWDV', 'Note'].map(h => <th key={h} style={{ padding: '4px 10px', textAlign: 'left', fontSize: 9, fontWeight: 600, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{h}</th>)}</tr>
+                                        </thead>
+                                        <tbody>
+                                          {wtRows.map(r => (
+                                            <tr key={r.year} style={{ borderBottom: '1px solid var(--border)' }}>
+                                              <td style={{ padding: '4px 10px' }}>{r.year}</td>
+                                              <td style={{ padding: '4px 10px', fontVariantNumeric: 'tabular-nums' }}>{fmt(r.annual)}</td>
+                                              <td style={{ padding: '4px 10px', fontVariantNumeric: 'tabular-nums', color: r.twdv > 0 ? 'var(--text)' : 'var(--text-faint)' }}>{fmt(r.twdv)}</td>
+                                              <td style={{ padding: '4px 10px', fontSize: 10, color: 'var(--warn)' }}>{r.note || ''}</td>
+                                            </tr>
+                                          ))}
+                                        </tbody>
+                                      </table>
+                                    )}
+                                  </div>
+                                )}
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )
+      )}
+
+      {/* ── Wear & Tear tab ── */}
+      {activeTab === 'wear-tear' && (
+        <div style={cardStyle}>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 14 }}>
+            Display only — Irish Revenue wear & tear at 12.5% straight-line over 8 years. Motor vehicles: qualifying cost capped at €24,000. No journals posted.
+          </div>
+          {assets.length === 0 ? (
+            <div style={{ fontSize: 12, color: 'var(--text-faint)', textAlign: 'center', padding: 24 }}>No assets — add assets in the Register tab.</div>
+          ) : (
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+              <thead>
+                <tr>
+                  {['Asset', 'Qual. Cost', ...Object.keys(wtByYear).sort().map(String)].map(h => (
+                    <th key={h} style={{ padding: '5px 8px', textAlign: 'left', fontSize: 9, fontWeight: 600, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.08em', whiteSpace: 'nowrap' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {assets.map(a => {
+                  const isMV = a.category === 'motor_vehicles';
+                  const qualCost = isMV ? Math.min(Number(a.cost), 24000) : Number(a.cost);
+                  const wtMap = {};
+                  faWearAndTear(a).forEach(r => { wtMap[r.year] = r.annual; });
+                  const years = Object.keys(wtByYear).sort();
+                  return (
+                    <tr key={a.id} style={{ borderBottom: '1px solid var(--border)', opacity: a.status === 'disposed' ? 0.5 : 1 }}>
+                      <td style={{ padding: '6px 8px', fontWeight: 600, color: 'var(--text)' }}>{a.name}{isMV && Number(a.cost) > 24000 && <span style={{ fontSize: 9, color: 'var(--warn)', marginLeft: 4 }}>cap</span>}</td>
+                      <td style={{ padding: '6px 8px', fontVariantNumeric: 'tabular-nums' }}>{fmt(qualCost)}</td>
+                      {years.map(yr => <td key={yr} style={{ padding: '6px 8px', fontVariantNumeric: 'tabular-nums', color: wtMap[yr] ? 'var(--text)' : 'var(--text-faint)' }}>{wtMap[yr] ? fmt(wtMap[yr]) : '—'}</td>)}
+                    </tr>
+                  );
+                })}
+                {/* Totals row */}
+                <tr style={{ borderTop: '2px solid var(--border)', fontWeight: 700 }}>
+                  <td style={{ padding: '6px 8px', color: 'var(--text)' }}>Total</td>
+                  <td style={{ padding: '6px 8px' }}></td>
+                  {Object.keys(wtByYear).sort().map(yr => <td key={yr} style={{ padding: '6px 8px', fontVariantNumeric: 'tabular-nums', color: 'var(--accent)' }}>{fmt(wtByYear[yr])}</td>)}
+                </tr>
+              </tbody>
+            </table>
+          )}
+        </div>
+      )}
+
+      {/* ── Add / Edit modal ── */}
+      {showModal && assetForm && createPortal(
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
+          <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-card)', padding: 24, width: '100%', maxWidth: 560, maxHeight: '90vh', overflowY: 'auto' }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text)', marginBottom: 18 }}>{editAsset ? `Edit — ${editAsset.name}` : 'Add Fixed Asset'}</div>
+            {[
+              { label: 'Name *', el: <input className="f-input" value={assetForm.name} onChange={af('name')} placeholder="e.g. Office Server Rack" /> },
+              { label: 'Description', el: <input className="f-input" value={assetForm.description} onChange={af('description')} /> },
+              { label: 'Category *', el: (
+                <select className="f-input" value={assetForm.category} onChange={af('category')}>
+                  {Object.entries(FA_CATEGORY_LABELS).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                </select>
+              )},
+              { label: 'Cost (€) *', el: <input className="f-input" type="number" min="0" step="0.01" value={assetForm.cost} onChange={af('cost')} /> },
+              { label: 'Purchase Date *', el: <input className="f-input" type="date" value={assetForm.purchase_date} onChange={af('purchase_date')} /> },
+              { label: 'Depreciation Method *', el: (
+                <select className="f-input" value={assetForm.method} onChange={af('method')}>
+                  <option value="straight_line">Straight-line</option>
+                  <option value="reducing_balance">Reducing balance</option>
+                </select>
+              )},
+            ].map(({ label, el }) => (
+              <div key={label} className="f-group" style={{ marginBottom: 12 }}>
+                <label className="f-label">{label}</label>{el}
+              </div>
+            ))}
+            {assetForm.method === 'straight_line' && (
+              <div className="f-group" style={{ marginBottom: 12 }}>
+                <label className="f-label">Useful Life (months) *</label>
+                <input className="f-input" type="number" min="1" value={assetForm.useful_life_months} onChange={af('useful_life_months')} placeholder="e.g. 60 = 5 years" />
+              </div>
+            )}
+            {assetForm.method === 'reducing_balance' && (
+              <div className="f-group" style={{ marginBottom: 12 }}>
+                <label className="f-label">Annual Rate (%) *</label>
+                <input className="f-input" type="number" min="0.01" max="100" step="0.01" value={assetForm.rate_percent} onChange={af('rate_percent')} placeholder="e.g. 25" />
+              </div>
+            )}
+            <div className="f-group" style={{ marginBottom: 12 }}>
+              <label className="f-label">Residual Value (€)</label>
+              <input className="f-input" type="number" min="0" step="0.01" value={assetForm.residual_value} onChange={af('residual_value')} />
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, marginBottom: 12 }}>
+              <div className="f-group">
+                <label className="f-label">Asset Cost Nominal</label>
+                <select className="f-input" value={assetForm.asset_nominal} onChange={af('asset_nominal')}>
+                  {coaAccounts.filter(a => a.is_active !== false).map(a => <option key={a.code} value={a.code}>{a.code} — {a.name}</option>)}
+                </select>
+              </div>
+              <div className="f-group">
+                <label className="f-label">Accum Dep Nominal</label>
+                <select className="f-input" value={assetForm.accum_dep_nominal} onChange={af('accum_dep_nominal')}>
+                  {coaAccounts.filter(a => a.is_active !== false).map(a => <option key={a.code} value={a.code}>{a.code} — {a.name}</option>)}
+                </select>
+              </div>
+            </div>
+            {saveErr && <div style={{ fontSize: 11, color: 'var(--danger)', marginBottom: 10 }}>{saveErr}</div>}
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end', marginTop: 6 }}>
+              <button className="btn btn-s btn-sm" onClick={() => setShowModal(false)}>Cancel</button>
+              <button className="btn btn-p btn-sm" onClick={saveAsset} disabled={saving}>{saving ? 'Saving…' : editAsset ? 'Save Changes' : 'Add Asset'}</button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+
+      {/* ── Disposal dialog ── */}
+      {showDisposal && disposalAsset && createPortal(
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.7)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}>
+          <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-card)', padding: 24, width: '100%', maxWidth: 440 }}>
+            <div style={{ fontSize: 15, fontWeight: 700, color: 'var(--text)', marginBottom: 4 }}>Dispose — {disposalAsset.name}</div>
+            <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 18 }}>Posts a compound disposal journal and marks the asset disposed.</div>
+            {[
+              { label: 'Disposal Date *', el: <input className="f-input" type="date" value={disposalForm.date} onChange={e => setDisposalForm(p => ({ ...p, date: e.target.value }))} /> },
+              { label: 'Proceeds (€)', el: <input className="f-input" type="number" min="0" step="0.01" value={disposalForm.proceeds} onChange={e => setDisposalForm(p => ({ ...p, proceeds: e.target.value }))} /> },
+              { label: 'Proceeds Nominal', el: (
+                <select className="f-input" value={disposalForm.proceeds_nominal} onChange={e => setDisposalForm(p => ({ ...p, proceeds_nominal: e.target.value }))}>
+                  {coaAccounts.filter(a => a.is_active !== false).map(a => <option key={a.code} value={a.code}>{a.code} — {a.name}</option>)}
+                </select>
+              )},
+            ].map(({ label, el }) => (
+              <div key={label} className="f-group" style={{ marginBottom: 10 }}>
+                <label className="f-label">{label}</label>{el}
+              </div>
+            ))}
+            {/* Preview */}
+            {dispPreview && disposalForm.date && (
+              <div style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 14px', marginBottom: 14, fontSize: 11 }}>
+                <div style={{ fontWeight: 600, color: 'var(--text)', marginBottom: 6 }}>Journal preview</div>
+                {[
+                  { dr: disposalAsset.accum_dep_nominal, cr: disposalAsset.asset_nominal, amt: dispPreview.ad, desc: 'Clear accumulated depreciation' },
+                  ...(parseFloat(disposalForm.proceeds) > 0.005 ? [{ dr: disposalForm.proceeds_nominal, cr: disposalAsset.asset_nominal, amt: parseFloat(disposalForm.proceeds), desc: 'Record proceeds' }] : []),
+                  ...(Math.abs(dispPreview.gain) > 0.005 ? [{
+                    dr: dispPreview.gain > 0 ? disposalAsset.asset_nominal : '6910',
+                    cr: dispPreview.gain > 0 ? '4200' : disposalAsset.asset_nominal,
+                    amt: Math.abs(dispPreview.gain),
+                    desc: dispPreview.gain > 0 ? 'Gain on disposal' : 'Loss on disposal',
+                    col: dispPreview.gain > 0 ? 'var(--accent)' : 'var(--danger)',
+                  }] : []),
+                ].map((r, i) => (
+                  <div key={i} style={{ display: 'flex', justifyContent: 'space-between', borderBottom: '1px solid var(--border)', padding: '3px 0', fontSize: 11 }}>
+                    <span style={{ color: 'var(--text-muted)' }}>Dr {r.dr} / Cr {r.cr}</span>
+                    <span style={{ fontVariantNumeric: 'tabular-nums', color: r.col || 'var(--text)', fontWeight: r.col ? 600 : 400 }}>{fmt(r.amt)}</span>
+                  </div>
+                ))}
+                <div style={{ display: 'flex', justifyContent: 'space-between', marginTop: 6, fontWeight: 700, color: dispPreview.gain >= 0 ? 'var(--accent)' : 'var(--danger)' }}>
+                  <span>{dispPreview.gain >= 0 ? 'Gain on disposal' : 'Loss on disposal'}</span>
+                  <span style={{ fontVariantNumeric: 'tabular-nums' }}>{fmt(Math.abs(dispPreview.gain))}</span>
+                </div>
+              </div>
+            )}
+            {disposalErr && <div style={{ fontSize: 11, color: 'var(--danger)', marginBottom: 10 }}>{disposalErr}</div>}
+            <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
+              <button className="btn btn-s btn-sm" onClick={() => setShowDisposal(false)}>Cancel</button>
+              <button className="btn btn-p btn-sm" onClick={postDisposal} disabled={disposalPosting} style={{ background: 'var(--danger)', borderColor: 'var(--danger)' }}>
+                {disposalPosting ? 'Posting…' : 'Post Disposal'}
+              </button>
+            </div>
+          </div>
+        </div>,
+        document.body
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// YapilyBankFeeds — connect & manage live bank connections via Yapily hosted flow
+// ─────────────────────────────────────────────────────────────────────────────
+function YapilyBankFeeds({ companyId, company, isActive }) {
+  const [connections,    setConnections]    = useState([]);
+  const [loading,        setLoading]        = useState(true);
+  const [syncing,        setSyncing]        = useState(null);
+  const [syncResult,     setSyncResult]     = useState(null);
+  const [preview,        setPreview]        = useState(null);
+  const [previewConn,    setPreviewConn]    = useState(null);
+  const [confirming,     setConfirming]     = useState(false);
+  const [importLimit,    setImportLimit]    = useState(10);
+  const [error,          setError]          = useState(null);
+  const [successMsg,     setSuccessMsg]     = useState(null);
+  // Preview inline-edit state: extId → { nominal_code, vat_code, save_rule }.
+  // previewOriginal is the immutable AI/rules-suggested baseline (set once per preview fetch);
+  // previewEdits is the mutable working copy the dropdowns read/write. Both live in state
+  // independent of importLimit, so edits survive batch-size changes and re-renders.
+  const [previewOriginal, setPreviewOriginal] = useState({});
+  const [previewEdits,    setPreviewEdits]    = useState({});
+  const { accounts: coaAccounts, refetch: coaRefetch } = useChartOfAccounts(companyId);
+  // Institution picker state
+  const [showPicker,     setShowPicker]     = useState(false);
+  const [institutions,   setInstitutions]   = useState([]);
+  const [instLoading,    setInstLoading]    = useState(false);
+  const [instSearch,     setInstSearch]     = useState('');
+  const [connecting,     setConnecting]     = useState(false);
+  const [yapilyEnv,      setYapilyEnv]      = useState(null); // 'production' | 'sandbox' | null
+  const [disconnecting,  setDisconnecting]  = useState(null); // connection id being disconnected
+
+  // Pick up bank_connected / bank_error from URL params (set by callback redirect)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.get('bank_connected') === '1') setSuccessMsg('Bank account connected successfully.');
+    if (params.get('bank_error'))              setError(`Connection failed: ${params.get('bank_error')}`);
+    // URL already cleaned by App-level effect
+  }, []); // eslint-disable-line
+
+  const loadConnections = async () => {
+    if (!companyId) { setLoading(false); return; }
+    setLoading(true);
+    const { data } = await supabase
+      .from('bank_connections')
+      .select('id, institution_id, status, consent_expires_at, yapily_reconfirm_by, yapily_last_confirmed_at, account_refs, created_at, updated_at')
+      .eq('company_id', companyId)
+      .order('created_at', { ascending: false });
+    setConnections(data || []);
+    setLoading(false);
+  };
+
+  useEffect(() => { loadConnections(); }, [companyId]); // eslint-disable-line
+
+  // Refresh COA and the connections list whenever this tab becomes visible inside BankHub.
+  // YapilyBankFeeds stays mounted behind display:none when the user switches to the CSV tab,
+  // so its useChartOfAccounts / bank_connections data is never automatically re-fetched —
+  // without this, a stale COA (e.g. after a Settings change) or a connection made in another
+  // tab/session wouldn't show up until a full page reload.
+  useEffect(() => {
+    if (isActive) {
+      coaRefetch();
+      loadConnections();
+    }
+  }, [isActive]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Open institution picker — fetch list server-side (keeps Yapily secret off the client)
+  const openPicker = async () => {
+    setShowPicker(true);
+    setInstSearch('');
+    if (institutions.length) return; // already loaded
+    setInstLoading(true);
+    try {
+      const res  = await fetch('/api/yapily/institutions?country=IE');
+      const data = await res.json();
+      if (!res.ok) { setError(data.error || 'Could not load banks'); setShowPicker(false); }
+      else { setInstitutions(data.institutions ?? []); setYapilyEnv(data.environment ?? null); }
+    } catch (e) { setError(e.message); setShowPicker(false); }
+    setInstLoading(false);
+  };
+
+  // Called when the user picks a bank — goes straight to the hosted consent flow.
+  // Yapily's native Connect config shows its own compliance consent screen after this
+  // redirect, so we no longer show one of our own here.
+  const selectInstitution = (inst) => {
+    setShowPicker(false);
+    connectBank(inst);
+  };
+
+  // Initiate consent flow for the selected institution
+  const connectBank = async (inst) => {
+    if (!companyId || !inst) return;
+    setConnecting(true); setShowPicker(false); setError(null);
+    try {
+      const res  = await fetch('/api/yapily/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          company_id:            companyId,
+          institution:           inst.id,
+          institutionCountryCode: inst.countryCode,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok || !data.hostedUrl) {
+        setError(data.error || 'Failed to initiate connection');
+        setConnecting(false); return;
+      }
+      window.location.href = data.hostedUrl;
+    } catch (e) {
+      setError(e.message);
+      setConnecting(false);
+    }
+  };
+
+  // Step 1: fetch feed and preview what would be imported (dry_run: true)
+  const previewConnection = async (conn) => {
+    if (!companyId) return;
+    setSyncing(conn.id); setPreview(null); setPreviewConn(null); setSyncResult(null); setError(null);
+    setPreviewOriginal({}); setPreviewEdits({});
+    const isSandbox = conn.institution_id === 'modelo-sandbox';
+    try {
+      const res  = await fetch('/api/yapily/ingest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ company_id: companyId, allow_pending: isSandbox, dry_run: true }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setError(data.error || 'Preview failed'); }
+      else {
+        setPreview(data);
+        setPreviewConn(conn);
+        // Seed the edit state from the suggested values — dropdowns default to these,
+        // and this is what "unedited" means when deciding whether to show the rule checkbox.
+        const seed = {};
+        (data.preview || []).forEach(row => {
+          seed[row.extId] = { nominal_code: row.nominal_code, vat_code: row.vat_code ?? null, save_rule: false };
+        });
+        setPreviewOriginal(seed);
+        setPreviewEdits(seed);
+      }
+    } catch (e) { setError(e.message); }
+    setSyncing(null);
+  };
+
+  // Row edit handler — merges a nominal/vat change into previewEdits. If the row's edited
+  // values end up matching the original suggestion again, save_rule is force-cleared so a
+  // stale "save rule" opt-in can never survive un-editing the row.
+  const updatePreviewEdit = (extId, patch) => {
+    setPreviewEdits(prev => {
+      const cur  = prev[extId] || {};
+      const next = { ...cur, ...patch };
+      const orig = previewOriginal[extId];
+      const stillEdited = orig && (next.nominal_code !== orig.nominal_code || (next.vat_code ?? null) !== (orig.vat_code ?? null));
+      if (!stillEdited) next.save_rule = false;
+      return { ...prev, [extId]: next };
+    });
+  };
+
+  const isPreviewRowEdited = (extId) => {
+    const orig = previewOriginal[extId];
+    const edit = previewEdits[extId];
+    if (!orig || !edit) return false;
+    return edit.nominal_code !== orig.nominal_code || (edit.vat_code ?? null) !== (orig.vat_code ?? null);
+  };
+
+  // Step 2: confirm and post the first N transactions — sends back the FULL edit state
+  // (every row's current nominal/VAT, edited or not) so the server posts exactly what the
+  // Preview showed rather than silently re-running categorisation and discarding edits.
+  const confirmImport = async (conn) => {
+    if (!companyId) return;
+    setConfirming(true); setError(null);
+    const isSandbox = conn.institution_id === 'modelo-sandbox';
+    try {
+      const res  = await fetch('/api/yapily/ingest', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          company_id:    companyId,
+          allow_pending: isSandbox,
+          dry_run:       false,
+          limit:         importLimit || null,
+          overrides:     previewEdits,
+        }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setError(data.error || 'Import failed'); }
+      else {
+        setSyncResult(data);
+        setPreview(null);
+        setPreviewConn(null);
+        setPreviewOriginal({});
+        setPreviewEdits({});
+      }
+    } catch (e) { setError(e.message); }
+    setConfirming(false);
+    loadConnections();
+  };
+
+  // Disconnect / revoke a bank connection — calls Yapily DELETE /consents/{consentId}
+  // server-side and marks the row revoked so it stops syncing.
+  const disconnectConnection = async (conn) => {
+    if (!companyId) return;
+    if (!window.confirm(`This will disconnect ${conn.institution_id} and stop importing transactions. Continue?`)) return;
+    setDisconnecting(conn.id); setError(null); setSuccessMsg(null);
+    try {
+      const res  = await fetch('/api/yapily/disconnect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ company_id: companyId, connection_id: conn.id }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setError(data.error || 'Failed to disconnect'); }
+      else if (data.warning) { setError(data.warning); }
+      else { setSuccessMsg(`${conn.institution_id} disconnected.`); }
+      if (previewConn?.id === conn.id) { setPreview(null); setPreviewConn(null); setPreviewOriginal({}); setPreviewEdits({}); }
+    } catch (e) { setError(e.message); }
+    setDisconnecting(null);
+    loadConnections();
+  };
+
+  // Reconnect — for EU 180-day (UK 90-day) consents the user re-authorises via a fresh
+  // hosted consent flow after expiry, rather than extending the old one.
+  const reconnectConnection = async (conn) => {
+    if (!companyId) return;
+    // Mark the lapsed row expired so it doesn't keep showing as active once the fresh
+    // consent (a new bank_connections row) is created by /api/yapily/connect.
+    if (conn.status !== 'expired' && conn.status !== 'revoked') {
+      await supabase.from('bank_connections').update({ status: 'expired', yapily_consent_token: null, updated_at: new Date().toISOString() }).eq('id', conn.id);
+    }
+    const known = institutions.find(i => i.id === conn.institution_id);
+    selectInstitution(known || {
+      id:          conn.institution_id,
+      name:        conn.institution_id,
+      countryCode: conn.institution_id === 'modelo-sandbox' ? 'GB' : 'IE',
+    });
+  };
+
+  const fmtD = (d) => d ? new Date(d).toLocaleDateString('en-IE', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
+
+  // Surface a warning within this many days of the expiry deadline — but the check itself
+  // is date-based so sandbox's ~10-minute window still correctly falls straight into
+  // "expiring"/"expired" for quick end-to-end testing.
+  const EXPIRY_WARNING_DAYS = 14;
+
+  // Derive the user-facing lifecycle state from the stored dates — independent of whatever
+  // `status` last got written by a sync attempt, since reconfirmBy can lapse with no sync
+  // having run at all.
+  const connectionState = (c) => {
+    if (c.status === 'revoked') return { key: 'revoked', label: 'Revoked', tone: 'faint' };
+    if (c.status === 'pending') return { key: 'pending', label: 'Pending', tone: 'warn' };
+    if (c.status === 'failed')  return { key: 'failed',  label: 'Failed',  tone: 'danger' };
+
+    const deadline = c.yapily_reconfirm_by || c.consent_expires_at;
+    const deadlineMs = deadline ? new Date(deadline).getTime() : null;
+    const now = Date.now();
+
+    if (c.status === 'expired' || (deadlineMs && now >= deadlineMs)) {
+      return { key: 'expired', label: 'Expired — reconnect needed', tone: 'danger' };
+    }
+    if (deadlineMs && now >= deadlineMs - EXPIRY_WARNING_DAYS * 24 * 60 * 60 * 1000) {
+      return { key: 'expiring', label: `Expires ${fmtD(deadline)}`, tone: 'warn' };
+    }
+    return { key: 'active', label: 'Active', tone: 'accent' };
+  };
+  const toneColor = { accent: 'var(--accent)', warn: 'var(--warn)', danger: 'var(--danger)', faint: 'var(--text-faint)' };
+  const toneBg    = { accent: 'var(--accent-dim)', warn: 'var(--warn-dim)', danger: 'var(--danger-dim)', faint: 'var(--surface-2)' };
+
+  if (!can(company, 'bank_feeds')) {
+    return <div style={{ maxWidth: 520, margin: '40px auto' }}><UpgradeCard feature="bank_feeds" inline /></div>;
+  }
+
+  return (
+    <div className="fade-up" style={{ maxWidth: 800 }}>
+      {/* Environment notice */}
+      {yapilyEnv === 'sandbox' && (
+        <div style={{ background: 'var(--warn-dim)', border: '1px solid rgba(251,191,36,0.3)', borderRadius: 'var(--radius-card)', padding: '10px 14px', marginBottom: 16, fontSize: 11, color: 'var(--warn)', display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+          <span style={{ flexShrink: 0 }}>⚠</span>
+          <span><strong>Sandbox credentials</strong> — only mock institutions are available. Switch to production Yapily credentials (YAPILY_APP_ID / YAPILY_APP_SECRET) to connect real Irish banks.</span>
+        </div>
+      )}
+      {yapilyEnv === 'production' && (
+        <div style={{ background: 'rgba(52,211,153,0.08)', border: '1px solid rgba(52,211,153,0.25)', borderRadius: 'var(--radius-card)', padding: '10px 14px', marginBottom: 16, fontSize: 11, color: 'var(--accent)', display: 'flex', gap: 8, alignItems: 'flex-start' }}>
+          <span style={{ flexShrink: 0 }}>✓</span>
+          <span><strong>Production</strong> — real Irish banks available. <code>modelo-sandbox</code> is still listed for testing.</span>
+        </div>
+      )}
+
+      {/* Status messages */}
+      {successMsg && (
+        <div style={{ background: 'var(--accent-dim)', border: '1px solid rgba(52,211,153,0.3)', borderRadius: 'var(--radius-card)', padding: '10px 14px', marginBottom: 14, fontSize: 12, color: 'var(--accent)', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span>✓</span><span>{successMsg}</span>
+          <button onClick={() => setSuccessMsg(null)} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: 14, lineHeight: 1 }}>×</button>
+        </div>
+      )}
+      {error && (
+        <div style={{ background: 'var(--danger-dim)', border: '1px solid rgba(248,113,113,0.3)', borderRadius: 'var(--radius-card)', padding: '10px 14px', marginBottom: 14, fontSize: 12, color: 'var(--danger)', display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span>✕</span><span>{error}</span>
+          <button onClick={() => setError(null)} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--danger)', cursor: 'pointer', fontSize: 14, lineHeight: 1 }}>×</button>
+        </div>
+      )}
+
+      {/* Header + connect button */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 16 }}>
+        <div style={{ fontSize: 12, color: 'var(--text-muted)' }}>
+          {connections.filter(c => c.status === 'active').length} active connection{connections.filter(c => c.status === 'active').length !== 1 ? 's' : ''}
+        </div>
+        <button
+          className="btn btn-p btn-sm"
+          onClick={openPicker}
+          disabled={connecting || instLoading}
+        >
+          {connecting ? 'Redirecting to bank…' : '+ Connect bank account'}
+        </button>
+      </div>
+
+      {/* ── Institution picker modal ────────────────────────────────────── */}
+      {showPicker && (
+        <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center', padding: 16 }}
+             onClick={() => setShowPicker(false)}>
+          <div style={{ background: 'var(--surface)', borderRadius: 'var(--radius-card)', border: '1px solid var(--border)', width: '100%', maxWidth: 480, maxHeight: '80vh', display: 'flex', flexDirection: 'column', overflow: 'hidden' }}
+               onClick={e => e.stopPropagation()}>
+
+            {/* Header */}
+            <div style={{ padding: '16px 18px', borderBottom: '1px solid var(--border)', display: 'flex', alignItems: 'center', gap: 10 }}>
+              <div style={{ flex: 1 }}>
+                <div style={{ fontSize: 14, fontWeight: 700, color: 'var(--text)' }}>Choose your bank</div>
+                {yapilyEnv && (
+                  <div style={{ fontSize: 10, color: yapilyEnv === 'production' ? 'var(--accent)' : 'var(--warn)', marginTop: 2 }}>
+                    {yapilyEnv === 'production' ? '● Production — real banks available' : '● Sandbox — mock banks only'}
+                  </div>
+                )}
+              </div>
+              <button onClick={() => setShowPicker(false)} style={{ background: 'none', border: 'none', color: 'var(--text-faint)', cursor: 'pointer', fontSize: 18, lineHeight: 1, padding: '2px 6px' }}>×</button>
+            </div>
+
+            {/* Search */}
+            <div style={{ padding: '10px 18px', borderBottom: '1px solid var(--border)' }}>
+              <input
+                autoFocus
+                type="text"
+                placeholder="Search banks…"
+                value={instSearch}
+                onChange={e => setInstSearch(e.target.value)}
+                style={{ width: '100%', padding: '7px 10px', borderRadius: 8, border: '1px solid var(--border)', background: 'var(--surface-2)', color: 'var(--text)', fontSize: 13, boxSizing: 'border-box' }}
+              />
+            </div>
+
+            {/* Institution list */}
+            <div style={{ overflowY: 'auto', flex: 1 }}>
+              {instLoading ? (
+                <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-faint)', fontSize: 12 }}>Loading banks…</div>
+              ) : (() => {
+                const q = instSearch.trim().toLowerCase();
+                const filtered = institutions.filter(i =>
+                  !q || i.name.toLowerCase().includes(q) || i.id.toLowerCase().includes(q)
+                );
+                if (!filtered.length) return (
+                  <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-faint)', fontSize: 12 }}>No banks match "{instSearch}"</div>
+                );
+                return filtered.map(inst => (
+                  <button
+                    key={inst.id}
+                    onClick={() => selectInstitution(inst)}
+                    disabled={connecting}
+                    style={{ width: '100%', display: 'flex', alignItems: 'center', gap: 12, padding: '11px 18px', background: 'none', border: 'none', borderBottom: '1px solid var(--border)', cursor: 'pointer', textAlign: 'left', transition: 'background 0.12s' }}
+                    onMouseEnter={e => e.currentTarget.style.background = 'var(--surface-2)'}
+                    onMouseLeave={e => e.currentTarget.style.background = 'none'}
+                  >
+                    {/* Logo */}
+                    <div style={{ width: 36, height: 36, borderRadius: 8, border: '1px solid var(--border)', background: 'var(--surface-2)', overflow: 'hidden', flexShrink: 0, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+                      {inst.logo
+                        ? <img src={inst.logo} alt="" style={{ width: 32, height: 32, objectFit: 'contain' }} onError={e => { e.target.style.display = 'none'; }} />
+                        : <span style={{ fontSize: 14, color: 'var(--text-faint)' }}>{inst.name.slice(0,2).toUpperCase()}</span>
+                      }
+                    </div>
+                    {/* Name + tags */}
+                    <div style={{ flex: 1, minWidth: 0 }}>
+                      <div style={{ fontSize: 13, fontWeight: 600, color: 'var(--text)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{inst.name}</div>
+                      <div style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 1 }}>
+                        {inst.countryCode}
+                        {inst.id === 'modelo-sandbox' && <span style={{ marginLeft: 6, color: 'var(--warn)', fontWeight: 600 }}>SANDBOX</span>}
+                      </div>
+                    </div>
+                    <span style={{ fontSize: 10, color: 'var(--text-faint)' }}>→</span>
+                  </button>
+                ));
+              })()}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Connections list */}
+      {loading ? (
+        <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-faint)', fontSize: 12 }}>Loading…</div>
+      ) : connections.length === 0 ? (
+        <div style={{ background: 'var(--surface)', border: '2px dashed var(--border)', borderRadius: 'var(--radius-card)', padding: '40px 32px', textAlign: 'center' }}>
+          <div style={{ fontSize: 32, opacity: 0.3, marginBottom: 12 }}>⬡</div>
+          <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text)', marginBottom: 8 }}>No bank connections yet</div>
+          <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 20 }}>
+            Connect a bank account to sync transactions automatically.
+          </div>
+          <button className="btn btn-p btn-sm" onClick={openPicker} disabled={connecting || instLoading}>
+            {connecting ? 'Redirecting…' : 'Choose bank →'}
+          </button>
+        </div>
+      ) : (
+        <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-card)', overflow: 'hidden' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                {['Institution', 'Status', 'Accounts', 'Expires', 'Last Updated', ''].map(h => (
+                  <th key={h} style={{ padding: '8px 12px', textAlign: 'left', fontSize: 9, fontWeight: 600, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.08em' }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {connections.map(c => {
+                const state = connectionState(c);
+                const busy  = !!syncing || confirming || !!disconnecting;
+                return (
+                <tr key={c.id} style={{ borderBottom: '1px solid var(--border)' }}>
+                  <td style={{ padding: '10px 12px', fontWeight: 600, color: 'var(--text)' }}>{c.institution_id}</td>
+                  <td style={{ padding: '10px 12px' }}>
+                    <span style={{ fontSize: 10, fontWeight: 600, borderRadius: 'var(--radius-pill)', padding: '2px 8px', background: toneBg[state.tone], color: toneColor[state.tone], border: `1px solid ${toneColor[state.tone]}33` }}>
+                      {state.label}
+                    </span>
+                  </td>
+                  <td style={{ padding: '10px 12px', color: 'var(--text-muted)' }}>
+                    {Array.isArray(c.account_refs) ? c.account_refs.map(a => a.name || a.id).join(', ') || '—' : '—'}
+                  </td>
+                  <td style={{ padding: '10px 12px', color: 'var(--text-muted)', fontSize: 11 }}>{fmtD(c.yapily_reconfirm_by || c.consent_expires_at)}</td>
+                  <td style={{ padding: '10px 12px', color: 'var(--text-faint)', fontSize: 11 }}>{fmtD(c.updated_at)}</td>
+                  <td style={{ padding: '10px 12px', whiteSpace: 'nowrap' }}>
+                    {c.status === 'active' && (
+                      <button
+                        className="btn btn-s btn-sm"
+                        onClick={() => previewConnection(c)}
+                        disabled={busy}
+                        style={{ marginRight: 6 }}
+                      >
+                        {syncing === c.id ? 'Fetching…' : 'Preview'}
+                      </button>
+                    )}
+                    {state.key === 'expired' && (
+                      <button
+                        className="btn btn-p btn-sm"
+                        onClick={() => reconnectConnection(c)}
+                        disabled={busy || connecting}
+                        style={{ marginRight: 6 }}
+                      >
+                        {connecting ? 'Redirecting…' : 'Reconnect'}
+                      </button>
+                    )}
+                    {c.status !== 'revoked' && (
+                      <button
+                        className="btn btn-d btn-sm"
+                        onClick={() => disconnectConnection(c)}
+                        disabled={busy}
+                      >
+                        {disconnecting === c.id ? 'Disconnecting…' : 'Disconnect'}
+                      </button>
+                    )}
+                  </td>
+                </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {/* ── Preview panel (dry_run result) ─────────────────────────────── */}
+      {preview && previewConn && (
+        <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-card)', padding: '16px 18px', marginTop: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 4 }}>
+            <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>Preview — nothing posted yet</span>
+            <span style={{ fontSize: 10, background: 'var(--warn-dim)', color: 'var(--warn)', borderRadius: 'var(--radius-pill)', padding: '2px 8px', fontWeight: 600 }}>
+              DRY RUN
+            </span>
+            <button onClick={() => { setPreview(null); setPreviewConn(null); setPreviewOriginal({}); setPreviewEdits({}); }} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--text-faint)', cursor: 'pointer', fontSize: 14 }}>×</button>
+          </div>
+          <div style={{ fontSize: 11, color: 'var(--text-muted)', marginBottom: 14 }}>
+            {preview.total_new} new EUR transaction{preview.total_new !== 1 ? 's' : ''} available
+            {preview.skipped > 0 && ` · ${preview.skipped} already in ledger`}
+            {preview.pending_skipped > 0 && ` · ${preview.pending_skipped} pending status skipped`}
+            {preview.foreign_skipped > 0 && (
+              <span style={{ color: 'var(--warn)' }}> · {preview.foreign_skipped} non-EUR skipped (not posted)</span>
+            )}
+            {preview.from_date && <span> · 90-day window from {preview.from_date}</span>}
+          </div>
+
+          {/* Non-EUR foreign transactions callout */}
+          {preview.foreign_details?.length > 0 && (
+            <div style={{ background: 'var(--warn-dim)', border: '1px solid rgba(251,191,36,0.3)', borderRadius: 8, padding: '8px 12px', marginBottom: 12, fontSize: 11, color: 'var(--warn)' }}>
+              <strong>Non-EUR transactions excluded:</strong> {preview.foreign_details.map(f => `${f.currency} ${f.amount > 0 ? '+' : ''}${f.amount}`).join(', ')}
+            </div>
+          )}
+
+          {/* Transaction preview table */}
+          <div style={{ overflowX: 'auto', maxHeight: 340, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 8, marginBottom: 14 }}>
+            <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
+              <thead style={{ position: 'sticky', top: 0, background: 'var(--surface-2)', zIndex: 1 }}>
+                <tr>
+                  {['Date', 'Description', 'Amount', 'Category', 'VAT', 'Rule'].map(h => (
+                    <th key={h} style={{ padding: '6px 10px', textAlign: 'left', fontSize: 9, fontWeight: 600, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.08em', whiteSpace: 'nowrap' }}>{h}</th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {(() => {
+                  const nomOptions = (coaAccounts.filter(a => a.is_active !== false).length > 0
+                    ? coaAccounts.filter(a => a.is_active !== false)
+                    : GL_ACCOUNTS);
+                  return (preview.preview ?? []).map((row, i) => {
+                    const edit   = previewEdits[row.extId] || { nominal_code: row.nominal_code, vat_code: row.vat_code ?? null, save_rule: false };
+                    const edited = isPreviewRowEdited(row.extId);
+                    return (
+                    <tr key={row.extId || i} style={{ borderTop: '1px solid var(--border)', background: i % 2 === 0 ? 'transparent' : 'var(--surface-2)' }}>
+                      <td style={{ padding: '5px 10px', color: 'var(--text-faint)', whiteSpace: 'nowrap' }}>{row.date}</td>
+                      <td style={{ padding: '5px 10px', color: 'var(--text)', maxWidth: 220, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={row.description}>{row.description}</td>
+                      <td style={{ padding: '5px 10px', fontVariantNumeric: 'tabular-nums', color: row.is_income ? 'var(--accent)' : 'var(--danger)', whiteSpace: 'nowrap', textAlign: 'right' }}>
+                        {row.is_income ? '+' : ''}{row.amount?.toFixed(2)} {row.currency}
+                      </td>
+                      <td style={{ padding: '5px 10px', whiteSpace: 'nowrap' }}>
+                        <select
+                          value={edit.nominal_code}
+                          onChange={e => {
+                            const code = e.target.value;
+                            const acct = nomOptions.find(a => a.code === code);
+                            updatePreviewEdit(row.extId, { nominal_code: code, vat_code: acct?.default_vat_code ?? null });
+                          }}
+                          style={{ fontSize: 10.5, padding: '3px 5px', borderRadius: 6, border: `1px solid ${edited ? 'var(--accent)' : 'var(--border)'}`, background: 'var(--surface-2)', color: 'var(--text)', maxWidth: 200 }}
+                        >
+                          {nomOptions.map(a => <option key={a.code} value={a.code}>{a.code} — {a.name}</option>)}
+                        </select>
+                      </td>
+                      <td style={{ padding: '5px 10px', whiteSpace: 'nowrap' }}>
+                        <select
+                          value={edit.vat_code ?? ''}
+                          onChange={e => updatePreviewEdit(row.extId, { vat_code: e.target.value || null })}
+                          style={{ fontSize: 10.5, padding: '3px 5px', borderRadius: 6, border: `1px solid ${edited ? 'var(--accent)' : 'var(--border)'}`, background: 'var(--surface-2)', color: 'var(--text)' }}
+                        >
+                          <option value="">—</option>
+                          {Object.entries(COA_VAT_LABELS).map(([code, label]) => <option key={code} value={code}>{code} ({label})</option>)}
+                        </select>
+                      </td>
+                      <td style={{ padding: '5px 10px', whiteSpace: 'nowrap' }}>
+                        {edited && (
+                          <label style={{ fontSize: 10, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 4, cursor: 'pointer' }}>
+                            <input
+                              type="checkbox"
+                              checked={!!edit.save_rule}
+                              onChange={e => updatePreviewEdit(row.extId, { save_rule: e.target.checked })}
+                            />
+                            Save rule
+                          </label>
+                        )}
+                      </td>
+                    </tr>
+                    );
+                  });
+                })()}
+              </tbody>
+            </table>
+          </div>
+
+          {/* Confirm controls */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+            <label style={{ fontSize: 11, color: 'var(--text-muted)', display: 'flex', alignItems: 'center', gap: 6 }}>
+              Import first
+              <input
+                type="number"
+                min={1}
+                max={preview.total_new}
+                value={importLimit}
+                onChange={e => setImportLimit(Math.max(1, parseInt(e.target.value, 10) || 1))}
+                style={{ width: 52, padding: '3px 6px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--surface-2)', color: 'var(--text)', fontSize: 12, textAlign: 'center' }}
+              />
+              of {preview.total_new}
+            </label>
+            <button
+              className="btn btn-p btn-sm"
+              onClick={() => confirmImport(previewConn)}
+              disabled={confirming}
+              style={{ minWidth: 120 }}
+            >
+              {confirming ? 'Posting…' : `Confirm import (${Math.min(importLimit, preview.total_new)})`}
+            </button>
+            <button
+              onClick={() => { setPreview(null); setPreviewConn(null); setPreviewOriginal({}); setPreviewEdits({}); }}
+              style={{ background: 'none', border: 'none', color: 'var(--text-faint)', cursor: 'pointer', fontSize: 12 }}
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* ── Import result summary ────────────────────────────────────────── */}
+      {syncResult && (
+        <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-card)', padding: '16px 18px', marginTop: 16 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 12 }}>
+            <span style={{ fontSize: 13, fontWeight: 700, color: 'var(--text)' }}>Import complete</span>
+            <button onClick={() => setSyncResult(null)} style={{ marginLeft: 'auto', background: 'none', border: 'none', color: 'var(--text-faint)', cursor: 'pointer', fontSize: 14 }}>×</button>
+          </div>
+          {syncResult.message && (
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>{syncResult.message}</div>
+          )}
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
+            <div style={{ background: 'var(--accent-dim)', border: '1px solid rgba(52,211,153,0.3)', borderRadius: 8, padding: '10px 16px', minWidth: 100, textAlign: 'center' }}>
+              <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--accent)' }}>{syncResult.imported ?? 0}</div>
+              <div style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 2 }}>imported</div>
+            </div>
+            <div style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 16px', minWidth: 100, textAlign: 'center' }}>
+              <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-muted)' }}>{syncResult.skipped ?? 0}</div>
+              <div style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 2 }}>already in ledger</div>
+            </div>
+            {(syncResult.foreign_skipped ?? 0) > 0 && (
+              <div style={{ background: 'var(--warn-dim)', border: '1px solid rgba(251,191,36,0.3)', borderRadius: 8, padding: '10px 16px', minWidth: 100, textAlign: 'center' }}>
+                <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--warn)' }}>{syncResult.foreign_skipped}</div>
+                <div style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 2 }}>non-EUR skipped</div>
+              </div>
+            )}
+            {(syncResult.limited_out ?? 0) > 0 && (
+              <div style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 16px', minWidth: 100, textAlign: 'center' }}>
+                <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-muted)' }}>{syncResult.limited_out}</div>
+                <div style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 2 }}>held back by limit</div>
+              </div>
+            )}
+          </div>
+          <div style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 10 }}>
+            {syncResult.from_date && <>90-day window from <strong>{syncResult.from_date}</strong> · </>}
+            {syncResult.accounts ?? 0} account{(syncResult.accounts ?? 0) !== 1 ? 's' : ''}
+            {syncResult.batch_id && <> · batch <code style={{ fontSize: 9 }}>{syncResult.batch_id.slice(0, 8)}</code></>}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// BulkARImport — paste-from-spreadsheet migration tool
+// ─────────────────────────────────────────────────────────────────────────────
+function BulkARImport({ companyId }) {
+  const [customers,    setCustomers]    = useState([]);
+  const [existingNums, setExistingNums] = useState(new Set());
+  const [filedPeriods, setFiledPeriods] = useState([]);
+  const [pasteText,    setPasteText]    = useState('');
+  const [parsed,       setParsed]       = useState([]);
+  const [parseError,   setParseError]   = useState('');
+  const [step,         setStep]         = useState('paste'); // 'paste'|'preview'|'done'
+  const [posting,      setPosting]      = useState(false);
+  const [postResults,  setPostResults]  = useState([]);
+
+  useEffect(() => {
+    if (!companyId) return;
+    Promise.all([
+      supabase.from('customers').select('*').eq('company_id', companyId).eq('is_active', true).order('name'),
+      supabase.from('invoices').select('invoice_number').eq('company_id', companyId).not('invoice_number', 'is', null),
+      supabase.from('vat_returns').select('period_start,period_end').eq('company_id', companyId).eq('status', 'filed'),
+    ]).then(([c, n, p]) => {
+      setCustomers(c.data || []);
+      setExistingNums(new Set((n.data || []).map(x => x.invoice_number)));
+      setFiledPeriods(p.data || []);
+    });
+  }, [companyId]);
+
+  const parseVatCode = (raw) => {
+    if (!raw) return null;
+    const s = raw.trim().toUpperCase().replace(/[\s%]/g, '');
+    if (s === '23'   || s === 'STD23')              return 'STD23';
+    if (s === '13.5' || s === '135' || s === 'RED13' || s === 'RED13.5' || s === 'RED135') return 'RED13';
+    if (s === '9'    || s === 'RED9')               return 'RED9';
+    if (s === '0'    || s === 'ZERO')               return 'ZERO';
+    if (s === 'EXEMPT' || s === 'EX')               return 'EXEMPT';
+    if (s in INV_VAT_RATES)                         return s;
+    return null;
+  };
+
+  const parseDate = (raw) => {
+    if (!raw) return null;
+    const s = raw.trim();
+    if (/^\d{4}-\d{2}-\d{2}$/.test(s)) return s;
+    const m = s.match(/^(\d{1,2})[/\-](\d{1,2})[/\-](\d{4})$/);
+    if (m) return `${m[3]}-${m[2].padStart(2, '0')}-${m[1].padStart(2, '0')}`;
+    return null;
+  };
+
+  const isDateLocked = (dateStr) =>
+    filedPeriods.some(p => dateStr >= p.period_start && dateStr <= p.period_end);
+
+  const findCustomer = (name) =>
+    customers.find(c => c.name.toLowerCase().trim() === name.toLowerCase().trim());
+
+  const parsePaste = () => {
+    setParseError('');
+    const rawLines = pasteText.trim().split('\n').filter(l => l.trim());
+    if (!rawLines.length) { setParseError('Paste is empty.'); return; }
+    const firstCells = rawLines[0].split('\t').map(c => c.toLowerCase().trim());
+    const looksLikeHeader = firstCells.some(c => ['invoice', 'inv', 'date', 'customer', 'description', 'net', 'vat'].includes(c));
+    const dataLines = looksLikeHeader ? rawLines.slice(1) : rawLines;
+    const invoiceMap = new Map();
+    for (let i = 0; i < dataLines.length; i++) {
+      const cols = dataLines[i].split('\t').map(c => c.trim());
+      if (cols.length < 5 || !cols[0]) continue;
+      const [invNo, dateRaw, custName, desc, netRaw, vatRaw = '23'] = cols;
+      const rowNum = i + (looksLikeHeader ? 2 : 1);
+      const issueDate = parseDate(dateRaw);
+      if (!issueDate) { setParseError(`Row ${rowNum}: invalid date "${dateRaw}".`); return; }
+      const vatCode = parseVatCode(vatRaw);
+      if (!vatCode) { setParseError(`Row ${rowNum}: unknown VAT "${vatRaw}". Use 23, 13.5, 9, 0, exempt.`); return; }
+      const net = parseFloat(netRaw.replace(/[€,\s]/g, ''));
+      if (isNaN(net)) { setParseError(`Row ${rowNum}: invalid net "${netRaw}".`); return; }
+      if (!invoiceMap.has(invNo)) {
+        invoiceMap.set(invNo, { invoice_number: invNo, customer_name: custName, issue_date: issueDate, lines: [] });
+      }
+      const inv = invoiceMap.get(invNo);
+      if (inv.customer_name.toLowerCase().trim() !== custName.toLowerCase().trim()) {
+        setParseError(`Row ${rowNum}: customer mismatch on "${invNo}" — expected "${inv.customer_name}", got "${custName}".`);
+        return;
+      }
+      inv.lines.push(calcLineAmounts({ description: desc, quantity: 1, unit_price: net, vat_code: vatCode }));
+    }
+    if (!invoiceMap.size) { setParseError('No valid rows found.'); return; }
+    setParsed([...invoiceMap.values()]);
+    setStep('preview');
+  };
+
+  const invWarnings = (inv) => {
+    const w = [];
+    if (existingNums.has(inv.invoice_number)) w.push('Duplicate — invoice number already in DB');
+    if (isDateLocked(inv.issue_date)) w.push(`Period locked (${inv.issue_date} is in a filed VAT return)`);
+    if (!findCustomer(inv.customer_name)) w.push(`Customer not found: "${inv.customer_name}"`);
+    return w;
+  };
+
+  const vatBreakdown = (lines) => {
+    const g = {};
+    for (const l of lines) {
+      const vc = l.vat_code || 'STD23';
+      if (!g[vc]) g[vc] = { net: 0, vat: 0, gross: 0 };
+      g[vc].net   += l.line_total  || 0;
+      g[vc].vat   += l.vat_amount  || 0;
+      g[vc].gross += l.gross_total || 0;
+    }
+    return Object.entries(g).map(([vc, t]) => ({
+      vc, label: INV_VAT_LABELS[vc] || vc,
+      net:   Math.round(t.net   * 100) / 100,
+      vat:   Math.round(t.vat   * 100) / 100,
+      gross: Math.round(t.gross * 100) / 100,
+    }));
+  };
+
+  const postAll = async () => {
+    setPosting(true);
+    const results = [];
+    const seenNums = new Set(existingNums);
+    for (const inv of parsed) {
+      if (seenNums.has(inv.invoice_number)) {
+        results.push({ invoice_number: inv.invoice_number, ok: false, error: 'Duplicate — already exists' });
+        continue;
+      }
+      if (isDateLocked(inv.issue_date)) {
+        results.push({ invoice_number: inv.invoice_number, ok: false, error: `Period locked (${inv.issue_date})` });
+        continue;
+      }
+      const customer = findCustomer(inv.customer_name);
+      if (!customer) {
+        results.push({ invoice_number: inv.invoice_number, ok: false, error: `Customer not found: "${inv.customer_name}"` });
+        continue;
+      }
+      try {
+        const totals = calcInvTotals(inv.lines);
+        const { data: newInv, error: invErr } = await supabase.from('invoices').insert({
+          company_id: companyId, customer_id: customer.id, client: customer.name,
+          type: 'invoice', invoice_number: inv.invoice_number, invoice_ref: inv.invoice_number,
+          invoice_date: inv.issue_date, issue_date: inv.issue_date, status: 'sent',
+          reference: 'MIGRATED', payment_terms: 30, currency: 'EUR',
+          amount: totals.total, subtotal: totals.subtotal,
+          vat_total: totals.vat_total, total: totals.total, amount_paid: 0,
+        }).select('id').single();
+        if (invErr) throw new Error(invErr.message);
+        await upsertInvoiceLines(supabase, newInv.id, inv.lines);
+        const jids = await postJournals(supabase, companyId, {
+          id: newInv.id, customer_id: customer.id,
+          invoice_number: inv.invoice_number, issue_date: inv.issue_date, type: 'invoice',
+        }, inv.lines, customers);
+        await supabase.from('invoices').update({ journal_ids: jids, updated_at: new Date().toISOString() }).eq('id', newInv.id);
+        seenNums.add(inv.invoice_number);
+        results.push({ invoice_number: inv.invoice_number, ok: true });
+      } catch (e) {
+        results.push({ invoice_number: inv.invoice_number, ok: false, error: e.message });
+      }
+    }
+    setPostResults(results);
+    setExistingNums(seenNums);
+    setPosting(false);
+    setStep('done');
+  };
+
+  const fmt = (n) => '€' + Number(n).toFixed(2);
+
+  if (step === 'done') {
+    const okCount   = postResults.filter(r => r.ok).length;
+    const failCount = postResults.filter(r => !r.ok).length;
+    return (
+      <div className="card" style={{ maxWidth: 700 }}>
+        <div className="card-hdr"><span className="card-title">Import Complete</span></div>
+        <div style={{ padding: '16px 20px' }}>
+          <div style={{ marginBottom: 14, fontSize: 14 }}>
+            <span style={{ color: 'var(--accent)', fontWeight: 600 }}>{okCount} posted</span>
+            {failCount > 0 && <span style={{ color: '#f87171', fontWeight: 600 }}> · {failCount} skipped</span>}
+          </div>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+            <thead>
+              <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                <th style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)' }}>Invoice</th>
+                <th style={{ textAlign: 'left', padding: '4px 8px', color: 'var(--muted)' }}>Result</th>
+              </tr>
+            </thead>
+            <tbody>
+              {postResults.map(r => (
+                <tr key={r.invoice_number} style={{ borderBottom: '1px solid rgba(255,255,255,0.05)' }}>
+                  <td style={{ padding: '5px 8px', fontWeight: 600 }}>{r.invoice_number}</td>
+                  <td style={{ padding: '5px 8px', color: r.ok ? 'var(--accent)' : '#f87171' }}>
+                    {r.ok ? '✓ Posted' : '✗ ' + r.error}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+          <div style={{ marginTop: 16 }}>
+            <button className="btn btn-s" onClick={() => { setPasteText(''); setParsed([]); setPostResults([]); setStep('paste'); }}>Import More</button>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  if (step === 'preview') {
+    const validCount = parsed.filter(inv => invWarnings(inv).length === 0).length;
+    return (
+      <div style={{ maxWidth: 820 }}>
+        <div className="card" style={{ marginBottom: 16 }}>
+          <div className="card-hdr">
+            <span className="card-title">Preview — {parsed.length} invoice{parsed.length !== 1 ? 's' : ''}</span>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <button className="btn btn-s btn-sm" onClick={() => setStep('paste')}>← Back</button>
+              <button className="btn btn-p btn-sm" onClick={postAll} disabled={posting || validCount === 0}>
+                {posting ? 'Posting…' : `Post ${validCount} invoice${validCount !== 1 ? 's' : ''}`}
+              </button>
+            </div>
+          </div>
+        </div>
+        {parsed.map(inv => {
+          const warns  = invWarnings(inv);
+          const totals = calcInvTotals(inv.lines);
+          const bd     = vatBreakdown(inv.lines);
+          return (
+            <div key={inv.invoice_number} className="card" style={{ marginBottom: 14, border: warns.length ? '1px solid #f87171' : undefined }}>
+              <div className="card-hdr">
+                <span className="card-title">{inv.invoice_number}</span>
+                <span style={{ fontSize: 12, color: 'var(--muted)' }}>{inv.customer_name} · {inv.issue_date}</span>
+              </div>
+              {warns.length > 0 && (
+                <div style={{ padding: '8px 16px', background: 'rgba(248,113,113,0.08)', borderBottom: '1px solid rgba(248,113,113,0.2)' }}>
+                  {warns.map((w, i) => <div key={i} style={{ color: '#f87171', fontSize: 12 }}>⚠ {w}</div>)}
+                </div>
+              )}
+              <div style={{ padding: '12px 16px' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12, marginBottom: 12 }}>
+                  <thead>
+                    <tr style={{ borderBottom: '1px solid var(--border)' }}>
+                      {['Description','Net','VAT','Gross','Rate'].map(h => (
+                        <th key={h} style={{ textAlign: h === 'Description' ? 'left' : 'right', padding: '3px 6px', color: 'var(--muted)', fontWeight: 500 }}>{h}</th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {inv.lines.map((l, i) => (
+                      <tr key={i} style={{ borderBottom: '1px solid rgba(255,255,255,0.04)' }}>
+                        <td style={{ padding: '4px 6px' }}>{l.description}</td>
+                        <td style={{ padding: '4px 6px', textAlign: 'right' }}>{fmt(l.line_total)}</td>
+                        <td style={{ padding: '4px 6px', textAlign: 'right' }}>{fmt(l.vat_amount)}</td>
+                        <td style={{ padding: '4px 6px', textAlign: 'right', fontWeight: 600 }}>{fmt(l.gross_total)}</td>
+                        <td style={{ padding: '4px 6px', textAlign: 'right', color: 'var(--muted)' }}>{INV_VAT_LABELS[l.vat_code] || l.vat_code}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+                <div style={{ display: 'flex', gap: 24, flexWrap: 'wrap' }}>
+                  <div style={{ flex: 1, minWidth: 200 }}>
+                    <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>VAT Breakdown</div>
+                    {bd.map(b => (
+                      <div key={b.vc} style={{ display: 'flex', justifyContent: 'space-between', fontSize: 12, marginBottom: 3 }}>
+                        <span style={{ color: 'var(--muted)' }}>{b.label}</span>
+                        <span>{fmt(b.net)} + {fmt(b.vat)} = {fmt(b.gross)}</span>
+                      </div>
+                    ))}
+                    <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: 13, fontWeight: 700, borderTop: '1px solid var(--border)', paddingTop: 5, marginTop: 5 }}>
+                      <span>Gross Total</span><span>{fmt(totals.total)}</span>
+                    </div>
+                  </div>
+                  <div style={{ flex: 1, minWidth: 200 }}>
+                    <div style={{ fontSize: 10, fontWeight: 600, color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.06em', marginBottom: 6 }}>Journal Preview</div>
+                    {bd.map(b => (
+                      <div key={b.vc} style={{ fontSize: 12, display: 'flex', justifyContent: 'space-between', marginBottom: 3 }}>
+                        <span><span style={{ color: 'var(--muted)' }}>Dr 1100</span> / <span style={{ color: 'var(--muted)' }}>Cr 4000</span> [{b.label}]</span>
+                        <span style={{ fontWeight: 600 }}>{fmt(b.gross)}</span>
+                      </div>
+                    ))}
+                    <div style={{ fontSize: 12, color: 'var(--accent)', marginTop: 5, fontWeight: 600 }}>Dr 1100 total: {fmt(totals.total)}</div>
+                  </div>
+                </div>
+              </div>
+            </div>
+          );
+        })}
+        <div style={{ display: 'flex', gap: 8, marginTop: 8 }}>
+          <button className="btn btn-s" onClick={() => setStep('paste')}>← Back</button>
+          <button className="btn btn-p" onClick={postAll} disabled={posting || validCount === 0}>
+            {posting ? 'Posting…' : `Post ${validCount} invoice${validCount !== 1 ? 's' : ''}`}
+          </button>
+        </div>
+      </div>
+    );
+  }
+
+  // step === 'paste'
+  return (
+    <div className="card" style={{ maxWidth: 700 }}>
+      <div className="card-hdr"><span className="card-title">Bulk AR Invoice Import</span></div>
+      <div style={{ padding: '16px 20px' }}>
+        <p style={{ fontSize: 13, color: 'var(--muted)', marginBottom: 14, lineHeight: 1.6 }}>
+          Paste invoice rows copied from a spreadsheet (tab-separated). One row per line item — multi-line invoices are grouped automatically by invoice number.
+        </p>
+        <div style={{ background: 'var(--surface-2)', borderRadius: 6, padding: '10px 14px', marginBottom: 14, fontSize: 12 }}>
+          <div style={{ fontWeight: 600, color: 'var(--muted)', fontSize: 11, marginBottom: 5, letterSpacing: '0.04em', textTransform: 'uppercase' }}>Column order (6 columns, tab-separated):</div>
+          <div style={{ fontFamily: 'monospace' }}>Invoice No → Date → Customer → Description → Net → VAT%</div>
+          <div style={{ color: 'var(--muted)', marginTop: 5 }}>Date: DD/MM/YYYY or YYYY-MM-DD &nbsp;|&nbsp; VAT: 23 · 13.5 · 9 · 0 · exempt &nbsp;|&nbsp; Header row optional</div>
+        </div>
+        <textarea
+          className="f-input"
+          style={{ width: '100%', minHeight: 180, fontFamily: 'monospace', fontSize: 12, resize: 'vertical', boxSizing: 'border-box' }}
+          placeholder={"INV-001\t01/06/2026\tAcme Ltd\tLabour\t80.00\t13.5\nINV-001\t01/06/2026\tAcme Ltd\tTravel\t60.00\t23\nINV-002\t05/06/2026\tBeta Ltd\tConsulting\t500.00\t23"}
+          value={pasteText}
+          onChange={e => setPasteText(e.target.value)}
+        />
+        {parseError && <div style={{ color: '#f87171', fontSize: 12, marginTop: 8 }}>⚠ {parseError}</div>}
+        <div style={{ marginTop: 12, display: 'flex', gap: 10, alignItems: 'center' }}>
+          <button className="btn btn-p" onClick={parsePaste} disabled={!pasteText.trim()}>Parse & Preview →</button>
+          {customers.length === 0 && (
+            <span style={{ fontSize: 12, color: '#f59e0b' }}>⚠ No customers found — add customers in AR Invoices first</span>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── BankHub — merged "Bank" nav item: Connected feeds (Yapily) + Import CSV (Revolut) ──
+// Both underlying components are reused completely unchanged. Both stay mounted (display:none
+// when not the active tab) so in-progress state (e.g. a mid-import CSV wizard, or the Yapily
+// picker) survives switching tabs — but each gets `isActive` so it refetches its own data
+// (COA, rules, connections) when the user switches back to it, instead of showing whatever
+// was cached at mount time.
+function BankHub({ companyId, company }) {
+  const [tab, setTab] = useState('feeds'); // 'feeds' | 'csv'
+  return (
+    <div className="fade-up">
+      <div style={{ display: 'flex', gap: 3, marginBottom: 14 }}>
+        {[['feeds', 'Connected feeds'], ['csv', 'Import CSV']].map(([id, label]) => (
+          <button key={id} onClick={() => setTab(id)}
+            style={{ padding: '5px 14px', fontSize: 12, fontWeight: tab === id ? 700 : 400, borderRadius: 4, border: '1px solid ' + (tab === id ? 'var(--accent)' : 'var(--border)'), background: tab === id ? 'rgba(80,140,255,0.1)' : 'var(--surface-2)', color: tab === id ? 'var(--accent)' : 'var(--muted)', cursor: 'pointer' }}>
+            {label}
+          </button>
+        ))}
+      </div>
+      <div style={{ display: tab === 'feeds' ? 'block' : 'none' }}>
+        <YapilyBankFeeds companyId={companyId} company={company} isActive={tab === 'feeds'} />
+      </div>
+      <div style={{ display: tab === 'csv' ? 'block' : 'none' }}>
+        <BankImportErrorBoundary><BankImport companyId={companyId} isActive={tab === 'csv'} company={company} /></BankImportErrorBoundary>
+      </div>
+    </div>
+  );
+}
+
 const NAV = [
-  { section: "WORKSPACE", items: [
-    { id: "overview", icon: "⌂", label: "Overview" },
-    { id: "cashflow", icon: "↗", label: "Cash Flow" },
+  { section: "HOME", items: [
+    { id: "overview",     icon: "⌂", label: "Overview" },
+    { id: "cashflow",     icon: "↗", label: "Cash Flow",    feature: "cash_flow" },
   ]},
-  { section: "BANKING", items: [
-    { id: "bank-import",    icon: "⇅", label: "Bank Import" },
+  { section: "BANK", items: [
+    // "bank-import" + "bank-feeds" merged into one "Bank" nav item (BankHub — feeds/CSV tabs).
+    // Routes/components intact: page === "bank-import" still renders <BankImport/> and
+    // page === "bank-feeds" still renders <YapilyBankFeeds/> (unreachable from the sidebar,
+    // but working — e.g. via the scattered onNavigate("bank-import") deep-links elsewhere).
+    // Un-merge by restoring these two entries and removing "bank" below:
+    // { id: "bank-import", icon: "⇅", label: "Bank Import" },
+    // { id: "bank-feeds",  icon: "⬡", label: "Bank Feeds",  feature: "bank_feeds" },
+    { id: "bank",            icon: "⇅", label: "Bank" },
     { id: "reconciliation", icon: "✓", label: "Reconciliation" },
-    { id: "revenue",        icon: "₿", label: "Revenue Feed" },
+    // "revenue" (Revenue Feed) hidden from sidebar — later build item. Route/component intact:
+    // page === "revenue" still renders <RevenueFeed/>. Un-hide by restoring this entry:
+    // { id: "revenue", icon: "₿", label: "Revenue Feed", feature: "revenue_feed" },
   ]},
-  { section: "SALES", items: [
-    { id: "invoices",  icon: "◻", label: "AR Invoices" },
-    { id: "contracts", icon: "📋", label: "Contracts" },
+  { section: "MONEY IN", items: [
+    { id: "invoices",  icon: "◻", label: "Invoices",    feature: "ar_invoicing" },
+    // "ar-import" (Bulk Import) folded into Invoices as an "⊕ Import" button in its header.
+    // Route/component intact: page === "ar-import" still renders <BulkARImport/>. Un-hide by
+    // restoring this entry:
+    // { id: "ar-import", icon: "⊕", label: "Bulk Import", feature: "ar_import" },
+    // "contracts" hidden from sidebar — unused feature (0 rows). Route/component intact:
+    // page === "contracts" still renders <Contracts/>. Un-hide by restoring this entry:
+    // { id: "contracts", icon: "📋", label: "Contracts", feature: "contracts" },
   ]},
-  { section: "PURCHASES", items: [
-    { id: "ap-invoices", icon: "◨", label: "AP Invoices" },
-    { id: "expenses",    icon: "🧾", label: "Expenses" },
+  { section: "MONEY OUT", items: [
+    { id: "ap-invoices", icon: "◨", label: "Bills",    feature: "ap_invoicing" },
+    { id: "expenses",    icon: "🧾", label: "Expenses", feature: "expenses"     },
+  ]},
+  { section: "TAXES & DEADLINES", items: [
+    { id: "vat-returns", icon: "§",  label: "VAT Returns", feature: "vat_returns" },
+    { id: "compliance",  icon: "⊙", label: "Calendar",     feature: "compliance"  },
+    { id: "checklist",   icon: "☑", label: "Month End",    feature: "month_end",   badge: true },
+  ]},
+  { section: "REPORTS", items: [
+    { id: "gl",             icon: "⊞", label: "GL Reports" },
+    { id: "fin-statements", icon: "§",  label: "Fin. Statements", feature: "fin_statements" },
   ]},
   { section: "ACCOUNTING", items: [
-    { id: "journals",       icon: "✎", label: "Journals" },
-    { id: "gl",             icon: "⊞", label: "GL Reports" },
-    { id: "fin-statements", icon: "§",  label: "Fin. Statements" },
-  ]},
-  { section: "COMPLIANCE", items: [
-    { id: "compliance",   icon: "⊙", label: "Calendar" },
-    { id: "vat-returns",  icon: "§",  label: "VAT Returns" },
-    { id: "checklist",    icon: "☑", label: "Month End", badge: true },
+    { id: "journals",         icon: "✎", label: "Journals" },
+    { id: "payroll-import",   icon: "⊟", label: "Payroll Import", feature: "payroll_import"   },
+    // "opening-balances" moved into Settings (Client Setup card) — once-per-client task, not
+    // a daily nav item. Route/component intact: page === "opening-balances" still renders
+    // <OpeningBalances/>, now reached via a button in Settings. Un-hide by restoring this entry:
+    // { id: "opening-balances", icon: "⊜", label: "Opening Bals", feature: "opening_balances" },
+    { id: "fixed-assets",     icon: "⊟", label: "Fixed Assets",   feature: "fixed_assets"     },
   ]},
   { section: "PRACTICE", practiceOnly: true, items: [
-    { id: "practice-clients",  icon: "◈", label: "Clients",      action: "practice"     },
-    { id: "practice-add-co",   icon: "⊕", label: "Add Company",  action: "add-company"  },
+    { id: "practice-clients", icon: "◈", label: "Clients",     action: "practice",    feature: "practice_dashboard" },
+    { id: "practice-add-co",  icon: "⊕", label: "Add Company", action: "add-company", feature: "practice_dashboard" },
   ]},
   { section: "SETTINGS", items: [
     { id: "settings", icon: "⚙", label: "Settings" },
@@ -14120,7 +18667,7 @@ export default function App() {
   const [page, setPage] = useState("overview");
 
   // Collapsible nav sections
-  const DEFAULT_OPEN_SECTIONS = ['WORKSPACE', 'BANKING', 'SALES', 'PURCHASES', 'ACCOUNTING', 'COMPLIANCE', 'PRACTICE'];
+  const DEFAULT_OPEN_SECTIONS = ['HOME', 'BANK', 'MONEY IN', 'MONEY OUT', 'TAXES & DEADLINES', 'REPORTS'];
   const [openSections, setOpenSections] = useState(() => {
     try {
       const stored = localStorage.getItem('ff-nav-sections');
@@ -14152,6 +18699,7 @@ export default function App() {
   const [showWizard, setShowWizard] = useState(false);
   const [wizardInitStep, setWizardInitStep] = useState(1);
   const [showAddCompany, setShowAddCompany] = useState(false);
+  const [upgradeFeature, setUpgradeFeature] = useState(null); // feature key → show upgrade card
 
   // Global period state — YYYY-MM, lifted from Overview so all pages share one source of truth
   const [selPeriod, setSelPeriod] = useState(() => {
@@ -14176,13 +18724,39 @@ export default function App() {
 
   const companyName = company?.name || "Your Company";
 
-  const [lastBankImport, setLastBankImport] = useState(null);
+  // Topbar "bank connected" pill — reads the company's actual active, non-expired
+  // bank_connections (Yapily) rather than a hardcoded institution name. null = no live
+  // connection, in which case the pill is hidden entirely.
+  const [bankConnBadge, setBankConnBadge] = useState(null); // { label } | null
   useEffect(() => {
-    if (!company?.id) return;
-    supabase.from('bank_transactions').select('created_at').eq('company_id', company.id)
-      .order('created_at', { ascending: false }).limit(1)
-      .then(({ data }) => setLastBankImport(data?.[0]?.created_at || null));
+    if (!company?.id) { setBankConnBadge(null); return; }
+    supabase.from('bank_connections')
+      .select('institution_id, consent_expires_at')
+      .eq('company_id', company.id)
+      .eq('status', 'active')
+      .then(({ data }) => {
+        const now  = Date.now();
+        const live = (data || []).filter(c => !c.consent_expires_at || new Date(c.consent_expires_at).getTime() > now);
+        if (live.length === 0) { setBankConnBadge(null); return; }
+        const prettyName = (id) => {
+          const seg = String(id || '').split(/[_-]/)[0];
+          return seg ? seg.charAt(0).toUpperCase() + seg.slice(1) : id;
+        };
+        const label = live.length === 1 ? prettyName(live[0].institution_id) : `${live.length} banks`;
+        setBankConnBadge({ label });
+      });
   }, [company?.id]); // eslint-disable-line
+
+  // Handle Yapily callback return — navigate to the Bank hub (Connected feeds tab) and clean the URL.
+  // Was setPage('bank-feeds') — that page is no longer in the sidebar since the Bank Import +
+  // Bank Feeds merge, so a freshly-connected user landed somewhere unreachable from the nav.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    if (params.has('bank_connected') || params.has('bank_error')) {
+      setPage('bank');
+      window.history.replaceState({}, '', window.location.pathname);
+    }
+  }, []); // eslint-disable-line
 
   // Recurring journal catch-up: runs on company load, posts any missed periods
   const [recurringToast, setRecurringToast]     = useState(null);
@@ -14381,24 +18955,35 @@ export default function App() {
   // Signed-in user, company check still in flight → hold render to avoid flash
   if (isLoaded && user && companyLoading && !company) return <style>{CSS}</style>;
 
+  // Pending gate — company exists but not yet activated; show activation screen only
+  if (company && isPending(company)) return (
+    <AuthGate>
+      <><style>{CSS}</style><PendingGate /></>
+    </AuthGate>
+  );
+
 
   const titles = {
     overview:        ["Overview",         `${companyName} · ${period}`],
     cashflow:        ["Cash Flow",        "Forecasting · bank accounts · AP schedule"],
     invoices:        ["Invoices",         "AR ledger · aging · AI chase log"],
-    "ap-invoices":   ["AP Invoices",      "Accounts payable · aged creditors · supplier invoices"],
+    "ar-import":     ["Bulk Import",       "Paste spreadsheet · migrate invoices · post journals"],
+    "ap-invoices":   ["Bills",            "Accounts payable · aged creditors · supplier invoices"],
     contracts:       ["Contracts",        "Active contracts · renewals · expiry tracking"],
     expenses:        ["Expenses",         "Receipts · approvals · GL posting"],
     checklist:       ["Month End Close",  `${period} · close checklist`],
     journals:     ["Journal Postings", `${period} · general ledger journals`],
     gl:           ["GL Reporting",     "Trial balance · P&L · Balance sheet · GL extract"],
+    bank:             ["Bank",             "Connected feeds (Yapily) · CSV import (Revolut Business)"],
     "bank-import":    ["Bank Import",      "Revolut Business · CSV import · journal posting"],
+    "bank-feeds":     ["Bank Feeds",       "Yapily · live account connection · sandbox"],
     reconciliation:   ["Reconciliation",  "Match transactions · clear outstanding items"],
     "practice-insights": ["Practice Insights", "Cross-client analytics · firm overview"],
     compliance:        ["Compliance",            "ROS · CRO · Revenue deadlines"],
     "vat-returns":     ["VAT Returns",           "VAT3 draft · T1/T2 computation · filing"],
     "fin-statements":  ["Financial Statements",  "FRS 105 · Micro-entity accounts · CRO filing"],
     settings:          ["Settings",              "Company settings · tax · compliance"],
+    "fixed-assets":    ["Fixed Assets",          "Asset register · depreciation · wear & tear"],
   };
 
   const [title, subtitle] = showPractice
@@ -14463,10 +19048,11 @@ export default function App() {
           <div className="sidebar">
             <div className="sidebar-logo">
               <div className="logo-lockup">
-                <svg className="logo-icon" width="24" height="24" viewBox="0 0 24 24" fill="none">
-                  <rect x="2" y="12" width="4" height="10" rx="1.5" fill="#34d399" opacity="0.6"/>
-                  <rect x="10" y="7" width="4" height="15" rx="1.5" fill="#34d399"/>
-                  <rect x="18" y="2" width="4" height="20" rx="1.5" fill="#34d399" opacity="0.8"/>
+                <svg className="logo-icon" width="28" height="28" viewBox="0 0 100 100" fill="none">
+                  <rect x="22" y="12" width="16" height="76" rx="8" fill="#e8edeb"/>
+                  <rect x="22" y="72" width="56" height="16" rx="8" fill="#e8edeb"/>
+                  <rect x="46" y="24" width="13" height="46" rx="6.5" fill="#10b981"/>
+                  <rect x="46" y="57" width="32" height="13" rx="6.5" fill="#10b981"/>
                 </svg>
                 <div className="logo-text-wrap">
                   <div className="logo-wordmark">Ledgrly</div>
@@ -14475,7 +19061,11 @@ export default function App() {
               </div>
             </div>
             <div className="nav">
-              {NAV.filter(group => !group.practiceOnly || userRole === 'owner').map(group => {
+              {NAV.filter(group => {
+                // PRACTICE section: hidden entirely unless practice_dashboard is on
+                if (group.practiceOnly) return can(company, 'practice_dashboard');
+                return true;
+              }).map(group => {
                 const isOpen = openSections.has(group.section);
                 return (
                   <div key={group.section}>
@@ -14485,20 +19075,25 @@ export default function App() {
                     </button>
                     <div className="nav-section-items" style={{ maxHeight: isOpen ? "400px" : "0" }}>
                       {group.items.map(item => {
-                        const isActive = item.action === 'practice'
+                        const locked = !!(item.feature && !can(company, item.feature));
+                        const isActive = !locked && (item.action === 'practice'
                           ? showPractice
-                          : page === item.id && !showPractice;
+                          : page === item.id && !showPractice);
                         return (
                           <button key={item.id}
-                            className={`nav-item ${isActive ? "active" : ""}`}
+                            className={`nav-item ${isActive ? "active" : ""} ${locked ? "nav-item-locked" : ""}`}
+                            title={locked ? `${FEATURE_LABELS[item.feature] || item.label} — upgrade to unlock` : undefined}
                             onClick={() => {
+                              if (locked) { setUpgradeFeature(item.feature); return; }
                               if (item.action === 'practice') { setShowPractice(true); }
                               else if (item.action === 'add-company') { setShowAddCompany(true); }
                               else { setPage(item.id); setShowPractice(false); }
                               ensureSectionOpen(group.section);
                             }}>
-                            <span className="nav-icon">{item.icon}</span>{item.label}
-                            {item.badge && <span className="nav-badge">!</span>}
+                            <span className="nav-icon" style={locked ? { opacity: 0.45 } : undefined}>{item.icon}</span>
+                            <span style={locked ? { opacity: 0.45, flex: 1 } : { flex: 1 }}>{item.label}</span>
+                            {locked && <span style={{ fontSize: 9, opacity: 0.5, marginLeft: 4 }}>🔒</span>}
+                            {!locked && item.badge && <span className="nav-badge">!</span>}
                           </button>
                         );
                       })}
@@ -14524,8 +19119,6 @@ export default function App() {
             {(() => {
               const hour = new Date().getHours();
               const greeting = hour < 12 ? "Good morning" : hour < 17 ? "Good afternoon" : "Good evening";
-              const bankDays = lastBankImport ? Math.floor((Date.now() - new Date(lastBankImport)) / 86400000) : null;
-              const bankFresh = bankDays !== null && bankDays < 7;
               return (
                 <div className="topbar">
                   <div style={{overflow:"hidden"}}>
@@ -14533,10 +19126,10 @@ export default function App() {
                     <div className="topbar-sub">Here's what's happening with <strong style={{color:"var(--text)"}}>{companyName}</strong> today.</div>
                   </div>
                   <div className="topbar-right">
-                    {bankDays === null ? null : (
-                      <div className={`bank-pill ${bankFresh ? "bank-pill-ok" : "bank-pill-warn"}`}>
+                    {bankConnBadge && (
+                      <div className="bank-pill bank-pill-ok">
                         <span className="bank-dot" />
-                        {bankFresh ? "AIB · Live" : `AIB · Updated ${bankDays}d ago`}
+                        {bankConnBadge.label} · Live
                       </div>
                     )}
                     <div ref={periodPickerRef} style={{ position: "relative" }}>
@@ -14562,7 +19155,7 @@ export default function App() {
                       )}
                     </div>
                     <UserChip />
-                    {window.location.pathname !== '/mobile' && !chatOpen && (
+                    {window.location.pathname !== '/mobile' && !chatOpen && can(company, 'ai_chat') && (
                       <button className="chat-dock-trigger" onClick={openChat}>
                         ⚡ Ask Ledgrly AI
                       </button>
@@ -14583,33 +19176,42 @@ export default function App() {
                 <>
                   {page === "overview"     && <Overview period={period} selPeriod={selPeriod} setSelPeriod={setSelPeriod} appCurPeriod={appCurPeriod} companyId={company?.id} company={company} onNavigate={setPage} recurringPosted={recurringToast} recurringSkipped={recurringSkipped} onOpenWizard={openWizard} onDismissGetStarted={dismissGettingStarted} />}
                   {page === "cashflow"     && <CashFlow selPeriod={selPeriod} onNavigate={setPage} companyId={company?.id} company={company} />}
-                  {page === "invoices"     && <Invoices companyName={companyName} companyId={company?.id} company={company} />}
-                  {page === "ap-invoices"  && <APInvoices companyName={companyName} company={company} />}
+                  {page === "invoices"     && <Invoices companyName={companyName} companyId={company?.id} company={company} onNavigate={setPage} />}
+                  {page === "ar-import"   && <BulkARImport companyId={company?.id} />}
+                  {page === "ap-invoices"  && <APInvoices companyName={companyName} company={company} onNavigate={setPage} />}
                   {page === "contracts"    && <Contracts companyName={companyName} companyId={company?.id} />}
                   <div style={{display: page === "expenses" ? "block" : "none"}}>
-                    <Expenses companyName={companyName} isAdmin={!isReadOnly} companyId={company?.id} />
+                    <Expenses companyName={companyName} isAdmin={!isReadOnly} companyId={company?.id} isActive={page === "expenses"} />
                   </div>
                   {page === "checklist"    && <Checklist period={period} selPeriod={selPeriod} companyId={company?.id} company={company} />}
                   {page === "checklist"    && <SuggestedJournals period={selPeriod || period} companyId={company?.id} company={company} />}
-                  {page === "journals"     && <Journals period={period} selPeriod={selPeriod} companyName={companyName} companyId={company?.id} readOnly={isReadOnly} />}
+                  {page === "journals"     && <Journals period={period} selPeriod={selPeriod} companyName={companyName} companyId={company?.id} readOnly={isReadOnly} company={company} />}
                   {page === "gl"           && <GLReport period={period} selPeriod={selPeriod} companyId={company?.id} companyName={companyName} company={company} readOnly={isReadOnly} />}
+                  {page === "bank"         && <BankHub companyId={company?.id} company={company} />}
                   <div style={{display: page === "bank-import" ? "block" : "none"}}>
-                    <BankImportErrorBoundary><BankImport companyId={company?.id} /></BankImportErrorBoundary>
+                    <BankImportErrorBoundary><BankImport companyId={company?.id} isActive={page === "bank-import"} company={company} /></BankImportErrorBoundary>
                   </div>
+                  {page === "bank-feeds"     && <YapilyBankFeeds companyId={company?.id} company={company} isActive={page === "bank-feeds"} />}
                   {page === "reconciliation" && <Reconciliation companyId={company?.id} onNavigate={setPage} />}
                   {page === "revenue"        && <RevenueFeed companyId={company?.id} company={company} />}
                   {page === "compliance"      && <Compliance company={company} onNavigate={setPage} />}
                   {page === "vat-returns"    && <VATReturns company={company} onNavigate={setPage} />}
                   {page === "fin-statements" && <FinancialStatements company={company} companyName={companyName} />}
-                  {page === "settings"       && <Settings company={company} onUpdate={c => { setCompany(c); setCompanies(prev => prev.map(x => x.id === c.id ? c : x)); }} />}
+                  {page === "payroll-import"    && <BrightPayImporter companyId={company?.id} />}
+                  {page === "opening-balances" && <OpeningBalances companyId={company?.id} />}
+                  {page === "fixed-assets"   && <FixedAssets companyId={company?.id} company={company} onNavigate={setPage} selPeriod={selPeriod} />}
+                  {page === "settings"       && <Settings company={company} onUpdate={c => { setCompany(c); setCompanies(prev => prev.map(x => x.id === c.id ? c : x)); }} onNavigate={setPage} />}
                 </>
               )}
             </div>
           </div>
-          {window.location.pathname !== '/mobile' && (
+          {window.location.pathname !== '/mobile' && can(company, 'ai_chat') && (
             <div className={`chat-dock${chatOpen ? ' chat-dock-open' : ''}`}>
               <Chat page={title} companyName={companyName} period={period} selPeriod={selPeriod} companyId={company?.id} company={company} onClose={closeChat} />
             </div>
+          )}
+          {upgradeFeature && (
+            <UpgradeCard feature={upgradeFeature} onClose={() => setUpgradeFeature(null)} />
           )}
         </div>
       </>

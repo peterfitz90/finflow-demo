@@ -25,7 +25,9 @@ Rules:
 
 Return ONLY a JSON array: [{"id":"payee_key","nominal_code":"6000","nominal_name":"Payroll & PAYE","confidence":"high"}]`;
 
-export default async function handler(req, res) {
+import { withSentry, captureError } from './_sentry.js';
+
+export default withSentry(async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
   const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
@@ -99,7 +101,8 @@ export default async function handler(req, res) {
     console.log("[categorise] returning", results.length, "results");
     res.status(200).json({ results });
   } catch (error) {
+    captureError(error, { operation: 'categorise-anthropic-call' });
     console.error("[categorise] handler error:", error);
     res.status(500).json({ error: error.message });
   }
-}
+});

@@ -1,10 +1,11 @@
 import { createClient } from "@supabase/supabase-js";
 import { renderInvoicePDF } from "./_invoice-pdf-doc.js";
 import { buildInvoiceHTML } from "./_invoice-html.js";
+import { withSentry, captureError } from './_sentry.js';
 
 export const config = { api: { bodyParser: { sizeLimit: "16kb" } } };
 
-export default async function handler(req, res) {
+export default withSentry(async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
   const pmToken = process.env.POSTMARK_SERVER_TOKEN?.trim();
@@ -82,6 +83,7 @@ export default async function handler(req, res) {
 
   if (!pmRes.ok) {
     const err = await pmRes.json().catch(() => ({}));
+    captureError(new Error(err.Message || `Postmark error ${pmRes.status}`), { company_id, operation: 'send-invoice-postmark', invoice_id });
     return res.status(502).json({ error: err.Message || "Postmark error", code: err.ErrorCode });
   }
 
@@ -94,4 +96,4 @@ export default async function handler(req, res) {
   }
 
   return res.json({ ok: true, to: customer.email, subject, pdf_attached: true });
-}
+});

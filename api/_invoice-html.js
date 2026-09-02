@@ -26,7 +26,7 @@ export function calcLine(line) {
 
 export function buildInvoiceHTML(inv, lines, customer, settings, companyName) {
   const isCN   = inv.type === 'credit_note';
-  const accent = isCN ? '#b91c1c' : '#1d6b72';
+  const accent = isCN ? '#b91c1c' : '#059669';
   const fmt    = v => '€' + Number(v || 0).toFixed(2);
 
   // Aggregate VAT by code and detect special codes
