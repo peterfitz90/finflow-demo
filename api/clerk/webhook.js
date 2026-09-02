@@ -46,7 +46,8 @@ function verifySvixSignature(rawBodyBuf, headers, secret) {
 function extractOrgAndUser(data) {
   const orgId  = data?.organization?.id ?? data?.organization_id ?? null;
   const userId = data?.public_user_data?.user_id ?? data?.user_id ?? null;
-  return { orgId, userId };
+  const email  = data?.public_user_data?.identifier ?? null;
+  return { orgId, userId, email };
 }
 
 export default async function handler(req, res) {
@@ -80,7 +81,7 @@ export default async function handler(req, res) {
 
   try {
     if (type === "organizationMembership.created") {
-      const { orgId, userId } = extractOrgAndUser(data);
+      const { orgId, userId, email } = extractOrgAndUser(data);
       if (!orgId || !userId) {
         console.warn("[clerk-webhook] created: could not extract org/user from payload", JSON.stringify(data));
         return res.status(400).json({ error: "Missing organization/user id" });
@@ -96,12 +97,26 @@ export default async function handler(req, res) {
         return res.json({ received: true, action: "no_matching_company" });
       }
 
+      // Was this invite sent via the business-owner flow (api/invite-business-owner.js)?
+      // That's the only signal available — Clerk's own role (admin/member) doesn't carry
+      // this distinction, by design (see api/_auth.js).
+      let role = "accountant";
+      if (email) {
+        const { data: pending } = await supabase
+          .from("pending_business_owner_invites")
+          .select("id").eq("company_id", co.id).eq("email", email.toLowerCase()).maybeSingle();
+        if (pending) {
+          role = "business_owner";
+          await supabase.from("pending_business_owner_invites").delete().eq("id", pending.id);
+        }
+      }
+
       const { error: upsertErr } = await supabase
         .from("user_company_access")
-        .upsert({ user_id: userId, company_id: co.id }, { onConflict: "user_id,company_id" });
+        .upsert({ user_id: userId, company_id: co.id, role }, { onConflict: "user_id,company_id" });
       if (upsertErr) throw upsertErr;
 
-      return res.json({ received: true, action: "granted" });
+      return res.json({ received: true, action: "granted", role });
     }
 
     if (type === "organizationMembership.deleted") {

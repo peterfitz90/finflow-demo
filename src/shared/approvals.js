@@ -26,7 +26,12 @@ export async function confirmBankTxn(companyId, matchId, btId) {
 }
 
 export async function approveApBill(bill) {
-  const gross   = parseFloat(bill.gross_amount ?? bill.amount ?? 0) || 0;
+  // No fallback-to-0 here on purpose: a caller-supplied gross of null/0 must reach the RPC
+  // as-is so its own reconciliation guard rejects it, rather than this wrapper silently
+  // turning "unknown" into a real zero that then posts (or worse, skips posting) as if it
+  // were a legitimate €0 bill. See api/DID-Electrical incident — this exact substitution
+  // (bill.gross_amount ?? bill.amount ?? 0) is what put a real €610.06 bill through as €0.
+  const gross   = bill.gross_amount != null ? parseFloat(bill.gross_amount) : null;
   const nomCode = bill.suggested_nominal ?? bill.nominal_code ?? '6600';
   const { data, error } = await supabase.rpc('approve_ap_bill', {
     p_company_id:  bill.company_id,

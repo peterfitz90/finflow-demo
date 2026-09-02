@@ -1626,11 +1626,17 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
           onboarding_steps:     { company_profile: true },
         }).select().single();
         if (error) throw error;
-        supabase.rpc('claim_mailbox_slug', { p_company_id: data.id, p_name: data.name });
         try {
+          const { error: slugErr } = await supabase.rpc('claim_mailbox_slug', { p_company_id: data.id, p_name: data.name });
+          if (slugErr) captureError(slugErr, { company_id: data.id, operation: 'claim-mailbox-slug-onboarding' });
+        } catch (slugEx) {
+          captureError(slugEx, { company_id: data.id, operation: 'claim-mailbox-slug-onboarding' });
+        }
+        try {
+          const cgToken = await window.Clerk?.session?.getToken();
           const r = await fetch('/api/create-org', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ companyId: data.id, companyName: data.name, userId: user.id }),
+            method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${cgToken}` },
+            body: JSON.stringify({ companyId: data.id, companyName: data.name }),
           });
           if (r.ok) {
             const { orgId } = await r.json();
@@ -2501,7 +2507,7 @@ table.lines td{padding:8px 7px;border-bottom:1px solid #f0f0f0;font-size:12px}
 const AR_STATUS_LABELS = { draft: 'Draft', sent: 'Sent', part_paid: 'Part Paid', paid: 'Paid', overdue: 'Overdue', void: 'Void', credited: 'Credited' };
 const AR_STATUS_COLORS = { draft: 'var(--muted)', sent: 'var(--accent)', part_paid: 'var(--gold)', paid: 'var(--teal)', overdue: 'var(--danger)', void: 'var(--dim)', credited: 'var(--dim)' };
 
-function Invoices({ companyName, companyId: propCid, company, onNavigate }) {
+function Invoices({ companyName, companyId: propCid, company, onNavigate, isBusinessOwner = false }) {
   const cid          = propCid;
   const baseCurrency = company?.base_currency || 'EUR';
   const fmtC = v => new Intl.NumberFormat('en-IE', { style: 'currency', currency: baseCurrency }).format(Number(v) || 0);
@@ -2844,10 +2850,10 @@ function Invoices({ companyName, companyId: propCid, company, onNavigate }) {
                               {['sent', 'part_paid', 'overdue'].includes(st) && (
                                 <button className="btn btn-s btn-sm" style={{ borderColor: 'var(--danger)', color: 'var(--danger)' }} onClick={() => openInvoiceForm(null, true, inv)}>CN</button>
                               )}
-                              {st === 'draft' && (
+                              {!isBusinessOwner && st === 'draft' && (
                                 <button className="btn btn-s btn-sm" style={{ borderColor: 'var(--danger)', color: 'var(--danger)' }} onClick={() => { setVoidErr(null); setVoidTarget({ inv, action: 'delete' }); }}>Delete</button>
                               )}
-                              {(st === 'sent' || st === 'overdue') && (
+                              {!isBusinessOwner && (st === 'sent' || st === 'overdue') && (
                                 <button className="btn btn-s btn-sm" style={{ borderColor: 'var(--dim)', color: 'var(--dim)' }} onClick={() => { setVoidErr(null); setVoidTarget({ inv, action: 'void' }); }}>Void</button>
                               )}
                             </div>
@@ -2891,10 +2897,10 @@ function Invoices({ companyName, companyId: propCid, company, onNavigate }) {
                                   <button className="btn btn-s btn-sm" onClick={() => handleEmail(cn)}>Email</button>
                                 </>
                               )}
-                              {cn.status === 'draft' && (
+                              {!isBusinessOwner && cn.status === 'draft' && (
                                 <button className="btn btn-s btn-sm" style={{ borderColor: 'var(--danger)', color: 'var(--danger)' }} onClick={() => { setVoidErr(null); setVoidTarget({ inv: cn, action: 'delete' }); }}>Delete</button>
                               )}
-                              {cn.status !== 'draft' && cn.status !== 'void' && (
+                              {!isBusinessOwner && cn.status !== 'draft' && cn.status !== 'void' && (
                                 <button className="btn btn-s btn-sm" style={{ borderColor: 'var(--dim)', color: 'var(--dim)' }} onClick={() => { setVoidErr(null); setVoidTarget({ inv: cn, action: 'void' }); }}>Void</button>
                               )}
                             </div>
@@ -3236,7 +3242,7 @@ function Invoices({ companyName, companyId: propCid, company, onNavigate }) {
 }
 
 // ─── AP INVOICES PAGE ────────────────────────────────────────────────────────
-function APInvoices({ companyName = "Company", company, onNavigate }) {
+function APInvoices({ companyName = "Company", company, onNavigate, isBusinessOwner = false }) {
   const { user } = useUser();
   const [invoices, setInvoices]                 = useState([]);
   const [reviewInvoices, setReviewInvoices]     = useState([]);
@@ -3250,6 +3256,54 @@ function APInvoices({ companyName = "Company", company, onNavigate }) {
   const [assetCapturePrompt, setAssetCapturePrompt] = useState(false);
 
   useEffect(() => { if (reviewInvoices.length > 0) setJustCleared(false); }, [reviewInvoices.length]);
+
+  // Net/VAT/Gross must always reconcile (gross = net + vat) — editing any one of the three
+  // recalculates the other two from the bill's vat_code, rather than leaving them independent
+  // (see the DID Electrical incident: net was captured/edited but gross/vat stayed at the AI's
+  // draft 0, and nothing recalculated or blocked approval — it posted no journal at all).
+  const applyApAmountEdit = (invId, field, rawValue, ed, inv) => {
+    const rate  = VAT_RATES[inv.vat_code] || 0;
+    const cur   = (key) => parseFloat(ed?.[key] ?? inv?.[key] ?? 0) || 0;
+    let net = cur('net_amount'), vat = cur('vat_amount'), gross = cur('gross_amount');
+    const v = parseFloat(rawValue);
+    const val = Number.isFinite(v) ? v : 0;
+
+    if (field === 'net_amount') {
+      net = val;
+      vat = Math.round(net * rate) / 100;
+      gross = Math.round((net + vat) * 100) / 100;
+    } else if (field === 'gross_amount') {
+      gross = val;
+      vat = rate ? Math.round(gross * rate / (100 + rate) * 100) / 100 : 0;
+      net = Math.round((gross - vat) * 100) / 100;
+    } else if (field === 'vat_amount') {
+      vat = val;
+      gross = Math.round((net + vat) * 100) / 100;
+    }
+
+    setReviewEdits(p => ({
+      ...p,
+      [invId]: {
+        ...p[invId],
+        net_amount:   field === 'net_amount'   ? rawValue : String(net),
+        vat_amount:   field === 'vat_amount'   ? rawValue : String(vat),
+        gross_amount: field === 'gross_amount' ? rawValue : String(gross),
+      },
+    }));
+  };
+
+  // Blocks approval when the amounts don't reconcile — specifically the exact DID Electrical
+  // case (gross is 0/blank while net is positive) and any other net+vat != gross mismatch.
+  const apAmountsIssue = (ed, inv) => {
+    const net   = parseFloat(ed?.net_amount   ?? inv.net_amount   ?? 0) || 0;
+    const vat   = parseFloat(ed?.vat_amount   ?? inv.vat_amount   ?? 0) || 0;
+    const gross = parseFloat(ed?.gross_amount ?? inv.gross_amount ?? inv.amount ?? 0) || 0;
+    if (gross <= 0 && net > 0) return `Gross is €0 but net is €${net.toFixed(2)} — amounts don't reconcile.`;
+    if (Math.abs((net + vat) - gross) > 0.02) {
+      return `Net (€${net.toFixed(2)}) + VAT (€${vat.toFixed(2)}) ≠ Gross (€${gross.toFixed(2)}).`;
+    }
+    return null;
+  };
 
   const companyId = company?.id ?? null;
   const { accounts: coaAccounts } = useChartOfAccounts(companyId);
@@ -3339,7 +3393,9 @@ function APInvoices({ companyName = "Company", company, onNavigate }) {
     const paidAmt = Number(inv.gross_amount || inv.amount || 0);
     try {
       await markApBillPaid(companyId, inv.id, paidAmt);
-      setInvoices(prev => prev.map(i => i.id === inv.id ? { ...i, status: 'paid', amount_paid: paidAmt } : i));
+      // Provisional, not final — mark_ap_bill_paid now sets awaiting_bank_match, not paid.
+      // It becomes 'paid' once the matching bank transaction is confirmed against it.
+      setInvoices(prev => prev.map(i => i.id === inv.id ? { ...i, status: 'awaiting_bank_match', amount_paid: paidAmt } : i));
       if (selected === inv.id) setSelected(null);
     } catch (err) {
       captureError(err, { company_id: companyId, operation: 'ap-mark-paid' });
@@ -3372,7 +3428,11 @@ function APInvoices({ companyName = "Company", company, onNavigate }) {
 
   // Approve AP bill from needs_review — thin wrapper over approve_ap_bill RPC (atomic)
   const approveReview = async (inv) => {
-    const ed      = reviewEdits[inv.id] || {};
+    const ed = reviewEdits[inv.id] || {};
+    // Re-check here too, not just the disabled button — this is what actually stops the
+    // RPC call from firing with unreconciled amounts.
+    const issue = apAmountsIssue(ed, inv);
+    if (issue) { setSaveError(issue); return; }
     const gross   = parseFloat(ed.gross_amount ?? inv.gross_amount ?? inv.amount ?? 0) || null;
     const nomCode = ed.nominal_code ?? inv.suggested_nominal ?? '6600';
     try {
@@ -3419,7 +3479,9 @@ function APInvoices({ companyName = "Company", company, onNavigate }) {
     setReviewInvoices(prev => prev.filter(i => i.id !== inv.id));
   };
 
-  const outstanding = invoices.filter((i) => i.status !== "paid");
+  // awaiting_bank_match = already paid (a payment journal exists), just waiting for the
+  // matching bank transaction to arrive and link to it — not outstanding in any real sense.
+  const outstanding = invoices.filter((i) => i.status !== "paid" && i.status !== "awaiting_bank_match");
   const totalAP     = outstanding.reduce((s, i) => s + (i.amount || 0), 0);
   const overdue30   = outstanding.filter((i) => daysFromToday(i.due_date) > 30);
   const totalOD30   = overdue30.reduce((s, i) => s + (i.amount || 0), 0);
@@ -3512,22 +3574,28 @@ function APInvoices({ companyName = "Company", company, onNavigate }) {
                     </div>
                     <div className="f-group">
                       <label className="f-label">Net (€)</label>
-                      <input className="f-input" type="number" step="0.01" value={ed.net_amount ?? inv.net_amount ?? ""} onChange={e => setReviewEdits(p => ({ ...p, [inv.id]: { ...p[inv.id], net_amount: e.target.value } }))} />
+                      <input className="f-input" type="number" step="0.01" value={ed.net_amount ?? inv.net_amount ?? ""} onChange={e => applyApAmountEdit(inv.id, 'net_amount', e.target.value, ed, inv)} />
                     </div>
                     <div className="f-group">
                       <label className="f-label">VAT (€)</label>
-                      <input className="f-input" type="number" step="0.01" value={ed.vat_amount ?? inv.vat_amount ?? ""} onChange={e => setReviewEdits(p => ({ ...p, [inv.id]: { ...p[inv.id], vat_amount: e.target.value } }))} />
+                      <input className="f-input" type="number" step="0.01" value={ed.vat_amount ?? inv.vat_amount ?? ""} onChange={e => applyApAmountEdit(inv.id, 'vat_amount', e.target.value, ed, inv)} />
                     </div>
                     <div className="f-group">
                       <label className="f-label">Gross (€)</label>
-                      <input className="f-input" type="number" step="0.01" value={ed.gross_amount ?? inv.gross_amount ?? ""} onChange={e => setReviewEdits(p => ({ ...p, [inv.id]: { ...p[inv.id], gross_amount: e.target.value } }))} />
+                      <input className="f-input" type="number" step="0.01" value={ed.gross_amount ?? inv.gross_amount ?? ""} onChange={e => applyApAmountEdit(inv.id, 'gross_amount', e.target.value, ed, inv)} />
                     </div>
                   </div>
+                  {(() => {
+                    const issue = apAmountsIssue(ed, inv);
+                    return issue ? (
+                      <div style={{ marginBottom: 8, fontSize: 12, color: "var(--red)" }}>⚠ {issue}</div>
+                    ) : null;
+                  })()}
                   <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
                     {inv.attachment_path && (
                       <button className="btn btn-s btn-sm" onClick={() => viewAttachmentPdf(inv.attachment_path)}>⧉ View PDF</button>
                     )}
-                    <button className="btn btn-p btn-sm" onClick={() => approveReview(inv)}>✓ Approve</button>
+                    <button className="btn btn-p btn-sm" disabled={!!apAmountsIssue(ed, inv)} onClick={() => approveReview(inv)}>✓ Approve</button>
                     <button className="btn btn-s btn-sm" style={{ color: "var(--red)" }} onClick={() => rejectReview(inv)}>✕ Reject</button>
                   </div>
                 </div>
@@ -3606,7 +3674,8 @@ function APInvoices({ companyName = "Company", company, onNavigate }) {
               </div>
               <div className="f-group">
                 <label className="f-label">VAT Rate</label>
-                <select className="f-input" value={form.vat_code} onChange={ff("vat_code")}>
+                <select className="f-input" value={form.vat_code} onChange={ff("vat_code")} disabled={isBusinessOwner}
+                  title={isBusinessOwner ? "VAT rate is set by your accountant" : undefined}>
                   {['STD23','RED13','RED9','ZERO','EXEMPT','NONE'].map(c => <option key={c} value={c}>{c}</option>)}
                 </select>
               </div>
@@ -3654,14 +3723,14 @@ function APInvoices({ companyName = "Company", company, onNavigate }) {
                 const d = daysFromToday(inv.due_date);
                 const [sc, sbg] = statusPill(inv.status);
                 return (
-                  <tr key={inv.id} style={{ cursor: "pointer", opacity: inv.status === "paid" ? 0.52 : 1 }}
+                  <tr key={inv.id} style={{ cursor: "pointer", opacity: (inv.status === "paid" || inv.status === "awaiting_bank_match") ? 0.52 : 1 }}
                     onClick={() => setSelected(selected === inv.id ? null : inv.id)}>
                     <td style={{ fontWeight: 500 }}>{inv.supplier}</td>
                     <td className="mono" style={{ color: "var(--accent)", fontWeight: 600 }}>{inv.invoice_ref}</td>
                     <td className="mono">{fmtDate(inv.invoice_date)}</td>
                     <td className="mono">{fmtDate(inv.due_date)}</td>
                     <td>
-                      {inv.status === "paid"
+                      {(inv.status === "paid" || inv.status === "awaiting_bank_match")
                         ? <span style={{ fontSize: 11, color: "var(--text-faint)" }}>paid</span>
                         : <><div style={{ fontFamily: "Source Code Pro, monospace", fontSize: 12, fontWeight: 700, color: daysCol(d) }}>
                             {d > 0 ? `${d}d overdue` : `${Math.abs(d)}d`}
@@ -3669,11 +3738,13 @@ function APInvoices({ companyName = "Company", company, onNavigate }) {
                           <div className="inv-days-bar"><div className="inv-days-fill" style={{ width: `${Math.min(Math.abs(d) / 90 * 100, 100)}%`, background: daysCol(d) }} /></div>
                           </>}
                     </td>
-                    <td><span className="pill" style={{ color: sc, background: sbg }}>{inv.status}</span></td>
+                    <td><span className="pill" style={{ color: sc, background: sbg }}>
+                      {inv.status === "awaiting_bank_match" ? "paid — awaiting bank match" : inv.status}
+                    </span></td>
                     <td style={{ fontSize: 11, color: "var(--dim)" }}>{inv.payment_method}</td>
                     <td className="r mono" style={{ fontWeight: 600 }}>{fmt(inv.amount)}</td>
                     <td onClick={(e) => e.stopPropagation()} style={{ paddingRight: 10 }}>
-                      {inv.status !== "paid" && (
+                      {inv.status !== "paid" && inv.status !== "awaiting_bank_match" && (
                         <button className="btn btn-s btn-sm" style={{ whiteSpace: "nowrap" }} onClick={(e) => markPaid(inv, e)}>Mark Paid</button>
                       )}
                     </td>
@@ -12819,6 +12890,8 @@ function Settings({ company, onUpdate, onNavigate }) {
   const [form, setForm] = useState(blank());
   const [saving, setSaving] = useState(false);
   const [slugResetting, setSlugResetting] = useState(false);
+  const [slugClaiming,  setSlugClaiming]  = useState(false);
+  const [slugClaimErr,  setSlugClaimErr]  = useState(null);
   const [saved,  setSaved]  = useState(false);
   const [error,  setError]  = useState(null);
 
@@ -12831,6 +12904,11 @@ function Settings({ company, onUpdate, onNavigate }) {
   const [inviteMsg,      setInviteMsg]      = useState(null);
   const [creatingOrg,      setCreatingOrg]      = useState(false);
   const [creatingOrgError, setCreatingOrgError] = useState(null);
+  // ── Business owner (client) invite — distinct from the colleague invite above; see
+  // api/invite-business-owner.js and [[business_owner_role_foundation]] ──
+  const [bizOwnerEmail,     setBizOwnerEmail]     = useState("");
+  const [invitingBizOwner,  setInvitingBizOwner]  = useState(false);
+  const [bizOwnerMsg,       setBizOwnerMsg]       = useState(null);
 
   // ── Prior Year Balances ──
   const { balances: pyBalances, meta: pyMeta, refetch: pyRefetch } = usePriorYearBalances(company?.id);
@@ -13035,10 +13113,11 @@ function Settings({ company, onUpdate, onNavigate }) {
         return;
       }
 
+      const enableTeamToken = await window.Clerk?.session?.getToken();
       const res = await fetch('/api/create-org', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ companyId: company.id, companyName: company.name, userId: user.id }),
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${enableTeamToken}` },
+        body: JSON.stringify({ companyId: company.id, companyName: company.name }),
       });
       const d = await res.json();
       console.log('[create-org] response:', { status: res.status, ok: res.ok, body: d });
@@ -13067,10 +13146,11 @@ function Settings({ company, onUpdate, onNavigate }) {
     if (!inviteEmail.trim() || !company?.clerk_org_id) return;
     setInviting(true); setInviteMsg(null);
     try {
+      const token = await window.Clerk?.session?.getToken();
       const res = await fetch('/api/invite-user', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ orgId: company.clerk_org_id, emailAddress: inviteEmail.trim(), role: inviteRole }),
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ orgId: company.clerk_org_id, companyId: company.id, emailAddress: inviteEmail.trim(), role: inviteRole }),
       });
       const d = await res.json();
       if (!res.ok) setInviteMsg({ ok: false, text: d.error || "Invitation failed" });
@@ -13079,6 +13159,25 @@ function Settings({ company, onUpdate, onNavigate }) {
       setInviteMsg({ ok: false, text: e.message });
     }
     setInviting(false);
+  };
+
+  const sendBusinessOwnerInvite = async () => {
+    if (!bizOwnerEmail.trim() || !company?.clerk_org_id) return;
+    setInvitingBizOwner(true); setBizOwnerMsg(null);
+    try {
+      const token = await window.Clerk?.session?.getToken();
+      const res = await fetch('/api/invite-business-owner', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
+        body: JSON.stringify({ orgId: company.clerk_org_id, companyId: company.id, emailAddress: bizOwnerEmail.trim() }),
+      });
+      const d = await res.json();
+      if (!res.ok) setBizOwnerMsg({ ok: false, text: d.error || "Invitation failed" });
+      else { setBizOwnerMsg({ ok: true, text: `Invitation sent to ${bizOwnerEmail}` }); setBizOwnerEmail(""); }
+    } catch (e) {
+      setBizOwnerMsg({ ok: false, text: e.message });
+    }
+    setInvitingBizOwner(false);
   };
 
   const valid = form.name.trim().length > 0 &&
@@ -13464,6 +13563,25 @@ function Settings({ company, onUpdate, onNavigate }) {
                   <strong>Admin</strong> — full access including posting journals. <strong>Member</strong> — read-only journals and GL reports; can add invoices and import bank transactions.
                 </div>
               </div>
+              <div style={{ marginBottom: 16, paddingTop: 14, borderTop: "1px solid var(--border)" }}>
+                <div className="f-label" style={{ marginBottom: 7 }}>Invite business owner (client)</div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <input className="f-input" style={{ flex: 1, minWidth: 200 }} placeholder="owner@theirbusiness.ie"
+                    value={bizOwnerEmail} onChange={e => setBizOwnerEmail(e.target.value)}
+                    onKeyDown={e => e.key === "Enter" && sendBusinessOwnerInvite()} />
+                  <button className="btn btn-p btn-sm" onClick={sendBusinessOwnerInvite} disabled={invitingBizOwner || !bizOwnerEmail.trim()}>
+                    {invitingBizOwner ? "Sending…" : "Send Invite"}
+                  </button>
+                </div>
+                {bizOwnerMsg && (
+                  <div style={{ marginTop: 8, fontSize: 12, color: bizOwnerMsg.ok ? "var(--green)" : "var(--red)" }}>
+                    {bizOwnerMsg.ok ? "✓ " : "✗ "}{bizOwnerMsg.text}
+                  </div>
+                )}
+                <div style={{ marginTop: 7, fontSize: 11, color: "var(--dim)", lineHeight: 1.5 }}>
+                  A restricted client login — invoices, bills, expenses and bank connection only. No VAT, journals, reports, or settings access.
+                </div>
+              </div>
               <div className="f-label" style={{ marginBottom: 8 }}>Current Members</div>
               {membersLoading ? (
                 <div style={{ fontSize: 12, color: "var(--dim)" }}>Loading members…</div>
@@ -13588,8 +13706,23 @@ function Settings({ company, onUpdate, onNavigate }) {
       </div>
 
       {/* ── AP Mailbox ── */}
-      {company?.mailbox_slug && (() => {
-        const mailboxAddr = `bills-${company.mailbox_slug}@inbound.ledgrly.ie`;
+      {(() => {
+        const MAILBOX_ALLOWED_PLANS = ['founder', 'practice', 'enterprise']; // mirrors api/inbound-email.js
+        const planOk = MAILBOX_ALLOWED_PLANS.includes(company?.plan);
+        const mailboxAddr = company?.mailbox_slug ? `bills-${company.mailbox_slug}@inbound.ledgrly.ie` : null;
+
+        const claimSlug = async () => {
+          if (slugClaiming || !company?.id) return;
+          setSlugClaiming(true); setSlugClaimErr(null);
+          const { data: newSlug, error: cErr } = await supabase.rpc('claim_mailbox_slug', { p_company_id: company.id, p_name: company.name });
+          if (cErr || !newSlug) {
+            setSlugClaimErr(cErr?.message || "Could not claim an address — please try again.");
+          } else {
+            onUpdate({ ...company, mailbox_slug: newSlug });
+          }
+          setSlugClaiming(false);
+        };
+
         return (
           <div className="card" style={{ marginBottom: 13 }}>
             <div className="card-header">
@@ -13597,41 +13730,62 @@ function Settings({ company, onUpdate, onNavigate }) {
               <span style={{ fontSize: 10, fontFamily: "Source Code Pro, monospace", color: "var(--dim)" }}>INBOUND EMAIL</span>
             </div>
             <div style={{ padding: "14px 16px" }}>
-              <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 10, lineHeight: 1.6 }}>
-                Forward supplier invoices to this address — they land in the AP review queue automatically.
-                <br />
-                <span style={{ color: "var(--text-faint)" }}>
-                  Tip: set up an auto-forward rule in Gmail or Outlook so any invoice that arrives in your inbox gets forwarded here without manual steps.
-                </span>
-              </div>
-              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
-                <code style={{ fontSize: 13, fontFamily: "Source Code Pro, monospace", color: "var(--accent)", background: "var(--surface-2)", padding: "6px 12px", borderRadius: 4, border: "1px solid var(--border)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
-                  {mailboxAddr}
-                </code>
-                <button className="btn btn-s btn-sm" style={{ flexShrink: 0 }} onClick={() => {
-                  navigator.clipboard?.writeText(mailboxAddr);
-                }}>Copy</button>
-              </div>
-              <div style={{ marginTop: 10, fontSize: 11, color: "var(--text-faint)", lineHeight: 1.6, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
-                <span>Supported: PDF, JPEG, PNG, WebP attachments.</span>
-                <button
-                  className="btn btn-s btn-sm"
-                  style={{ flexShrink: 0, opacity: slugResetting ? 0.5 : 1 }}
-                  disabled={slugResetting}
-                  onClick={async () => {
-                    if (slugResetting) return;
-                    setSlugResetting(true);
-                    const { data: newSlug, error: rErr } = await supabase.rpc('regenerate_mailbox_slug', { p_company_id: company.id });
-                    if (!rErr && newSlug) {
-                      const updated = { ...company, mailbox_slug: newSlug };
-                      onUpdate(updated);
-                    }
-                    setSlugResetting(false);
-                  }}
-                >
-                  {slugResetting ? "Resetting…" : "Reset address"}
-                </button>
-              </div>
+              {!planOk ? (
+                <div style={{ fontSize: 12, color: "var(--text-muted)", lineHeight: 1.6 }}>
+                  Email bill capture requires the Founder, Practice, or Enterprise plan.
+                </div>
+              ) : !mailboxAddr ? (
+                <div>
+                  <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 12, lineHeight: 1.6 }}>
+                    Enable email bill capture — forward supplier bills to a dedicated address and
+                    they'll be captured and auto-coded into your AP review queue.
+                  </div>
+                  <button className="btn btn-p btn-sm" disabled={slugClaiming} onClick={claimSlug}>
+                    {slugClaiming ? "Enabling…" : "Enable / Claim address"}
+                  </button>
+                  {slugClaimErr && (
+                    <div style={{ marginTop: 10, fontSize: 12, color: "var(--red)", lineHeight: 1.5 }}>✗ {slugClaimErr}</div>
+                  )}
+                </div>
+              ) : (
+                <>
+                  <div style={{ fontSize: 12, color: "var(--text-muted)", marginBottom: 10, lineHeight: 1.6 }}>
+                    Forward supplier invoices to this address — they land in the AP review queue automatically.
+                    <br />
+                    <span style={{ color: "var(--text-faint)" }}>
+                      Tip: set up an auto-forward rule in Gmail or Outlook so any invoice that arrives in your inbox gets forwarded here without manual steps.
+                    </span>
+                  </div>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <code style={{ fontSize: 13, fontFamily: "Source Code Pro, monospace", color: "var(--accent)", background: "var(--surface-2)", padding: "6px 12px", borderRadius: 4, border: "1px solid var(--border)", flex: 1, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                      {mailboxAddr}
+                    </code>
+                    <button className="btn btn-s btn-sm" style={{ flexShrink: 0 }} onClick={() => {
+                      navigator.clipboard?.writeText(mailboxAddr);
+                    }}>Copy</button>
+                  </div>
+                  <div style={{ marginTop: 10, fontSize: 11, color: "var(--text-faint)", lineHeight: 1.6, display: "flex", alignItems: "center", justifyContent: "space-between", gap: 12, flexWrap: "wrap" }}>
+                    <span>Supported: PDF, JPEG, PNG, WebP attachments.</span>
+                    <button
+                      className="btn btn-s btn-sm"
+                      style={{ flexShrink: 0, opacity: slugResetting ? 0.5 : 1 }}
+                      disabled={slugResetting}
+                      onClick={async () => {
+                        if (slugResetting) return;
+                        setSlugResetting(true);
+                        const { data: newSlug, error: rErr } = await supabase.rpc('regenerate_mailbox_slug', { p_company_id: company.id });
+                        if (!rErr && newSlug) {
+                          const updated = { ...company, mailbox_slug: newSlug };
+                          onUpdate(updated);
+                        }
+                        setSlugResetting(false);
+                      }}
+                    >
+                      {slugResetting ? "Resetting…" : "Reset address"}
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         );
@@ -14336,14 +14490,20 @@ function AddCompanyModal({ user, onSuccess, onClose }) {
       setSaving(false); return;
     }
 
-    supabase.rpc('claim_mailbox_slug', { p_company_id: data.id, p_name: data.name });
+    try {
+      const { error: slugErr } = await supabase.rpc('claim_mailbox_slug', { p_company_id: data.id, p_name: data.name });
+      if (slugErr) captureError(slugErr, { company_id: data.id, operation: 'claim-mailbox-slug-add-company' });
+    } catch (slugEx) {
+      captureError(slugEx, { company_id: data.id, operation: 'claim-mailbox-slug-add-company' });
+    }
 
     let coData = data;
     let orgWarnMsg = null;
     try {
+      const wizToken = await window.Clerk?.session?.getToken();
       const r = await fetch("/api/create-org", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ companyId: data.id, companyName: data.name, userId: user.id }),
+        method: "POST", headers: { "Content-Type": "application/json", "Authorization": `Bearer ${wizToken}` },
+        body: JSON.stringify({ companyId: data.id, companyName: data.name }),
       });
       if (r.ok) {
         const { orgId } = await r.json();
@@ -17609,7 +17769,7 @@ function FixedAssets({ companyId, company, selPeriod }) {
 // ─────────────────────────────────────────────────────────────────────────────
 // YapilyBankFeeds — connect & manage live bank connections via Yapily hosted flow
 // ─────────────────────────────────────────────────────────────────────────────
-function YapilyBankFeeds({ companyId, company, isActive }) {
+function YapilyBankFeeds({ companyId, company, isActive, isBusinessOwner = false }) {
   const [connections,    setConnections]    = useState([]);
   const [loading,        setLoading]        = useState(true);
   const [syncing,        setSyncing]        = useState(null);
@@ -17810,9 +17970,10 @@ function YapilyBankFeeds({ companyId, company, isActive }) {
     if (!window.confirm(`This will disconnect ${conn.institution_id} and stop importing transactions. Continue?`)) return;
     setDisconnecting(conn.id); setError(null); setSuccessMsg(null);
     try {
+      const dcToken = await window.Clerk?.session?.getToken();
       const res  = await fetch('/api/yapily/disconnect', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${dcToken}` },
         body: JSON.stringify({ company_id: companyId, connection_id: conn.id }),
       });
       const data = await res.json();
@@ -18059,7 +18220,7 @@ function YapilyBankFeeds({ companyId, company, isActive }) {
                         {connecting ? 'Redirecting…' : 'Reconnect'}
                       </button>
                     )}
-                    {c.status !== 'revoked' && (
+                    {c.status !== 'revoked' && !isBusinessOwner && (
                       <button
                         className="btn btn-d btn-sm"
                         onClick={() => disconnectConnection(c)}
@@ -18573,7 +18734,7 @@ function BulkARImport({ companyId }) {
 // picker) survives switching tabs — but each gets `isActive` so it refetches its own data
 // (COA, rules, connections) when the user switches back to it, instead of showing whatever
 // was cached at mount time.
-function BankHub({ companyId, company }) {
+function BankHub({ companyId, company, isBusinessOwner = false }) {
   const [tab, setTab] = useState('feeds'); // 'feeds' | 'csv'
   return (
     <div className="fade-up">
@@ -18586,10 +18747,50 @@ function BankHub({ companyId, company }) {
         ))}
       </div>
       <div style={{ display: tab === 'feeds' ? 'block' : 'none' }}>
-        <YapilyBankFeeds companyId={companyId} company={company} isActive={tab === 'feeds'} />
+        <YapilyBankFeeds companyId={companyId} company={company} isActive={tab === 'feeds'} isBusinessOwner={isBusinessOwner} />
       </div>
       <div style={{ display: tab === 'csv' ? 'block' : 'none' }}>
         <BankImportErrorBoundary><BankImport companyId={companyId} isActive={tab === 'csv'} company={company} /></BankImportErrorBoundary>
+      </div>
+    </div>
+  );
+}
+
+// business_owner's first-login landing — replaces the accountant onboarding wizard, which
+// they must never see (company setup is always done by the accountant beforehand). Two
+// steps: a brief reassurance screen, then bank connect (reusing BankHub as-is), skippable.
+function WelcomeConnectBank({ company, onDone }) {
+  const [step, setStep] = useState('welcome'); // 'welcome' | 'connect'
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'var(--bg)', zIndex: 500, overflowY: 'auto' }}>
+      <div style={{ maxWidth: 640, margin: '0 auto', padding: '64px 24px' }}>
+        {step === 'welcome' ? (
+          <div className="fade-up" style={{ textAlign: 'center' }}>
+            <div style={{ fontSize: 40, marginBottom: 16 }}>👋</div>
+            <div style={{ fontSize: 22, fontWeight: 700, marginBottom: 10 }}>Welcome to {company?.name || 'your company'}</div>
+            <div style={{ fontSize: 14, color: 'var(--muted)', lineHeight: 1.6, marginBottom: 28 }}>
+              Your accountant has set up {company?.name || 'your company'} in Ledgrly — books,
+              chart of accounts, and everything else are ready to go. You're here to keep day-to-day
+              records moving: invoices, bills, expenses, and connecting your bank.
+            </div>
+            <button className="btn btn-p" style={{ fontSize: 14, padding: '10px 28px' }} onClick={() => setStep('connect')}>
+              Continue →
+            </button>
+          </div>
+        ) : (
+          <div className="fade-up">
+            <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 6 }}>Connect your bank</div>
+            <div style={{ fontSize: 13, color: 'var(--muted)', marginBottom: 20 }}>
+              Connecting your bank keeps your records current automatically — strongly recommended,
+              but you can do this later from the Bank tab.
+            </div>
+            <BankHub companyId={company?.id} company={company} isBusinessOwner />
+            <div style={{ marginTop: 24, display: 'flex', justifyContent: 'flex-end', gap: 10 }}>
+              <button className="btn btn-s" style={{ fontSize: 13 }} onClick={onDone}>I'll do this later</button>
+              <button className="btn btn-p" style={{ fontSize: 13 }} onClick={onDone}>Done</button>
+            </div>
+          </div>
+        )}
       </div>
     </div>
   );
@@ -18629,29 +18830,37 @@ const NAV = [
     { id: "expenses",    icon: "🧾", label: "Expenses", feature: "expenses"     },
   ]},
   { section: "TAXES & DEADLINES", items: [
-    { id: "vat-returns", icon: "§",  label: "VAT Returns", feature: "vat_returns" },
+    // accountantOnly items below are hidden from business_owner in the sidebar AND blocked
+    // server-side (RLS on vat_returns; see [[business_owner_rls_write_restrictions]] and
+    // [[user_is_accountant]]) — not just a UI hide.
+    { id: "vat-returns", icon: "§",  label: "VAT Returns", feature: "vat_returns", accountantOnly: true },
     { id: "compliance",  icon: "⊙", label: "Calendar",     feature: "compliance"  },
-    { id: "checklist",   icon: "☑", label: "Month End",    feature: "month_end",   badge: true },
+    { id: "checklist",   icon: "☑", label: "Month End",    feature: "month_end",   badge: true, accountantOnly: true },
   ]},
   { section: "REPORTS", items: [
     { id: "gl",             icon: "⊞", label: "GL Reports" },
-    { id: "fin-statements", icon: "§",  label: "Fin. Statements", feature: "fin_statements" },
+    { id: "fin-statements", icon: "§",  label: "Fin. Statements", feature: "fin_statements", accountantOnly: true },
   ]},
   { section: "ACCOUNTING", items: [
-    { id: "journals",         icon: "✎", label: "Journals" },
-    { id: "payroll-import",   icon: "⊟", label: "Payroll Import", feature: "payroll_import"   },
+    // Raw manual journal entry — UI-hide only for business_owner. Unlike vat_returns etc.
+    // this can't be blocked at the RLS/table layer: approve_ap_bill, mark_ap_bill_paid,
+    // confirm_settlement and the nominal re-tag flows all write directly to `journals` as
+    // a normal side effect of actions business_owner IS allowed to take, via the same
+    // table — RLS can't distinguish "system-posted" from "manually typed" at that layer.
+    { id: "journals",         icon: "✎", label: "Journals", accountantOnly: true },
+    { id: "payroll-import",   icon: "⊟", label: "Payroll Import", feature: "payroll_import", accountantOnly: true },
     // "opening-balances" moved into Settings (Client Setup card) — once-per-client task, not
     // a daily nav item. Route/component intact: page === "opening-balances" still renders
     // <OpeningBalances/>, now reached via a button in Settings. Un-hide by restoring this entry:
     // { id: "opening-balances", icon: "⊜", label: "Opening Bals", feature: "opening_balances" },
-    { id: "fixed-assets",     icon: "⊟", label: "Fixed Assets",   feature: "fixed_assets"     },
+    { id: "fixed-assets",     icon: "⊟", label: "Fixed Assets",   feature: "fixed_assets", accountantOnly: true },
   ]},
-  { section: "PRACTICE", practiceOnly: true, items: [
+  { section: "PRACTICE", practiceOnly: true, accountantOnly: true, items: [
     { id: "practice-clients", icon: "◈", label: "Clients",     action: "practice",    feature: "practice_dashboard" },
     { id: "practice-add-co",  icon: "⊕", label: "Add Company", action: "add-company", feature: "practice_dashboard" },
   ]},
   { section: "SETTINGS", items: [
-    { id: "settings", icon: "⚙", label: "Settings" },
+    { id: "settings", icon: "⚙", label: "Settings", accountantOnly: true },
   ]},
 ];
 
@@ -18892,7 +19101,8 @@ export default function App() {
     return () => document.removeEventListener('mousedown', handler);
   }, [showPeriodPicker]); // eslint-disable-line
 
-  // Compute user's role in active company's org
+  // Compute user's role in active company's org (colleague read-only distinction —
+  // unrelated to, and unchanged by, the accountant/business_owner permission model below).
   const userRole = useMemo(() => {
     if (!company?.clerk_org_id) return 'owner';
     if (company.clerk_user_id === user?.id) return 'owner';
@@ -18903,6 +19113,21 @@ export default function App() {
   }, [company, user, userMemberships?.data]);
 
   const isReadOnly = userRole === 'org:member';
+
+  // Accountant vs business_owner — authoritative signal is user_company_access.role via
+  // this RPC (see [[user_company_role]] migration), NOT Clerk's own admin/member field,
+  // which carries a different, unrelated distinction (colleague read-only, above).
+  const [companyRole, setCompanyRole] = useState(null); // 'accountant' | 'business_owner' | null (loading)
+  useEffect(() => {
+    if (!company?.id) { setCompanyRole(null); return; }
+    let cancelled = false;
+    supabase.rpc('user_company_role', { p_company_id: company.id }).then(({ data, error }) => {
+      if (cancelled) return;
+      setCompanyRole(error ? null : (data || 'accountant'));
+    });
+    return () => { cancelled = true; };
+  }, [company?.id]);
+  const isBusinessOwner = companyRole === 'business_owner';
 
   useEffect(() => {
     if (!isLoaded || !orgsLoaded) return;
@@ -18930,12 +19155,47 @@ export default function App() {
     });
   }, [user?.id, isLoaded, orgsLoaded, userMemberships?.data?.length]);
 
-  // Auto-open wizard when active company hasn't completed onboarding
+  // Auto-open the accountant onboarding wizard when active company hasn't completed setup.
+  // Accountant-only — the wizard checks only companies.onboarding_completed, with no
+  // awareness of who's viewing, so a business_owner must never be routed into it (they
+  // get the welcome→connect-bank landing below instead, regardless of this flag).
   useEffect(() => {
+    if (companyRole !== 'accountant') return;
     if (company?.id && company.onboarding_completed === false && !showWizard) {
       setShowWizard(true);
     }
-  }, [company?.id, company?.onboarding_completed]); // eslint-disable-line
+  }, [company?.id, company?.onboarding_completed, companyRole]); // eslint-disable-line
+
+  // business_owner landing: welcome summary → connect-bank, shown once (welcomed_at unset).
+  const [showWelcome, setShowWelcome] = useState(false);
+  useEffect(() => {
+    if (!company?.id || companyRole !== 'business_owner') { setShowWelcome(false); return; }
+    let cancelled = false;
+    supabase.from('user_company_access').select('welcomed_at')
+      .eq('company_id', company.id).eq('user_id', user?.id).maybeSingle()
+      .then(({ data }) => { if (!cancelled) setShowWelcome(!data?.welcomed_at); });
+    return () => { cancelled = true; };
+  }, [company?.id, companyRole, user?.id]);
+
+  // Safety net if `page` ever lands on an accountant-only id for a business_owner (e.g. a
+  // stale deep link) — the real boundary is server-side (RLS + RPC checks), this just
+  // avoids rendering a page that would show nothing but errors.
+  useEffect(() => {
+    if (!isBusinessOwner) return;
+    const accountantOnlyIds = new Set(
+      NAV.flatMap(g => g.items).filter(i => i.accountantOnly).map(i => i.id)
+    );
+    if (accountantOnlyIds.has(page) || page === 'opening-balances') setPage('overview');
+  }, [isBusinessOwner, page]); // eslint-disable-line
+
+  const dismissWelcome = async () => {
+    setShowWelcome(false);
+    if (company?.id && user?.id) {
+      await supabase.from('user_company_access')
+        .update({ welcomed_at: new Date().toISOString() })
+        .eq('company_id', company.id).eq('user_id', user.id);
+    }
+  };
 
   // Signed-in user with no company yet → show wizard full-screen
   if (isLoaded && user && onboarding) return (
@@ -19018,6 +19278,9 @@ export default function App() {
             initStep={wizardInitStep}
           />
         )}
+        {showWelcome && company && (
+          <WelcomeConnectBank company={company} onDone={dismissWelcome} />
+        )}
         {showAddCompany && user && (
           <AddCompanyModal
             user={user}
@@ -19063,7 +19326,11 @@ export default function App() {
             <div className="nav">
               {NAV.filter(group => {
                 // PRACTICE section: hidden entirely unless practice_dashboard is on
-                if (group.practiceOnly) return can(company, 'practice_dashboard');
+                if (group.practiceOnly) return can(company, 'practice_dashboard') && !isBusinessOwner;
+                if (group.accountantOnly) return !isBusinessOwner;
+                // A group with only accountant-only items disappears entirely for
+                // business_owner rather than rendering as an empty section.
+                if (isBusinessOwner && group.items.every(item => item.accountantOnly)) return false;
                 return true;
               }).map(group => {
                 const isOpen = openSections.has(group.section);
@@ -19074,7 +19341,7 @@ export default function App() {
                       <span className="nav-chevron">{isOpen ? "▾" : "▸"}</span>
                     </button>
                     <div className="nav-section-items" style={{ maxHeight: isOpen ? "400px" : "0" }}>
-                      {group.items.map(item => {
+                      {group.items.filter(item => !(isBusinessOwner && item.accountantOnly)).map(item => {
                         const locked = !!(item.feature && !can(company, item.feature));
                         const isActive = !locked && (item.action === 'practice'
                           ? showPractice
@@ -19176,9 +19443,9 @@ export default function App() {
                 <>
                   {page === "overview"     && <Overview period={period} selPeriod={selPeriod} setSelPeriod={setSelPeriod} appCurPeriod={appCurPeriod} companyId={company?.id} company={company} onNavigate={setPage} recurringPosted={recurringToast} recurringSkipped={recurringSkipped} onOpenWizard={openWizard} onDismissGetStarted={dismissGettingStarted} />}
                   {page === "cashflow"     && <CashFlow selPeriod={selPeriod} onNavigate={setPage} companyId={company?.id} company={company} />}
-                  {page === "invoices"     && <Invoices companyName={companyName} companyId={company?.id} company={company} onNavigate={setPage} />}
+                  {page === "invoices"     && <Invoices companyName={companyName} companyId={company?.id} company={company} onNavigate={setPage} isBusinessOwner={isBusinessOwner} />}
                   {page === "ar-import"   && <BulkARImport companyId={company?.id} />}
-                  {page === "ap-invoices"  && <APInvoices companyName={companyName} company={company} onNavigate={setPage} />}
+                  {page === "ap-invoices"  && <APInvoices companyName={companyName} company={company} onNavigate={setPage} isBusinessOwner={isBusinessOwner} />}
                   {page === "contracts"    && <Contracts companyName={companyName} companyId={company?.id} />}
                   <div style={{display: page === "expenses" ? "block" : "none"}}>
                     <Expenses companyName={companyName} isAdmin={!isReadOnly} companyId={company?.id} isActive={page === "expenses"} />
@@ -19187,7 +19454,7 @@ export default function App() {
                   {page === "checklist"    && <SuggestedJournals period={selPeriod || period} companyId={company?.id} company={company} />}
                   {page === "journals"     && <Journals period={period} selPeriod={selPeriod} companyName={companyName} companyId={company?.id} readOnly={isReadOnly} company={company} />}
                   {page === "gl"           && <GLReport period={period} selPeriod={selPeriod} companyId={company?.id} companyName={companyName} company={company} readOnly={isReadOnly} />}
-                  {page === "bank"         && <BankHub companyId={company?.id} company={company} />}
+                  {page === "bank"         && <BankHub companyId={company?.id} company={company} isBusinessOwner={isBusinessOwner} />}
                   <div style={{display: page === "bank-import" ? "block" : "none"}}>
                     <BankImportErrorBoundary><BankImport companyId={company?.id} isActive={page === "bank-import"} company={company} /></BankImportErrorBoundary>
                   </div>

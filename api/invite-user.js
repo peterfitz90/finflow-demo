@@ -1,9 +1,18 @@
+import { requireAccountant, AuthError } from './_auth.js';
+
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end();
 
-  const { orgId, emailAddress, role } = req.body;
-  if (!orgId || !emailAddress) {
-    return res.status(400).json({ error: 'orgId and emailAddress required' });
+  const { orgId, companyId, emailAddress, role } = req.body;
+  if (!orgId || !companyId || !emailAddress) {
+    return res.status(400).json({ error: 'orgId, companyId and emailAddress required' });
+  }
+
+  try {
+    await requireAccountant(req, companyId);
+  } catch (e) {
+    if (e instanceof AuthError) return res.status(e.status).json({ error: e.message });
+    throw e;
   }
 
   const secretKey = process.env.CLERK_SECRET_KEY?.trim();

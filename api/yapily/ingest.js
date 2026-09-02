@@ -434,42 +434,91 @@ export default withSentry(async function handler(req, res) {
     finalVats[row.extId]     = finalVat;
   }
 
+  // ── 13b. AP-bill suppression — don't blind-post a payment that might already belong to
+  // an open AP bill. Amount is the primary, dominant signal (bank-feed payee text is too
+  // noisy to lead on); date proximity is a secondary filter to avoid suppressing on a
+  // coincidental match against a long-stale bill. This is deliberately amount-tolerant
+  // (€0.50, matching the app's existing settlement tolerance) rather than exact-only —
+  // the point is to catch plausible matches, not just perfect ones. Suppressed
+  // transactions get no journal and stay unreconciled; the existing Reconciliation
+  // matching engine (which already scores ap_invoices candidates) picks them up from
+  // there — this reuses that machinery rather than duplicating it.
+  const AP_SUPPRESS_AMOUNT_TOLERANCE = 0.50;
+  const AP_SUPPRESS_DATE_WINDOW_DAYS = 30;
+
+  const { data: openApBills } = await db
+    .from('ap_invoices')
+    .select('id, gross_amount, amount, amount_paid, invoice_date')
+    .eq('company_id', company_id)
+    .in('status', ['pending', 'approved', 'part_paid']);
+
+  const openBillOutstanding = (openApBills ?? [])
+    .map(b => ({
+      id: b.id,
+      outstanding: Number(b.gross_amount ?? b.amount ?? 0) - Number(b.amount_paid ?? 0),
+      date: b.invoice_date,
+    }))
+    .filter(b => b.outstanding > 0.005);
+
+  const suppressedExtIds = new Set();
+  if (openBillOutstanding.length) {
+    for (const row of toProcess) {
+      if (row.amount >= 0) continue; // only outgoing payments can be paying a bill
+      const absAmt = Math.abs(row.amount);
+      const plausible = openBillOutstanding.some(b => {
+        if (Math.abs(absAmt - b.outstanding) > AP_SUPPRESS_AMOUNT_TOLERANCE) return false;
+        if (!b.date) return true; // no date on the bill — amount match alone is enough to be cautious
+        const days = Math.abs(new Date(row.date) - new Date(b.date)) / 86400000;
+        return days <= AP_SUPPRESS_DATE_WINDOW_DAYS;
+      });
+      if (plausible) suppressedExtIds.add(row.extId);
+    }
+  }
+  if (suppressedExtIds.size) {
+    console.log(`[yapily/ingest] suppressing ${suppressedExtIds.size} transaction(s) — plausible open AP bill match, routing to Reconciliation instead of auto-posting`);
+  }
+
   // ── 14. Build journal + bank_transaction rows and INSERT ──────────────────────
   const batchId = crypto.randomUUID();
   const now     = new Date().toISOString();
 
-  const journals = toProcess.map(row => {
-    const nominal = finalNominals[row.extId];
-    const isIn    = row.amount >= 0;
+  const journals = toProcess
+    .filter(row => !suppressedExtIds.has(row.extId))
+    .map(row => {
+      const nominal = finalNominals[row.extId];
+      const isIn    = row.amount >= 0;
+      return {
+        company_id,
+        date:                row.date,
+        description:         row.description,
+        reference:           row.extId,
+        debit_account:       isIn ? '1000' : nominal,
+        credit_account:      isIn ? nominal : '1000',
+        amount:              Math.abs(row.amount),
+        vat_code:            finalVats[row.extId],
+        import_batch_id:     batchId,
+        source_recurring_id: null,
+        is_accrual_reversal: false,
+      };
+    });
+
+  const btRows = toProcess.map(row => {
+    const suppressed = suppressedExtIds.has(row.extId);
     return {
       company_id,
-      date:                row.date,
-      description:         row.description,
-      reference:           row.extId,
-      debit_account:       isIn ? '1000' : nominal,
-      credit_account:      isIn ? nominal : '1000',
-      amount:              Math.abs(row.amount),
-      vat_code:            finalVats[row.extId],
-      import_batch_id:     batchId,
-      source_recurring_id: null,
-      is_accrual_reversal: false,
+      revolut_id:      row.extId,
+      date:            row.date,
+      description:     row.description,
+      amount:          row.amount,
+      currency:        row.currency,
+      balance:         null,
+      nominal_account: suppressed ? null : finalNominals[row.extId],
+      bank_format:     'yapily',
+      import_batch_id: batchId,
+      reconciled:      !suppressed,
+      reconciled_at:   suppressed ? null : now,
     };
   });
-
-  const btRows = toProcess.map(row => ({
-    company_id,
-    revolut_id:      row.extId,
-    date:            row.date,
-    description:     row.description,
-    amount:          row.amount,
-    currency:        row.currency,
-    balance:         null,
-    nominal_account: finalNominals[row.extId],
-    bank_format:     'yapily',
-    import_batch_id: batchId,
-    reconciled:      true,
-    reconciled_at:   now,
-  }));
 
   const { data: insertedJournals, error: jErr } = await db
     .from('journals').insert(journals).select('id, reference');
