@@ -4337,6 +4337,15 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
     setUnfiling(false);
   };
 
+  // Journal rows behind T1/T2, formatted as CSV lines — shared by the Sales and Purchases
+  // sections below so each ties out exactly to the box total it supports (same rows/sum
+  // the on-screen T1/T2 drill tables and boxes use).
+  const drillRowsToCSV = (rows) => rows.map(r => {
+    const { vat, net } = calcJournalVAT(r.amount, r.vat_code);
+    const sign = r._vatSign ?? 1;
+    return [r.date, r.description, `${r._acct} · ${nomName(r._acct)}`, r.vat_code, fmtEUR(Math.abs(Number(r.amount))), fmtEUR(sign * vat), fmtEUR(sign * net)];
+  });
+
   const exportCSV = () => {
     const slug = vatPeriod.label.replace(/\//g, '-').replace(/\s/g, '-');
     downloadCSV(`vat3-${slug}.csv`, [
@@ -4357,6 +4366,16 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
       [],
       ["Note", "Amounts are VAT-inclusive. VAT back-calculated as: amount × rate / (100 + rate)."],
       ["Note", "Verify all figures in your ROS account before filing."],
+      [],
+      ["SALES — T1 DETAIL (VAT on Sales)"],
+      ["Date", "Description", "Nominal", "VAT Code", "Gross (€)", "VAT (€)", "Net (€)"],
+      ...drillRowsToCSV(t1DrillRows),
+      ["", "", "", "", "", `Total VAT — ties to T1: ${fmtEUR(t1)}`, ""],
+      [],
+      ["PURCHASES — T2 DETAIL (VAT on Purchases)"],
+      ["Date", "Description", "Nominal", "VAT Code", "Gross (€)", "VAT (€)", "Net (€)"],
+      ...drillRowsToCSV(t2DrillRows),
+      ["", "", "", "", "", `Total VAT — ties to T2: ${fmtEUR(t2)}`, ""],
     ]);
   };
 
