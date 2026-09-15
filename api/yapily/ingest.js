@@ -7,6 +7,11 @@
 //   allow_pending {bool}    default false — pass true for sandbox (modelo-sandbox only returns PENDING)
 //   dry_run       {bool}    default false — return preview without posting anything
 //   limit         {number}  optional — only post the first N new transactions (after dedup)
+//   import_from   {string}  optional 'YYYY-MM-DD' — convenience lower bound for a clean
+//                            migration off prior CSV history. Narrows the Yapily fetch window
+//                            when later than the 90-day default AND is enforced as a hard
+//                            filter on the mapped results — but dedup (id + cross-source
+//                            content match) always runs regardless of whether this is set.
 //
 // SECURITY: YAPILY_APP_SECRET and consent tokens are SERVER-SIDE ONLY. Never sent to client.
 
@@ -47,6 +52,36 @@ function extractAmount(tx) {
 function extractCurrency(tx, accountCurrency) {
   if (tx.amount && typeof tx.amount === 'object' && tx.amount.currency) return tx.amount.currency;
   return tx.currency ?? tx.transactionAmount?.currency ?? accountCurrency ?? 'EUR';
+}
+
+// ── Cross-source duplicate detection ──────────────────────────────────────────
+// The feed's dedup key (Yapily tx.id) and CSV imports' dedup key (a synthetic hash — see
+// parseAIBCSV/aibHash in App.jsx) live in completely different namespaces, so an id-only
+// check can never catch the same real transaction arriving from both a prior CSV import and
+// the live feed. This normalizes descriptions well enough to compare across those two very
+// differently-formatted sources (AIB's feed transactionInformation is the same underlying
+// text as CSV's Description1/2/3, per buildDescription's comment above, but not byte-identical).
+function normDescForMatch(raw) {
+  return (raw || '')
+    .toLowerCase()
+    .replace(/[^a-z0-9 ]/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function descriptionsLikelyMatch(a, b) {
+  const na = normDescForMatch(a);
+  const nb = normDescForMatch(b);
+  if (!na || !nb) return false;
+  if (na === nb || na.includes(nb) || nb.includes(na)) return true;
+  // Token-overlap fallback — catches reordered/partially-truncated descriptions from
+  // differently-formatted sources without requiring a near-exact string match.
+  const wa = new Set(na.split(' ').filter(w => w.length > 2));
+  const wb = new Set(nb.split(' ').filter(w => w.length > 2));
+  if (!wa.size || !wb.size) return false;
+  let common = 0;
+  for (const w of wa) if (wb.has(w)) common++;
+  return common / Math.min(wa.size, wb.size) >= 0.5;
 }
 
 function buildDescription(tx) {
@@ -134,6 +169,11 @@ export default withSentry(async function handler(req, res) {
     // consulted when !dry_run — these are the values the user corrected in the Preview UI
     // and are the source of truth for what actually posts (see step 13 below).
     overrides     = {},
+    // Optional 'YYYY-MM-DD' — user-set lower bound for a clean migration off prior CSV
+    // history (e.g. "only import from the day after my last CSV row"). A convenience filter
+    // on top of dedup, not a replacement for it — dedup (step 7/7b below) always runs
+    // regardless of this being set.
+    import_from   = null,
   } = req.body ?? {};
 
   if (!company_id) return res.status(400).json({ error: 'company_id required' });
@@ -181,23 +221,63 @@ export default withSentry(async function handler(req, res) {
   }
 
   // ── 3. Fetch transactions across all accounts (90 days) ───────────────────────
-  const fromDate = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString().slice(0, 10);
+  // AIB's real Open Banking rail rejects a date-only `from` ("2026-06-16") as invalid —
+  // confirmed via the actual Yapily error body: "Pagination filter provided [from] with
+  // invalid date... Date should be in valid ISO 8601 format." Revolut's aggregator tolerates
+  // the truncated date; AIB enforces the full ISO 8601 datetime. Send the untruncated
+  // .toISOString() value to Yapily; keep the date-only form only for user-facing display.
+  const windowStart = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000);
+  // import_from narrows the fetch window when it's later than the 90-day default (no point
+  // asking Yapily for history we're only going to filter back out below); it can only move
+  // the window forward, never extend it earlier than what Yapily itself allows.
+  const importFromValid = /^\d{4}-\d{2}-\d{2}$/.test(import_from || '') ? import_from : null;
+  const importFromMs    = importFromValid ? new Date(`${importFromValid}T00:00:00.000Z`).getTime() : null;
+  const effectiveStart  = (importFromMs && importFromMs > windowStart.getTime()) ? new Date(importFromMs) : windowStart;
+  const fromDateTime = effectiveStart.toISOString();
+  const fromDate      = fromDateTime.slice(0, 10); // display-only — "90-day window from ..." / effective start
   const rawTxns  = [];
+  const accountErrors = []; // { account_id, status, message, issues, body } — for real institutions
+                             // like AIB that reject this call, the status code alone tells you
+                             // nothing; the body (data.message / data.issues) is what actually
+                             // explains why. Previously discarded entirely (console.warn + continue),
+                             // which is why an AIB-specific 400 was invisible until traced live.
 
   for (const account of accounts) {
     const { ok, status: s, data } = await yapilyGet(
-      `/accounts/${account.id}/transactions?from=${fromDate}&limit=500`,
+      `/accounts/${account.id}/transactions?from=${encodeURIComponent(fromDateTime)}&limit=500`,
       consentToken,
     );
     if (!ok) {
-      console.warn(`[yapily/ingest] transactions failed for account ${account.id}: ${s}`);
+      const errInfo = {
+        account_id: account.id,
+        status:     s,
+        message:    data?.message ?? null,
+        issues:     data?.issues ?? null,
+        body:       data ?? null,
+      };
+      accountErrors.push(errInfo);
+      console.error(`[yapily/ingest] transactions failed for account ${account.id}: HTTP ${s}`, JSON.stringify(data));
+      captureError(new Error(`Yapily transactions fetch failed: HTTP ${s} for account ${account.id}`), {
+        company_id, operation: 'yapily-ingest-transactions', account_id: account.id,
+        status: s, yapily_body: data,
+      });
       continue;
     }
     for (const tx of (data?.data ?? data ?? [])) {
       rawTxns.push({ tx, accountCurrency: account.currency });
     }
   }
-  console.log(`[yapily/ingest] fetched ${rawTxns.length} raw across ${accounts.length} accounts`);
+  console.log(`[yapily/ingest] fetched ${rawTxns.length} raw across ${accounts.length} accounts (${accountErrors.length} account(s) errored)`);
+
+  // If EVERY account's transactions call failed, this is a real fetch failure, not "no
+  // transactions" — surface it as an actual error instead of falling through to the generic
+  // zero-results message below, which would misreport a hard failure as an empty, healthy feed.
+  if (accountErrors.length > 0 && accountErrors.length === accounts.length) {
+    return res.status(502).json({
+      error: `Yapily rejected the transactions request for all ${accounts.length} account(s) — HTTP ${accountErrors[0].status}: ${accountErrors[0].message || 'no message returned'}`,
+      account_errors: accountErrors,
+    });
+  }
 
   // ── 4. Filter: BOOKED only (or PENDING when allow_pending) ───────────────────
   const allowed = allow_pending ? ['BOOKED', 'PENDING'] : ['BOOKED'];
@@ -212,6 +292,9 @@ export default withSentry(async function handler(req, res) {
       message: allow_pending
         ? 'No transactions returned by Yapily'
         : 'No BOOKED transactions — sandbox only returns PENDING. Retry with allow_pending:true.',
+      // Present when some (but not all) accounts errored — the accounts that DID succeed
+      // genuinely had zero matching transactions, but this failure shouldn't be silent either.
+      ...(accountErrors.length ? { account_errors: accountErrors } : {}),
     });
   }
 
@@ -223,7 +306,11 @@ export default withSentry(async function handler(req, res) {
     const desc     = buildDescription(tx);
     const extId    = tx.id || tx.transactionHash || null;
     return { extId, date, description: desc, amount, currency };
-  }).filter(r => r.extId && r.date); // drop any with no stable ID or date
+  })
+    .filter(r => r.extId && r.date) // drop any with no stable ID or date
+    // Defensive: import_from is a convenience bound on what gets IMPORTED, independent of
+    // (and enforced regardless of) exactly what Yapily's from= param happened to return.
+    .filter(r => !importFromValid || r.date >= importFromValid);
 
   // ── 6. CURRENCY GUARD — non-EUR transactions are skipped, not posted ──────────
   // The journals table has no currency column; amount is implicitly EUR.
@@ -237,31 +324,77 @@ export default withSentry(async function handler(req, res) {
     console.warn(`[yapily/ingest] skipping ${foreignSkipped.length} non-EUR transactions`);
   }
 
-  // ── 7. Dedup: skip any tx.id already in bank_transactions.revolut_id ─────────
-  // revolut_id is the external-ID column regardless of import source (legacy name).
-  // Yapily's tx.id is the stable dedup key.
+  // ── 7. Dedup (Tier 1 — exact id): skip any tx.id already in bank_transactions.revolut_id ──
+  // revolut_id is the external-ID column regardless of import source (legacy name). Cheap and
+  // exact — catches same-source re-imports (e.g. re-running the feed, or a repeat Preview).
+  // Does NOT catch cross-source overlap: a CSV import's revolut_id is a synthetic hash
+  // (aibHash(date|desc|amount|rowIndex) in App.jsx's parseAIBCSV) in a completely different
+  // namespace from Yapily's own tx.id — the two will never collide even for the identical
+  // real-world transaction. That's what Tier 2 below is for.
   const candidateIds = eurMapped.map(r => r.extId);
-  const { data: existing } = await db
+  const { data: existingById } = await db
     .from('bank_transactions')
     .select('revolut_id')
     .eq('company_id', company_id)
     .in('revolut_id', candidateIds);
 
-  const existingIds = new Set((existing ?? []).map(r => r.revolut_id));
-  const newTxns     = eurMapped.filter(r => !existingIds.has(r.extId));
-  const dupCount    = eurMapped.length - newTxns.length;
+  const existingIds   = new Set((existingById ?? []).map(r => r.revolut_id));
+  const afterIdDedup   = eurMapped.filter(r => !existingIds.has(r.extId));
+  const idDupCount     = eurMapped.length - afterIdDedup.length;
 
-  console.log(`[yapily/ingest] ${newTxns.length} new EUR, ${dupCount} dupes, ${foreignSkipped.length} foreign`);
+  // ── 7b. Dedup (Tier 2 — cross-source content match): date + amount + similar description ──
+  // Catches the case Tier 1 structurally cannot: the same real transaction already sitting in
+  // the ledger from a prior CSV import. Matched on attributes any source reliably has (date,
+  // amount, description) rather than a source-specific id. Requires an EXACT date+amount match
+  // (the strong signal) before even looking at description — two genuinely different €50
+  // payments on the same day only collide here if their descriptions are also similar.
+  const uniqueDates = [...new Set(afterIdDedup.map(r => r.date))];
+  let crossSourceDupes = [];
+  if (uniqueDates.length) {
+    const { data: sameDateExisting } = await db
+      .from('bank_transactions')
+      .select('date, amount, description, revolut_id, bank_format')
+      .eq('company_id', company_id)
+      .in('date', uniqueDates);
+
+    const byDateAmount = new Map(); // "date|amount" → existing rows
+    for (const row of (sameDateExisting ?? [])) {
+      const key = `${row.date}|${Number(row.amount).toFixed(2)}`;
+      if (!byDateAmount.has(key)) byDateAmount.set(key, []);
+      byDateAmount.get(key).push(row);
+    }
+
+    crossSourceDupes = afterIdDedup
+      .map(r => {
+        const key = `${r.date}|${Number(r.amount).toFixed(2)}`;
+        const candidates = byDateAmount.get(key) ?? [];
+        const match = candidates.find(c => descriptionsLikelyMatch(c.description, r.description));
+        return match ? { ...r, matched_revolut_id: match.revolut_id, matched_bank_format: match.bank_format } : null;
+      })
+      .filter(Boolean);
+  }
+  const crossSourceIds = new Set(crossSourceDupes.map(d => d.extId));
+  const newTxns        = afterIdDedup.filter(r => !crossSourceIds.has(r.extId));
+  const crossSourceDupCount = crossSourceDupes.length;
+  const dupCount             = idDupCount + crossSourceDupCount; // combined "already in ledger"
+
+  console.log(`[yapily/ingest] ${newTxns.length} new EUR, ${dupCount} dupes (${idDupCount} same-source id, ${crossSourceDupCount} cross-source content match), ${foreignSkipped.length} foreign`);
+  if (crossSourceDupCount) {
+    console.log('[yapily/ingest] cross-source duplicates (skipped):', JSON.stringify(crossSourceDupes.map(d => ({ date: d.date, amount: d.amount, description: d.description, matched_bank_format: d.matched_bank_format }))));
+  }
 
   if (!newTxns.length) {
     return res.status(200).json({
       dry_run,
-      imported:         0,
-      skipped:          dupCount,
-      pending_skipped:  pendingSkipped,
-      foreign_skipped:  foreignSkipped.length,
-      foreign_details:  foreignSkipped,
-      message:          'All EUR transactions already imported — feed is up to date.',
+      imported:              0,
+      skipped:               dupCount,
+      cross_source_skipped:  crossSourceDupCount,
+      cross_source_details:  crossSourceDupes,
+      pending_skipped:       pendingSkipped,
+      foreign_skipped:       foreignSkipped.length,
+      foreign_details:       foreignSkipped,
+      from_date:             fromDate,
+      message:               'All EUR transactions already imported — feed is up to date.',
     });
   }
 
@@ -389,16 +522,20 @@ export default withSentry(async function handler(req, res) {
   if (dry_run) {
     console.log(`[yapily/ingest] dry_run — previewing ${preview.length} transactions`);
     return res.status(200).json({
-      dry_run:         true,
+      dry_run:              true,
       preview,
-      total_new:       newTxns.length,      // total available to import
-      showing:         preview.length,
-      skipped:         dupCount,
-      pending_skipped: pendingSkipped,
-      foreign_skipped: foreignSkipped.length,
-      foreign_details: foreignSkipped,
-      from_date:       fromDate,
-      accounts:        accounts.length,
+      total_new:            newTxns.length,      // total available to import
+      showing:              preview.length,
+      skipped:              dupCount,
+      cross_source_skipped: crossSourceDupCount,
+      cross_source_details: crossSourceDupes,
+      pending_skipped:      pendingSkipped,
+      foreign_skipped:      foreignSkipped.length,
+      foreign_details:      foreignSkipped,
+      from_date:            fromDate,
+      import_from:          importFromValid,
+      accounts:             accounts.length,
+      ...(accountErrors.length ? { account_errors: accountErrors } : {}),
     });
   }
 
@@ -621,16 +758,20 @@ export default withSentry(async function handler(req, res) {
   console.log(`[yapily/ingest] done — imported ${toProcess.length}, skipped ${dupCount} dupes, ${foreignSkipped.length} foreign, ${pendingSkipped} pending`);
 
   return res.status(200).json({
-    dry_run:         false,
-    imported:        toProcess.length,
-    limited_out:     limitedOut,       // how many were held back by the limit
-    skipped:         dupCount,
-    pending_skipped: pendingSkipped,
-    foreign_skipped: foreignSkipped.length,
-    foreign_details: foreignSkipped,
-    batch_id:        batchId,
-    accounts:        accounts.length,
-    from_date:       fromDate,
-    rules_saved:     rulesSaved,
+    dry_run:              false,
+    imported:             toProcess.length,
+    limited_out:          limitedOut,       // how many were held back by the limit
+    skipped:              dupCount,
+    cross_source_skipped: crossSourceDupCount,
+    cross_source_details: crossSourceDupes,
+    pending_skipped:      pendingSkipped,
+    foreign_skipped:      foreignSkipped.length,
+    foreign_details:      foreignSkipped,
+    batch_id:             batchId,
+    accounts:             accounts.length,
+    from_date:            fromDate,
+    import_from:          importFromValid,
+    rules_saved:          rulesSaved,
+    ...(accountErrors.length ? { account_errors: accountErrors } : {}),
   });
 });

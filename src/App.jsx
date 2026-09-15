@@ -1,6 +1,6 @@
 ﻿import React, { useState, useEffect, useRef, useMemo, useCallback } from "react";
 import { createPortal } from "react-dom";
-import { useUser, useOrganizationList } from "@clerk/clerk-react";
+import { useUser, useOrganizationList, useClerk } from "@clerk/clerk-react";
 import { AuthGate, UserChip } from "./auth.jsx"
 import { supabase } from "./supabase.js"
 import { captureError } from "./sentry.js"
@@ -17,6 +17,29 @@ import {
   createInvoiceDraft, finaliseInvoice,
 } from './shared/invoice.js';
 
+// Resolves any pending business_owner invite for the CURRENTLY signed-in Clerk user
+// synchronously, instead of relying solely on the async organizationMembership.created
+// webhook (api/clerk/webhook.js) to have already written user_company_access by the time
+// company resolution runs. Used both by the normal company-resolution effect (App) and as
+// a last-ditch guard before OnboardingWizard creates a new company, so an invited user can
+// never be routed into "create your own company" while their real invite is still pending.
+// Best-effort — resolves to [] (not the resolved company ids) on any failure; callers fall
+// through to their existing behaviour.
+async function resolvePendingAccess() {
+  try {
+    const token = await window.Clerk?.session?.getToken();
+    if (!token) return [];
+    const res = await fetch('/api/resolve-pending-access', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+    });
+    if (!res.ok) return [];
+    const data = await res.json();
+    return data?.resolved || [];
+  } catch {
+    return [];
+  }
+}
 
 const GL_ACCOUNTS = [
   // Assets
@@ -1614,6 +1637,16 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
     setSaving(true); setErr(null);
     try {
       if (!wCo) {
+        // Belt-and-braces guard against creating a phantom company: the company-resolution
+        // effect in App already resolves any pending business_owner invite before onboarding
+        // is ever set true, so this should be rare — but it's the last line of defence right
+        // before the insert that would otherwise create a duplicate company for an invited
+        // user. If a pending invite resolves here, send them to their real company instead.
+        const resolved = await resolvePendingAccess();
+        if (resolved.length > 0) {
+          window.location.reload();
+          return;
+        }
         const { data, error } = await supabase.from('companies').insert({
           clerk_user_id:        user.id,
           name:                 s1.name.trim(),
@@ -3970,7 +4003,7 @@ function getVATPeriods(vatPeriodType, rosEfiler = false) {
   return periods;
 }
 
-function VATReturns({ company, onNavigate }) {
+function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
   const rosEfiler = company?.ros_efiler || false;
   const vatPeriods = getVATPeriods(company?.vat_period || 'bimonthly', rosEfiler);
 
@@ -3992,6 +4025,12 @@ function VATReturns({ company, onNavigate }) {
   const [markError,    setMarkError]    = useState(null);
   const [showXmlPanel, setShowXmlPanel] = useState(false);
   const [xmlReturnType, setXmlReturnType] = useState('0');
+  // Invoice-level VAT detail report — every sales (AR) and purchase (AP) invoice dated in
+  // the selected period, broken out by VAT rate. Read-only, so available to business_owner
+  // as well as accountant (see nav comment above).
+  const [arDetail,        setArDetail]        = useState([]); // one row per (AR invoice, vat_code)
+  const [apDetail,        setApDetail]        = useState([]); // one row per AP invoice
+  const [showInvDetail,   setShowInvDetail]   = useState(false);
 
   // Adjustment state — review-stage edits to T1/T2 before finalisation
   const [adjT1,        setAdjT1]        = useState('');
@@ -4031,41 +4070,113 @@ function VATReturns({ company, onNavigate }) {
     setDrillOpen(null);
     setShowExc(false);
     setShowRC(false);
-    Promise.all([
-      supabase.from('journals')
-        .select('id, date, description, reference, debit_account, credit_account, amount, vat_code')
-        .eq('company_id', company.id)
-        .gte('date', vatPeriod.start)
-        .lte('date', vatPeriod.end)
-        .order('date'),
-      supabase.from('ap_invoices')
-        .select('id, supplier, invoice_ref, invoice_date, amount, status')
-        .eq('company_id', company.id)
-        .in('status', ['pending', 'needs_review'])
-        .gte('invoice_date', vatPeriod.start)
-        .lte('invoice_date', vatPeriod.end),
-      supabase.from('bank_transactions')
-        .select('id, date, description, amount, settlement_type')
-        .eq('company_id', company.id)
-        .eq('reconciled', false)
-        .gte('date', vatPeriod.start)
-        .lte('date', vatPeriod.end),
-      supabase.from('invoices')
-        .select('id, invoice_number, client, issue_date')
-        .eq('company_id', company.id)
-        .eq('status', 'draft')
-        .gte('issue_date', vatPeriod.start)
-        .lte('issue_date', vatPeriod.end),
-    ]).then(([jRes, apRes, btRes, arRes]) => {
+    (async () => {
+      const [jRes, apRes, btRes, arRes, arInvRes, apInvRes] = await Promise.all([
+        supabase.from('journals')
+          .select('id, date, description, reference, debit_account, credit_account, amount, vat_code')
+          .eq('company_id', company.id)
+          .gte('date', vatPeriod.start)
+          .lte('date', vatPeriod.end)
+          .order('date'),
+        supabase.from('ap_invoices')
+          .select('id, supplier, invoice_ref, invoice_date, amount, status')
+          .eq('company_id', company.id)
+          .in('status', ['pending', 'needs_review'])
+          .gte('invoice_date', vatPeriod.start)
+          .lte('invoice_date', vatPeriod.end),
+        supabase.from('bank_transactions')
+          .select('id, date, description, amount, settlement_type')
+          .eq('company_id', company.id)
+          .eq('reconciled', false)
+          .gte('date', vatPeriod.start)
+          .lte('date', vatPeriod.end),
+        supabase.from('invoices')
+          .select('id, invoice_number, client, issue_date')
+          .eq('company_id', company.id)
+          .eq('status', 'draft')
+          .gte('issue_date', vatPeriod.start)
+          .lte('issue_date', vatPeriod.end),
+        // Full sales invoice list for the invoice-level VAT detail report — issued docs
+        // only (drafts/void excluded); credit notes included (shown/summed as negative).
+        supabase.from('invoices')
+          .select('id, invoice_number, invoice_ref, client, type, issue_date')
+          .eq('company_id', company.id)
+          .neq('status', 'draft').neq('status', 'void')
+          .gte('issue_date', vatPeriod.start)
+          .lte('issue_date', vatPeriod.end)
+          .order('issue_date'),
+        // Purchase invoice list for the same report — excludes needs_review/rejected,
+        // which aren't confirmed bills yet (mirrors the aged-creditors/supplier-spend filter).
+        supabase.from('ap_invoices')
+          .select('id, invoice_ref, supplier, invoice_date, vat_code, net_amount, vat_amount, gross_amount, amount')
+          .eq('company_id', company.id)
+          .neq('status', 'needs_review').neq('status', 'rejected')
+          .gte('invoice_date', vatPeriod.start)
+          .lte('invoice_date', vatPeriod.end)
+          .order('invoice_date'),
+      ]);
       setJournals(jRes.data || []);
       setPendingBills(apRes.data || []);
       setUnreconciledBt(btRes.data || []);
       setDraftArInvoices(arRes.data || []);
+
+      const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
+
+      // AR: group invoice_lines by (invoice, vat_code) so a multi-rate invoice shows one
+      // row per rate — the same breakdown Revenue expects on a VAT return backup schedule.
+      const arInvoices = arInvRes.data || [];
+      let lineRows = [];
+      if (arInvoices.length) {
+        const { data: lines } = await supabase.from('invoice_lines')
+          .select('invoice_id, vat_code, line_total, vat_amount, gross_total')
+          .in('invoice_id', arInvoices.map(i => i.id));
+        lineRows = lines || [];
+      }
+      const arGroups = {};
+      lineRows.forEach(l => {
+        const key = `${l.invoice_id}::${l.vat_code || 'NONE'}`;
+        if (!arGroups[key]) arGroups[key] = { invoice: arInvoices.find(i => i.id === l.invoice_id), vat_code: l.vat_code, net: 0, vat: 0, gross: 0 };
+        arGroups[key].net   += Number(l.line_total)  || 0;
+        arGroups[key].vat   += Number(l.vat_amount)  || 0;
+        arGroups[key].gross += Number(l.gross_total) || 0;
+      });
+      const arRows = Object.values(arGroups)
+        .filter(g => g.invoice)
+        .map(g => {
+          const isCN = g.invoice.type === 'credit_note';
+          const sign = isCN ? -1 : 1;
+          return {
+            id: `${g.invoice.id}-${g.vat_code || 'NONE'}`,
+            date: g.invoice.issue_date,
+            ref: g.invoice.invoice_number || g.invoice.invoice_ref || '—',
+            party: g.invoice.client || '—',
+            isCN,
+            vat_code: g.vat_code || 'NONE',
+            net: sign * r2(g.net), vat: sign * r2(g.vat), gross: sign * r2(g.gross),
+          };
+        })
+        .sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+      setArDetail(arRows);
+
+      // AP: each bill carries a single vat_code (see APInvoices form) — one row per invoice.
+      const apRows = (apInvRes.data || []).map(inv => {
+        const gross = Number(inv.gross_amount ?? inv.amount ?? 0);
+        const vat   = Number(inv.vat_amount ?? 0);
+        const net   = inv.net_amount != null ? Number(inv.net_amount) : (gross - vat);
+        return {
+          id: inv.id, date: inv.invoice_date,
+          ref: inv.invoice_ref || '—', party: inv.supplier || '—',
+          vat_code: inv.vat_code || 'NONE',
+          net: r2(net), vat: r2(vat), gross: r2(gross),
+        };
+      }).sort((a, b) => (a.date || '').localeCompare(b.date || ''));
+      setApDetail(apRows);
+
       const fr = filedMap[selVal];
       if (fr) { setE1(String(fr.e1 ?? 0)); setE2(String(fr.e2 ?? 0)); setEs1(String(fr.es1 ?? 0)); setEs2(String(fr.es2 ?? 0)); }
       else     { setE1('0'); setE2('0'); setEs1('0'); setEs2('0'); }
       setLoading(false);
-    });
+    })();
   }, [company?.id, selVal]); // eslint-disable-line
 
   // ── VAT computation ────────────────────────────────────────────────────────
@@ -4249,6 +4360,50 @@ function VATReturns({ company, onNavigate }) {
     ]);
   };
 
+  // ── Sales & Purchase VAT listing — invoice-level backup schedule ───────────
+  // Distinct from the T1/T2 drill tables above (which are journal/bank-sourced): this
+  // report lists the actual AR/AP invoice records dated in the period, by VAT rate —
+  // the schedule an accountant (or Revenue, on audit) expects behind a VAT3 return.
+  const invRateSummary = (() => {
+    const m = {};
+    const add = (side, row) => {
+      const key = row.vat_code || 'NONE';
+      if (!m[key]) m[key] = { vat_code: key, salesNet: 0, salesVat: 0, purchNet: 0, purchVat: 0 };
+      if (side === 'sales') { m[key].salesNet += row.net; m[key].salesVat += row.vat; }
+      else                  { m[key].purchNet += row.net; m[key].purchVat += row.vat; }
+    };
+    arDetail.forEach(r => add('sales', r));
+    apDetail.forEach(r => add('purchase', r));
+    return Object.values(m).sort((a, b) => a.vat_code.localeCompare(b.vat_code));
+  })();
+  const sumBy = (rows, key) => rows.reduce((s, r) => s + (Number(r[key]) || 0), 0);
+  const rateLabel = vc => INV_VAT_LABELS[vc] || vc;
+
+  const exportInvoiceDetail = () => {
+    const slug = vatPeriod.label.replace(/\//g, '-').replace(/\s/g, '-');
+    downloadCSV(`vat-invoice-detail-${slug}.csv`, [
+      ["Ledgrly — VAT Return Detail: Sales & Purchase Invoices", company?.name || "", vatPeriod.label],
+      ["Period", `${vatPeriod.start} to ${vatPeriod.end}`],
+      [],
+      ["SALES INVOICES"],
+      ["Date", "Invoice #", "Customer", "Type", "VAT Rate", "Net (€)", "VAT (€)", "Gross (€)"],
+      ...arDetail.map(r => [r.date, r.ref, r.party, r.isCN ? "Credit Note" : "Invoice", rateLabel(r.vat_code), fmtEUR(r.net), fmtEUR(r.vat), fmtEUR(r.gross)]),
+      ["", "", "", "", "Total", fmtEUR(sumBy(arDetail, 'net')), fmtEUR(sumBy(arDetail, 'vat')), fmtEUR(sumBy(arDetail, 'gross'))],
+      [],
+      ["PURCHASE INVOICES"],
+      ["Date", "Invoice #", "Supplier", "", "VAT Rate", "Net (€)", "VAT (€)", "Gross (€)"],
+      ...apDetail.map(r => [r.date, r.ref, r.party, "", rateLabel(r.vat_code), fmtEUR(r.net), fmtEUR(r.vat), fmtEUR(r.gross)]),
+      ["", "", "", "", "Total", fmtEUR(sumBy(apDetail, 'net')), fmtEUR(sumBy(apDetail, 'vat')), fmtEUR(sumBy(apDetail, 'gross'))],
+      [],
+      ["SUMMARY BY VAT RATE"],
+      ["VAT Rate", "Sales Net (€)", "Sales VAT (€)", "Purchases Net (€)", "Purchases VAT (€)"],
+      ...invRateSummary.map(g => [rateLabel(g.vat_code), fmtEUR(g.salesNet), fmtEUR(g.salesVat), fmtEUR(g.purchNet), fmtEUR(g.purchVat)]),
+      [],
+      ["Note", "Sales rows are per invoice line grouped by VAT rate — an invoice with mixed rates appears as multiple rows."],
+      ["Note", "Credit notes are shown as negative amounts and are included in the totals above."],
+    ]);
+  };
+
   // ── Sub-components ─────────────────────────────────────────────────────────
   const VATBox = ({ label, title, value, color, sub, drill }) => (
     <div
@@ -4274,7 +4429,7 @@ function VATReturns({ company, onNavigate }) {
       <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: "var(--border)", borderRadius: "var(--radius-card) var(--radius-card) 0 0" }} />
       <div style={{ fontSize: 10, fontFamily: "'Source Code Pro',monospace", fontWeight: 700, color: "var(--text-faint)", letterSpacing: "0.08em", marginBottom: 2 }}>{label}</div>
       <div style={{ fontSize: 11, color: "var(--text-muted)", marginBottom: 8 }}>{title}</div>
-      {isLocked
+      {(isLocked || isBusinessOwner)
         ? <div style={{ fontSize: 22, fontWeight: 700, color: "var(--text)", fontVariantNumeric: "tabular-nums" }}>{fmtEUR(Number(value))}</div>
         : <input type="number" value={value} onChange={e => onChange(e.target.value)} disabled={isLocked}
             style={{ width: "100%", fontSize: 18, fontWeight: 700, background: "transparent", border: "none", borderBottom: "1px solid var(--border)", color: "var(--text)", padding: "2px 0", fontVariantNumeric: "tabular-nums", outline: "none" }} />
@@ -4296,7 +4451,7 @@ function VATReturns({ company, onNavigate }) {
         <div className="card-header">
           <span className="card-title">{title}</span>
           <span style={{ fontSize: 10, color: "var(--text-faint)", fontFamily: "Source Code Pro,monospace" }}>
-            {rows.length} journals · click box to close{!isLocked && ' · click VAT code to fix at source'}
+            {rows.length} journals · click box to close{!isLocked && !isBusinessOwner && ' · click VAT code to fix at source'}
           </span>
         </div>
         {rows.length === 0 ? (
@@ -4340,9 +4495,9 @@ function VATReturns({ company, onNavigate }) {
                           </span>
                         ) : (
                           <span
-                            title={isLocked ? undefined : 'Click to fix VAT code at source'}
-                            onClick={isLocked ? undefined : () => { setFixSrc(j.id); setFixSrcCode(j.vat_code || 'STD23'); }}
-                            style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.06em", padding: "2px 6px", borderRadius: 4, background: "var(--surface-2)", color: "var(--accent)", cursor: isLocked ? 'default' : 'pointer', userSelect: 'none' }}
+                            title={(isLocked || isBusinessOwner) ? undefined : 'Click to fix VAT code at source'}
+                            onClick={(isLocked || isBusinessOwner) ? undefined : () => { setFixSrc(j.id); setFixSrcCode(j.vat_code || 'STD23'); }}
+                            style={{ fontSize: 10, fontWeight: 700, letterSpacing: "0.06em", padding: "2px 6px", borderRadius: 4, background: "var(--surface-2)", color: "var(--accent)", cursor: (isLocked || isBusinessOwner) ? 'default' : 'pointer', userSelect: 'none' }}
                           >
                             {j.vat_code || '—'}
                           </span>
@@ -4482,6 +4637,17 @@ function VATReturns({ company, onNavigate }) {
           {!loading && <ExportDropdown onCSV={exportCSV} onPrint={() => window.print()} />}
           {!loading && (
             <button
+              onClick={() => setShowInvDetail(v => !v)}
+              title="Sales & purchase invoices for this period, broken out by VAT rate"
+              style={{ fontSize: 11, fontFamily: 'Source Code Pro,monospace', padding: '4px 10px', borderRadius: 6, border: '1px solid var(--border)', background: showInvDetail ? 'rgba(16,185,129,0.12)' : 'var(--surface)', color: showInvDetail ? 'var(--accent)' : 'var(--text-muted)', cursor: 'pointer', whiteSpace: 'nowrap' }}
+            >
+              Invoice Detail {showInvDetail ? '▲' : '↓'}
+            </button>
+          )}
+          {/* VAT3 XML is a filing-prep tool — hidden for business_owner, who can never
+              actually file (vat_returns writes are RLS-blocked for that role). */}
+          {!loading && !isBusinessOwner && (
+            <button
               onClick={() => setShowXmlPanel(v => !v)}
               style={{ fontSize: 11, fontFamily: 'Source Code Pro,monospace', padding: '4px 10px', borderRadius: 6, border: '1px solid var(--border)', background: showXmlPanel ? 'rgba(184,134,11,0.12)' : 'var(--surface)', color: showXmlPanel ? 'var(--warn)' : 'var(--text-muted)', cursor: 'pointer', whiteSpace: 'nowrap' }}
             >
@@ -4530,12 +4696,12 @@ function VATReturns({ company, onNavigate }) {
         <>
           <div style={{ fontSize: 12, background: "var(--accent-dim)", border: "1px solid rgba(52,211,153,0.3)", borderRadius: "var(--radius-card)", padding: "10px 14px", marginBottom: 12, color: "var(--accent)", display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
             <span>✓ Period locked — filed {new Date(filedReturn.filed_at).toLocaleDateString("en-IE", { day: "numeric", month: "short", year: "numeric" })}. Figures are read-only.</span>
-            <button
+            {!isBusinessOwner && <button
               onClick={() => setUnfileConfirm(true)}
               style={{ fontSize: 11, fontFamily: 'Source Code Pro,monospace', padding: '3px 10px', borderRadius: 5, border: '1px solid rgba(52,211,153,0.35)', background: 'rgba(52,211,153,0.08)', color: 'var(--accent)', cursor: 'pointer', whiteSpace: 'nowrap', flexShrink: 0 }}
             >
               Unfile
-            </button>
+            </button>}
           </div>
           {unfileConfirm && createPortal(
             <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
@@ -4562,6 +4728,113 @@ function VATReturns({ company, onNavigate }) {
         </>
       )}
 
+      {/* ── Sales & Purchase VAT Listing — invoice-level backup schedule ── */}
+      {!loading && showInvDetail && (
+        <div className="card" style={{ marginBottom: 14 }}>
+          <div className="card-header">
+            <span className="card-title">Sales & Purchase VAT Listing — {vatPeriod?.label}</span>
+            <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+              <span style={{ fontSize: 10, color: "var(--text-faint)", fontFamily: "Source Code Pro,monospace" }}>
+                {arDetail.length} sales row{arDetail.length !== 1 ? 's' : ''} · {apDetail.length} purchase row{apDetail.length !== 1 ? 's' : ''}
+              </span>
+              {(arDetail.length > 0 || apDetail.length > 0) && <ExportDropdown onCSV={exportInvoiceDetail} onPrint={() => window.print()} />}
+            </div>
+          </div>
+
+          <div style={{ padding: "10px 16px 2px", fontSize: 11, fontWeight: 700, color: "var(--accent)", letterSpacing: "0.05em" }}>SALES INVOICES</div>
+          {arDetail.length === 0 ? (
+            <div style={{ padding: "6px 16px 14px", fontSize: 12, color: "var(--text-muted)" }}>No sales invoices issued in this period.</div>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table className="gl-table">
+                <thead>
+                  <tr><th>Date</th><th>Invoice #</th><th>Customer</th><th style={{ textAlign: "center" }}>VAT Rate</th><th className="r">Net</th><th className="r">VAT</th><th className="r">Gross</th></tr>
+                </thead>
+                <tbody>
+                  {arDetail.map(r => (
+                    <tr key={r.id}>
+                      <td style={{ fontFamily: "Source Code Pro,monospace", fontSize: 11 }}>{r.date}</td>
+                      <td style={{ fontSize: 12 }}>{r.ref}{r.isCN && <span style={{ marginLeft: 6, fontSize: 9, fontWeight: 700, color: "var(--warn)", background: "var(--warn-dim)", padding: "1px 5px", borderRadius: 4 }}>CN</span>}</td>
+                      <td style={{ fontSize: 12, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.party}>{r.party}</td>
+                      <td style={{ textAlign: "center" }}><span style={{ fontSize: 10, fontWeight: 700, padding: "2px 6px", borderRadius: 4, background: "var(--surface-2)", color: "var(--accent)" }}>{rateLabel(r.vat_code)}</span></td>
+                      <td className="r" style={{ fontFamily: "Source Code Pro,monospace", fontSize: 11 }}>{fmtEUR(r.net)}</td>
+                      <td className="r" style={{ fontFamily: "Source Code Pro,monospace", fontSize: 11 }}>{fmtEUR(r.vat)}</td>
+                      <td className="r" style={{ fontFamily: "Source Code Pro,monospace", fontSize: 11, fontWeight: 600 }}>{fmtEUR(r.gross)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr style={{ background: "var(--surface-2)", fontWeight: 700, borderTop: "2px solid var(--border)" }}>
+                    <td colSpan={4} style={{ padding: "8px 10px", fontSize: 11, color: "var(--text-muted)" }}>Total</td>
+                    <td className="r" style={{ fontFamily: "Source Code Pro,monospace", fontSize: 12, padding: "8px 10px" }}>{fmtEUR(sumBy(arDetail, 'net'))}</td>
+                    <td className="r" style={{ fontFamily: "Source Code Pro,monospace", fontSize: 12, padding: "8px 10px" }}>{fmtEUR(sumBy(arDetail, 'vat'))}</td>
+                    <td className="r" style={{ fontFamily: "Source Code Pro,monospace", fontSize: 12, padding: "8px 10px", color: "var(--accent)" }}>{fmtEUR(sumBy(arDetail, 'gross'))}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          )}
+
+          <div style={{ padding: "14px 16px 2px", fontSize: 11, fontWeight: 700, color: "var(--warn)", letterSpacing: "0.05em", borderTop: "1px solid var(--border)" }}>PURCHASE INVOICES</div>
+          {apDetail.length === 0 ? (
+            <div style={{ padding: "6px 16px 14px", fontSize: 12, color: "var(--text-muted)" }}>No purchase invoices dated in this period.</div>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table className="gl-table">
+                <thead>
+                  <tr><th>Date</th><th>Invoice #</th><th>Supplier</th><th style={{ textAlign: "center" }}>VAT Rate</th><th className="r">Net</th><th className="r">VAT</th><th className="r">Gross</th></tr>
+                </thead>
+                <tbody>
+                  {apDetail.map(r => (
+                    <tr key={r.id}>
+                      <td style={{ fontFamily: "Source Code Pro,monospace", fontSize: 11 }}>{r.date}</td>
+                      <td style={{ fontSize: 12 }}>{r.ref}</td>
+                      <td style={{ fontSize: 12, maxWidth: 220, overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={r.party}>{r.party}</td>
+                      <td style={{ textAlign: "center" }}><span style={{ fontSize: 10, fontWeight: 700, padding: "2px 6px", borderRadius: 4, background: "var(--surface-2)", color: "var(--warn)" }}>{rateLabel(r.vat_code)}</span></td>
+                      <td className="r" style={{ fontFamily: "Source Code Pro,monospace", fontSize: 11 }}>{fmtEUR(r.net)}</td>
+                      <td className="r" style={{ fontFamily: "Source Code Pro,monospace", fontSize: 11 }}>{fmtEUR(r.vat)}</td>
+                      <td className="r" style={{ fontFamily: "Source Code Pro,monospace", fontSize: 11, fontWeight: 600 }}>{fmtEUR(r.gross)}</td>
+                    </tr>
+                  ))}
+                </tbody>
+                <tfoot>
+                  <tr style={{ background: "var(--surface-2)", fontWeight: 700, borderTop: "2px solid var(--border)" }}>
+                    <td colSpan={4} style={{ padding: "8px 10px", fontSize: 11, color: "var(--text-muted)" }}>Total</td>
+                    <td className="r" style={{ fontFamily: "Source Code Pro,monospace", fontSize: 12, padding: "8px 10px" }}>{fmtEUR(sumBy(apDetail, 'net'))}</td>
+                    <td className="r" style={{ fontFamily: "Source Code Pro,monospace", fontSize: 12, padding: "8px 10px" }}>{fmtEUR(sumBy(apDetail, 'vat'))}</td>
+                    <td className="r" style={{ fontFamily: "Source Code Pro,monospace", fontSize: 12, padding: "8px 10px", color: "var(--warn)" }}>{fmtEUR(sumBy(apDetail, 'gross'))}</td>
+                  </tr>
+                </tfoot>
+              </table>
+            </div>
+          )}
+
+          {invRateSummary.length > 0 && (
+            <div style={{ padding: "14px 16px 16px", borderTop: "1px solid var(--border)" }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: "var(--text-muted)", letterSpacing: "0.05em", marginBottom: 8 }}>SUMMARY BY VAT RATE</div>
+              <div style={{ overflowX: "auto" }}>
+                <table className="gl-table">
+                  <thead>
+                    <tr><th>VAT Rate</th><th className="r">Sales Net</th><th className="r">Sales VAT</th><th className="r">Purchases Net</th><th className="r">Purchases VAT</th></tr>
+                  </thead>
+                  <tbody>
+                    {invRateSummary.map(g => (
+                      <tr key={g.vat_code}>
+                        <td style={{ fontSize: 12 }}>{rateLabel(g.vat_code)}</td>
+                        <td className="r" style={{ fontFamily: "Source Code Pro,monospace", fontSize: 11 }}>{fmtEUR(g.salesNet)}</td>
+                        <td className="r" style={{ fontFamily: "Source Code Pro,monospace", fontSize: 11, color: "var(--accent)" }}>{fmtEUR(g.salesVat)}</td>
+                        <td className="r" style={{ fontFamily: "Source Code Pro,monospace", fontSize: 11 }}>{fmtEUR(g.purchNet)}</td>
+                        <td className="r" style={{ fontFamily: "Source Code Pro,monospace", fontSize: 11, color: "var(--warn)" }}>{fmtEUR(g.purchVat)}</td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
       {loading ? (
         <div style={{ fontSize: 13, color: "var(--text-muted)", padding: "24px 0" }}>Loading VAT data…</div>
       ) : (
@@ -4584,8 +4857,9 @@ function VATReturns({ company, onNavigate }) {
               sub={t4Final > 0 ? "Refund from Revenue · click to drill" : "No repayment"} />
           </div>
 
-          {/* Adjust T1 / T2 toggle buttons (review stage only) */}
-          {!isLocked && (
+          {/* Adjust T1 / T2 toggle buttons (review stage only) — accountant-only, since */}
+          {/* these feed the vat_returns figures only the accountant can file. */}
+          {!isLocked && !isBusinessOwner && (
             <div style={{ display: 'flex', gap: 8, marginBottom: 10 }}>
               <button
                 onClick={() => setShowAdj(v => v === 'T1' ? null : 'T1')}
@@ -4816,8 +5090,9 @@ function VATReturns({ company, onNavigate }) {
             </div>
           )}
 
-          {/* Mark as Filed */}
-          {!isLocked && (
+          {/* Mark as Filed — accountant-only; vat_returns writes are RLS-blocked for
+              business_owner server-side regardless, but the button is hidden too. */}
+          {!isLocked && !isBusinessOwner && (
             <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 10, marginTop: 8, flexWrap: "wrap" }}>
               {hardBlockCount > 0 && (
                 <span style={{ fontSize: 11, color: "var(--danger)" }}>
@@ -17795,6 +18070,31 @@ function YapilyBankFeeds({ companyId, company, isActive, isBusinessOwner = false
   const [connecting,     setConnecting]     = useState(false);
   const [yapilyEnv,      setYapilyEnv]      = useState(null); // 'production' | 'sandbox' | null
   const [disconnecting,  setDisconnecting]  = useState(null); // connection id being disconnected
+  // Revoked connections accumulate from testing/reconnects and just clutter the list — hidden
+  // by default (display-only; the rows and their imported transactions are untouched) with a
+  // toggle to reveal them for audit purposes.
+  const [showRevoked,    setShowRevoked]    = useState(false);
+  // "Import from" — a convenience bound for a clean migration off prior CSV history (e.g. only
+  // pull feed transactions from the day after the last CSV row). Cross-source dedup (server-
+  // side, ingest.js) always runs regardless of this — this is on top of that safety net, not a
+  // substitute for it. Defaults to the day after this company's latest existing transaction
+  // (any source) once that's known; '' means no bound (use the normal 90-day window).
+  const [importFromDate, setImportFromDate] = useState('');
+  const [importFromDefault, setImportFromDefault] = useState(null); // the suggested default, for the placeholder/hint
+
+  useEffect(() => {
+    if (!companyId) return;
+    let cancelled = false;
+    supabase.from('bank_transactions').select('date').eq('company_id', companyId)
+      .order('date', { ascending: false }).limit(1).maybeSingle()
+      .then(({ data }) => {
+        if (cancelled || !data?.date) return;
+        const next = new Date(data.date);
+        next.setDate(next.getDate() + 1);
+        setImportFromDefault(next.toISOString().slice(0, 10));
+      });
+    return () => { cancelled = true; };
+  }, [companyId]);
 
   // Pick up bank_connected / bank_error from URL params (set by callback redirect)
   useEffect(() => {
@@ -17889,7 +18189,7 @@ function YapilyBankFeeds({ companyId, company, isActive, isBusinessOwner = false
       const res  = await fetch('/api/yapily/ingest', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ company_id: companyId, allow_pending: isSandbox, dry_run: true }),
+        body: JSON.stringify({ company_id: companyId, allow_pending: isSandbox, dry_run: true, import_from: importFromDate || null }),
       });
       const data = await res.json();
       if (!res.ok) { setError(data.error || 'Preview failed'); }
@@ -17947,6 +18247,7 @@ function YapilyBankFeeds({ companyId, company, isActive, isBusinessOwner = false
           dry_run:       false,
           limit:         importLimit || null,
           overrides:     previewEdits,
+          import_from:   importFromDate || null,
         }),
       });
       const data = await res.json();
@@ -18036,6 +18337,9 @@ function YapilyBankFeeds({ companyId, company, isActive, isBusinessOwner = false
   if (!can(company, 'bank_feeds')) {
     return <div style={{ maxWidth: 520, margin: '40px auto' }}><UpgradeCard feature="bank_feeds" inline /></div>;
   }
+
+  const revokedConnections = connections.filter(c => c.status === 'revoked');
+  const visibleConnections = showRevoked ? connections : connections.filter(c => c.status !== 'revoked');
 
   return (
     <div className="fade-up" style={{ maxWidth: 800 }}>
@@ -18158,10 +18462,45 @@ function YapilyBankFeeds({ companyId, company, isActive, isBusinessOwner = false
         </div>
       )}
 
+      {/* Import-from-date — convenience bound for a clean migration off prior CSV history.
+          Cross-source dedup on the server always runs regardless of this; it's on top, not
+          instead of, that safety net. */}
+      {visibleConnections.length > 0 && (
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginBottom: 10, fontSize: 11, color: 'var(--text-muted)' }}>
+          <label htmlFor="yapily-import-from" style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            Import transactions from
+            <input
+              id="yapily-import-from"
+              type="date"
+              value={importFromDate}
+              onChange={e => setImportFromDate(e.target.value)}
+              placeholder={importFromDefault || undefined}
+              style={{ padding: '3px 6px', borderRadius: 6, border: '1px solid var(--border)', background: 'var(--surface-2)', color: 'var(--text)', fontSize: 11 }}
+            />
+          </label>
+          {importFromDefault && !importFromDate && (
+            <button
+              onClick={() => setImportFromDate(importFromDefault)}
+              style={{ background: 'none', border: 'none', color: 'var(--accent)', cursor: 'pointer', fontSize: 11, textDecoration: 'underline', padding: 0 }}
+            >
+              Use {fmtD(importFromDefault)} (day after your last imported transaction)
+            </button>
+          )}
+          {importFromDate && (
+            <button
+              onClick={() => setImportFromDate('')}
+              style={{ background: 'none', border: 'none', color: 'var(--text-faint)', cursor: 'pointer', fontSize: 11, textDecoration: 'underline', padding: 0 }}
+            >
+              Clear (use default 90-day window)
+            </button>
+          )}
+        </div>
+      )}
+
       {/* Connections list */}
       {loading ? (
         <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-faint)', fontSize: 12 }}>Loading…</div>
-      ) : connections.length === 0 ? (
+      ) : visibleConnections.length === 0 ? (
         <div style={{ background: 'var(--surface)', border: '2px dashed var(--border)', borderRadius: 'var(--radius-card)', padding: '40px 32px', textAlign: 'center' }}>
           <div style={{ fontSize: 32, opacity: 0.3, marginBottom: 12 }}>⬡</div>
           <div style={{ fontSize: 14, fontWeight: 600, color: 'var(--text)', marginBottom: 8 }}>No bank connections yet</div>
@@ -18171,9 +18510,29 @@ function YapilyBankFeeds({ companyId, company, isActive, isBusinessOwner = false
           <button className="btn btn-p btn-sm" onClick={openPicker} disabled={connecting || instLoading}>
             {connecting ? 'Redirecting…' : 'Choose bank →'}
           </button>
+          {revokedConnections.length > 0 && (
+            <div style={{ marginTop: 16 }}>
+              <button
+                onClick={() => setShowRevoked(true)}
+                style={{ background: 'none', border: 'none', color: 'var(--text-faint)', cursor: 'pointer', fontSize: 11, textDecoration: 'underline' }}
+              >
+                Show {revokedConnections.length} revoked connection{revokedConnections.length !== 1 ? 's' : ''}
+              </button>
+            </div>
+          )}
         </div>
       ) : (
         <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-card)', overflow: 'hidden' }}>
+          {revokedConnections.length > 0 && (
+            <div style={{ padding: '8px 12px', borderBottom: '1px solid var(--border)', display: 'flex', justifyContent: 'flex-end' }}>
+              <button
+                onClick={() => setShowRevoked(s => !s)}
+                style={{ background: 'none', border: 'none', color: 'var(--text-faint)', cursor: 'pointer', fontSize: 11, textDecoration: 'underline' }}
+              >
+                {showRevoked ? `Hide revoked connections` : `Show ${revokedConnections.length} revoked connection${revokedConnections.length !== 1 ? 's' : ''}`}
+              </button>
+            </div>
+          )}
           <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
             <thead>
               <tr style={{ borderBottom: '1px solid var(--border)' }}>
@@ -18183,7 +18542,7 @@ function YapilyBankFeeds({ companyId, company, isActive, isBusinessOwner = false
               </tr>
             </thead>
             <tbody>
-              {connections.map(c => {
+              {visibleConnections.map(c => {
                 const state = connectionState(c);
                 const busy  = !!syncing || confirming || !!disconnecting;
                 return (
@@ -18258,10 +18617,35 @@ function YapilyBankFeeds({ companyId, company, isActive, isBusinessOwner = false
             {preview.from_date && <span> · 90-day window from {preview.from_date}</span>}
           </div>
 
+          {/* Per-account fetch failures — some accounts can error while others succeed, so
+              this must never be silent even when the overall preview still shows results. */}
+          {preview.account_errors?.length > 0 && (
+            <div style={{ background: 'var(--danger-dim)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 8, padding: '8px 12px', marginBottom: 12, fontSize: 11, color: 'var(--danger)' }}>
+              <strong>{preview.account_errors.length} account{preview.account_errors.length !== 1 ? 's' : ''} failed to fetch transactions:</strong>{' '}
+              {preview.account_errors.map(e => `HTTP ${e.status}${e.message ? ` — ${e.message}` : ''}`).join('; ')}
+            </div>
+          )}
+
           {/* Non-EUR foreign transactions callout */}
           {preview.foreign_details?.length > 0 && (
             <div style={{ background: 'var(--warn-dim)', border: '1px solid rgba(251,191,36,0.3)', borderRadius: 8, padding: '8px 12px', marginBottom: 12, fontSize: 11, color: 'var(--warn)' }}>
               <strong>Non-EUR transactions excluded:</strong> {preview.foreign_details.map(f => `${f.currency} ${f.amount > 0 ? '+' : ''}${f.amount}`).join(', ')}
+            </div>
+          )}
+
+          {/* Cross-source duplicates — matched an existing transaction from a DIFFERENT source
+              (e.g. a prior CSV import) on date + amount + description, not by id. This is the
+              main visibility the dedup safety net needs: without it, "already in ledger" alone
+              doesn't tell the user WHY something that looks new to the feed was actually skipped. */}
+          {preview.cross_source_skipped > 0 && (
+            <div style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 8, padding: '8px 12px', marginBottom: 12, fontSize: 11, color: 'var(--text-muted)' }}>
+              <strong>{preview.cross_source_skipped} transaction{preview.cross_source_skipped !== 1 ? 's' : ''} matched an existing CSV-imported transaction</strong> (skipped — same date, amount and description):
+              <ul style={{ margin: '4px 0 0', paddingLeft: 18 }}>
+                {preview.cross_source_details.slice(0, 8).map((d, i) => (
+                  <li key={i}>{fmtD(d.date)} · {d.amount.toFixed(2)} · {d.description}</li>
+                ))}
+                {preview.cross_source_details.length > 8 && <li>…and {preview.cross_source_details.length - 8} more</li>}
+              </ul>
             </div>
           )}
 
@@ -18375,6 +18759,12 @@ function YapilyBankFeeds({ companyId, company, isActive, isBusinessOwner = false
           {syncResult.message && (
             <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 12 }}>{syncResult.message}</div>
           )}
+          {syncResult.account_errors?.length > 0 && (
+            <div style={{ background: 'var(--danger-dim)', border: '1px solid rgba(239,68,68,0.3)', borderRadius: 8, padding: '8px 12px', marginBottom: 12, fontSize: 11, color: 'var(--danger)' }}>
+              <strong>{syncResult.account_errors.length} account{syncResult.account_errors.length !== 1 ? 's' : ''} failed to fetch transactions:</strong>{' '}
+              {syncResult.account_errors.map(e => `HTTP ${e.status}${e.message ? ` — ${e.message}` : ''}`).join('; ')}
+            </div>
+          )}
           <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
             <div style={{ background: 'var(--accent-dim)', border: '1px solid rgba(52,211,153,0.3)', borderRadius: 8, padding: '10px 16px', minWidth: 100, textAlign: 'center' }}>
               <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--accent)' }}>{syncResult.imported ?? 0}</div>
@@ -18383,6 +18773,9 @@ function YapilyBankFeeds({ companyId, company, isActive, isBusinessOwner = false
             <div style={{ background: 'var(--surface-2)', border: '1px solid var(--border)', borderRadius: 8, padding: '10px 16px', minWidth: 100, textAlign: 'center' }}>
               <div style={{ fontSize: 22, fontWeight: 700, color: 'var(--text-muted)' }}>{syncResult.skipped ?? 0}</div>
               <div style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 2 }}>already in ledger</div>
+              {syncResult.cross_source_skipped > 0 && (
+                <div style={{ fontSize: 9, color: 'var(--text-faint)', marginTop: 2 }}>({syncResult.cross_source_skipped} matched a prior CSV import)</div>
+              )}
             </div>
             {(syncResult.foreign_skipped ?? 0) > 0 && (
               <div style={{ background: 'var(--warn-dim)', border: '1px solid rgba(251,191,36,0.3)', borderRadius: 8, padding: '10px 16px', minWidth: 100, textAlign: 'center' }}>
@@ -18833,7 +19226,11 @@ const NAV = [
     // accountantOnly items below are hidden from business_owner in the sidebar AND blocked
     // server-side (RLS on vat_returns; see [[business_owner_rls_write_restrictions]] and
     // [[user_is_accountant]]) — not just a UI hide.
-    { id: "vat-returns", icon: "§",  label: "VAT Returns", feature: "vat_returns", accountantOnly: true },
+    // vat-returns is deliberately NOT accountantOnly: business_owner can view the page and
+    // pull the sales/purchase VAT listing (read-only) — filing actions inside VATReturns
+    // are still individually gated on isBusinessOwner, and the vat_returns TABLE writes
+    // (mark filed / unfile) remain RLS-blocked server-side regardless of this UI change.
+    { id: "vat-returns", icon: "§",  label: "VAT Returns", feature: "vat_returns" },
     { id: "compliance",  icon: "⊙", label: "Calendar",     feature: "compliance"  },
     { id: "checklist",   icon: "☑", label: "Month End",    feature: "month_end",   badge: true, accountantOnly: true },
   ]},
@@ -18866,6 +19263,7 @@ const NAV = [
 
 export default function App() {
   const { user, isLoaded } = useUser();
+  const { signOut } = useClerk();
   const { isLoaded: orgsLoaded, userMemberships } = useOrganizationList({
     userMemberships: { pageSize: 50 },
   });
@@ -19129,21 +19527,33 @@ export default function App() {
   }, [company?.id]);
   const isBusinessOwner = companyRole === 'business_owner';
 
+  // Bumped by the zeroCompanyCheck safety net below when a delayed resolvePendingAccess
+  // retry succeeds, to force the company-resolution effect to re-run and pick up the
+  // newly-granted access (user?.id/isLoaded alone wouldn't change in that case).
+  const [resolveNonce, setResolveNonce] = useState(0);
+
   useEffect(() => {
-    if (!isLoaded || !orgsLoaded) return;
+    if (!isLoaded) return;
     if (!user) { setCompanyLoading(false); return; }
     setCompanyLoading(true);
 
-    const orgIds = (userMemberships?.data || []).map(m => m.organization.id).filter(Boolean);
-
-    let query = supabase.from("companies").select("*");
-    if (orgIds.length > 0) {
-      query = query.or(`clerk_user_id.eq.${user.id},clerk_org_id.in.(${orgIds.join(',')})`);
-    } else {
-      query = query.eq("clerk_user_id", user.id);
-    }
-
-    query.then(({ data }) => {
+    // RLS already returns exactly the companies this user can access — direct ownership
+    // (companies.clerk_user_id) or user_company_access membership, either role — so no
+    // manual filtering against Clerk's own client-side org list is needed. That legacy
+    // .or(clerk_user_id/clerk_org_id) filter predated user_company_access and never knew
+    // about it: it was the actual cause of a business_owner resolving to zero companies
+    // (Clerk's org list not reflecting their membership the way the filter expected) and
+    // landing in the ungated onboarding wizard instead of their own company. One source of
+    // truth now. Also drops the prior dependency on orgsLoaded/userMemberships timing.
+    //
+    // resolvePendingAccess() runs FIRST and is awaited: a just-accepted business_owner
+    // invite is granted synchronously here rather than depending on the async Clerk
+    // webhook having already landed, so the companies query below reliably sees it instead
+    // of racing it (see [[resolve-pending-access]] — was the root cause of an invited user
+    // landing in the create-company wizard and creating a phantom company).
+    (async () => {
+      await resolvePendingAccess();
+      const { data } = await supabase.from("companies").select("*");
       if (!data || data.length === 0) {
         setOnboarding(true);
       } else {
@@ -19152,8 +19562,45 @@ export default function App() {
         setOnboarding(false);
       }
       setCompanyLoading(false);
-    });
-  }, [user?.id, isLoaded, orgsLoaded, userMemberships?.data?.length]);
+    })();
+  }, [user?.id, isLoaded, resolveNonce]);
+
+  // Zero companies resolved could mean two very different things: a genuinely new
+  // accountant who hasn't created their first company yet (show the create-company
+  // wizard), or an invited user (business_owner or colleague) hitting a resolution hiccup
+  // — they already have access via user_company_access, just not reflected yet. There's no
+  // company to check a role against at this point, so this is a lightweight, role-agnostic
+  // side check: does this user have ANY user_company_access row at all? If so, they're
+  // clearly not someone who needs the "create a company" flow.
+  //
+  // Safety net for the residual race (resolvePendingAccess above hit a transient failure —
+  // network hiccup — rather than there truly being no invite): before concluding "new", make
+  // one more resolve attempt (surfaced as the 'pending' state — "setting up your access…"),
+  // and only fall through to 'new' if a short wait afterward still shows no access.
+  const [zeroCompanyCheck, setZeroCompanyCheck] = useState(null); // null (checking) | 'new' | 'has_access' | 'pending'
+  useEffect(() => {
+    if (!onboarding || !user?.id) { setZeroCompanyCheck(null); return; }
+    let cancelled = false;
+    (async () => {
+      const { count } = await supabase.from('user_company_access')
+        .select('company_id', { count: 'exact', head: true }).eq('user_id', user.id);
+      if (cancelled) return;
+      if (count > 0) { setZeroCompanyCheck('has_access'); return; }
+
+      setZeroCompanyCheck('pending');
+      const resolved = await resolvePendingAccess();
+      if (cancelled) return;
+      if (resolved.length > 0) { setResolveNonce(n => n + 1); return; } // re-run resolution above
+
+      await new Promise(r => setTimeout(r, 1500));
+      if (cancelled) return;
+      const { count: count2 } = await supabase.from('user_company_access')
+        .select('company_id', { count: 'exact', head: true }).eq('user_id', user.id);
+      if (cancelled) return;
+      setZeroCompanyCheck(count2 > 0 ? 'has_access' : 'new');
+    })();
+    return () => { cancelled = true; };
+  }, [onboarding, user?.id]);
 
   // Auto-open the accountant onboarding wizard when active company hasn't completed setup.
   // Accountant-only — the wizard checks only companies.onboarding_completed, with no
@@ -19177,6 +19624,25 @@ export default function App() {
     return () => { cancelled = true; };
   }, [company?.id, companyRole, user?.id]);
 
+  // Reset company/role-derived state the instant the signed-in user actually changes (not
+  // on initial mount), so a previous session's company/role/wizard state is never visible
+  // even briefly during a login transition. Without this, e.g. companyRole's effect above
+  // (keyed only on company?.id) wouldn't re-fire until the resolution effect's async fetch
+  // happens to land on a different company.id — leaving the OLD user's role/company on
+  // screen until then. RLS independently scopes every real query regardless, so this is a
+  // display-staleness fix, not a data-access one.
+  const prevUserIdRef = useRef(user?.id);
+  useEffect(() => {
+    if (prevUserIdRef.current === user?.id) return;
+    prevUserIdRef.current = user?.id;
+    setCompany(null);
+    setCompanies([]);
+    setCompanyRole(null);
+    setShowWizard(false);
+    setWizardInitStep(1);
+    setShowWelcome(false);
+  }, [user?.id]);
+
   // Safety net if `page` ever lands on an accountant-only id for a business_owner (e.g. a
   // stale deep link) — the real boundary is server-side (RLS + RPC checks), this just
   // avoids rendering a page that would show nothing but errors.
@@ -19197,7 +19663,47 @@ export default function App() {
     }
   };
 
-  // Signed-in user with no company yet → show wizard full-screen
+  // Signed-in user with no company resolved — hold render while the has-access check runs,
+  // so an invited user never flashes into the accountant wizard even briefly.
+  if (isLoaded && user && onboarding && zeroCompanyCheck === null) return <style>{CSS}</style>;
+
+  // Has user_company_access rows but resolved to zero companies here — a hiccup, not a
+  // brand-new accountant. Never trap them behind an unrelated wizard.
+  if (isLoaded && user && onboarding && zeroCompanyCheck === 'has_access') return (
+    <>
+      <style>{CSS}</style>
+      <div style={{ position: 'fixed', inset: 0, background: 'var(--bg)', zIndex: 500, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ textAlign: 'center', maxWidth: 380, padding: 24 }}>
+          <div style={{ fontSize: 15, fontWeight: 700, marginBottom: 8 }}>Having trouble loading your account</div>
+          <div style={{ fontSize: 13, color: 'var(--muted)', lineHeight: 1.6, marginBottom: 20 }}>
+            This can happen right after accepting an invite. Try again, or sign out and back in.
+          </div>
+          <div style={{ display: 'flex', gap: 10, justifyContent: 'center' }}>
+            <button className="btn btn-p" style={{ fontSize: 13 }} onClick={() => window.location.reload()}>Try again</button>
+            <button className="btn btn-s" style={{ fontSize: 13 }} onClick={() => signOut()}>Sign out</button>
+          </div>
+        </div>
+      </div>
+    </>
+  );
+
+  // resolvePendingAccess's initial pass (in the company-resolution effect) came back empty
+  // and the user_company_access count is still zero — making one more resolve attempt plus
+  // a short wait before concluding this is genuinely a new accountant, so a slow-to-land
+  // invite grant shows this holding message rather than the create-company wizard.
+  if (isLoaded && user && onboarding && zeroCompanyCheck === 'pending') return (
+    <>
+      <style>{CSS}</style>
+      <div style={{ position: 'fixed', inset: 0, background: 'var(--bg)', zIndex: 500, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
+        <div style={{ textAlign: 'center', maxWidth: 380, padding: 24 }}>
+          <div style={{ fontSize: 13, color: 'var(--text-muted)' }}>Setting up your access…</div>
+        </div>
+      </div>
+    </>
+  );
+
+  // Genuinely new accountant — no company, no access anywhere → create-company wizard.
+  // Dismissable via sign-out now, not a true dead end.
   if (isLoaded && user && onboarding) return (
     <>
       <style>{CSS}</style>
@@ -19206,7 +19712,7 @@ export default function App() {
         company={null}
         onComplete={(c) => { setCompany(c); setCompanies([c]); setOnboarding(false); }}
         onUpdate={() => {}}
-        onDismiss={() => {}}
+        onDismiss={() => signOut()}
         initStep={1}
       />
     </>
@@ -19380,6 +19886,9 @@ export default function App() {
               <button className="sidebar-footer-btn" onClick={() => setPage("settings")}>
                 <span style={{fontSize:13}}>⚙</span> Settings
               </button>
+              <button className="sidebar-footer-btn" onClick={() => signOut()}>
+                <span style={{fontSize:13}}>⏻</span> Sign Out
+              </button>
             </div>
           </div>
           <div className="main">
@@ -19462,7 +19971,7 @@ export default function App() {
                   {page === "reconciliation" && <Reconciliation companyId={company?.id} onNavigate={setPage} />}
                   {page === "revenue"        && <RevenueFeed companyId={company?.id} company={company} />}
                   {page === "compliance"      && <Compliance company={company} onNavigate={setPage} />}
-                  {page === "vat-returns"    && <VATReturns company={company} onNavigate={setPage} />}
+                  {page === "vat-returns"    && <VATReturns company={company} onNavigate={setPage} isBusinessOwner={isBusinessOwner} />}
                   {page === "fin-statements" && <FinancialStatements company={company} companyName={companyName} />}
                   {page === "payroll-import"    && <BrightPayImporter companyId={company?.id} />}
                   {page === "opening-balances" && <OpeningBalances companyId={company?.id} />}
