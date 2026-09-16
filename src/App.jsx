@@ -3404,9 +3404,15 @@ function APInvoices({ companyName = "Company", company, onNavigate, isBusinessOw
       nominal_code: nomCode,
       vat_code: vatCode,
     }).select().single();
-    if (error) { captureError(error, { company_id: cid, operation: 'ap-bill-save' }); setSaveError(`Save failed: ${error.message}`); return; }
+    if (error) {
+      captureError(error, { company_id: cid, operation: 'ap-bill-save' });
+      setSaveError(/period is locked/i.test(error.message)
+        ? "This bill's date falls in a locked (filed) period — pick a date in an open period, or unlock the period first."
+        : `Save failed: ${error.message}`);
+      return;
+    }
     // Post accrual journal: Dr Expense / Cr Trade Creditors (2000)
-    await supabase.from('journals').insert({
+    const { error: jErr } = await supabase.from('journals').insert({
       company_id: cid, date: form.invoice_date,
       description: `Bill ${form.invoice_ref} — ${form.supplier}`,
       debit_account: nomCode, credit_account: '2000',
@@ -3414,6 +3420,16 @@ function APInvoices({ companyName = "Company", company, onNavigate, isBusinessOw
       reference: form.invoice_ref,
       source_recurring_id: null, is_accrual_reversal: false,
     });
+    if (jErr) {
+      // The ap_invoices row above already saved but has no journal behind it now — remove
+      // it rather than leave an orphaned bill (a blocked insert must not look like a save).
+      await supabase.from('ap_invoices').delete().eq('id', inserted.id).eq('company_id', cid);
+      captureError(jErr, { company_id: cid, operation: 'ap-bill-save-journal' });
+      setSaveError(/period is locked/i.test(jErr.message)
+        ? "This bill's date falls in a locked (filed) period — pick a date in an open period, or unlock the period first."
+        : `Save failed: ${jErr.message}`);
+      return;
+    }
     setInvoices((prev) => [...prev, inserted].sort((a, b) => new Date(a.due_date) - new Date(b.due_date)));
     if (nomCode >= '1500' && nomCode <= '1549') setAssetCapturePrompt(true);
     setForm(emptyForm());
@@ -15458,17 +15474,33 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
   const approve = async exp => {
     if (!companyId) return;
     setApprovingId(exp.id);
+    setSaveError(null);
     const db = supabase;
     const creditAcct = ["company_card","bank_transfer"].includes(exp.payment_method) ? "1000" : "2000";
     const ref = `EXP-${exp.id.slice(0, 6).toUpperCase()}`;
-    const { data: jnl } = await db.from("journals").insert({
+    const { data: jnl, error: jErr } = await db.from("journals").insert({
       company_id: companyId, date: sanitiseDate(exp.receipt_date),
       description: `Expense: ${exp.supplier}${exp.description ? ` — ${exp.description}` : ""}`,
       debit_account: exp.nominal_account, credit_account: creditAcct,
       amount: exp.amount, reference: ref,
     }).select("id").single();
+    if (jErr) {
+      // Do NOT mark the expense posted — a blocked insert must not look like a success.
+      captureError(jErr, { company_id: companyId, operation: 'expense-approve' });
+      setSaveError(/period is locked/i.test(jErr.message)
+        ? "This expense's receipt date falls in a locked (filed) period — it can't be posted until the period is unlocked."
+        : `Approval failed: ${jErr.message}`);
+      setApprovingId(null);
+      return;
+    }
     const journalId = jnl?.id || null;
-    await db.from("expenses").update({ status: "posted", journal_id: journalId }).eq("id", exp.id);
+    const { error: updErr } = await db.from("expenses").update({ status: "posted", journal_id: journalId }).eq("id", exp.id);
+    if (updErr) {
+      captureError(updErr, { company_id: companyId, operation: 'expense-approve-status' });
+      setSaveError(`Journal posted (ref ${ref}) but marking the expense as posted failed: ${updErr.message} — please refresh and check before re-approving.`);
+      setApprovingId(null);
+      return;
+    }
     setExpenses(p => p.map(e => e.id === exp.id ? { ...e, status: "posted", journal_id: journalId } : e));
     setApprovingId(null);
   };
@@ -15613,6 +15645,11 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
           <span className="card-title">{view==="mine" ? "My Expense Claims" : "All Expense Claims"}</span>
           <span style={{fontSize:10,color:"var(--dim)",fontFamily:"Source Code Pro,monospace"}}>{displayed.length} expense{displayed.length!==1?"s":""}</span>
         </div>
+        {/* Approve/reject errors surface here too (not just the submit form above) — an
+            approval blocked by a locked period must be visible wherever the Approve button is. */}
+        {saveError && !showForm && (
+          <div style={{margin:"10px 16px 0",fontSize:12,color:"var(--red)",background:"rgba(220,38,38,0.06)",border:"1px solid rgba(220,38,38,0.2)",borderRadius:2,padding:"7px 11px"}}>{saveError}</div>
+        )}
         {loading ? (
           <div style={{padding:"20px 16px",fontSize:13,color:"var(--dim)"}}>Loading expenses…</div>
         ) : displayed.length === 0 ? (
@@ -17638,54 +17675,33 @@ function FixedAssets({ companyId, company, selPeriod }) {
     if (!disposalAsset || !disposalForm.date) { setDisposalErr('Date is required.'); return; }
     setDisposalPosting(true); setDisposalErr(null);
     try {
-      const { ad, nbv, gain } = dispPreview;
-      const proc   = parseFloat(disposalForm.proceeds) || 0;
-      const ref    = `DISP-${disposalAsset.id.slice(0, 6)}`;
-      const jIds   = [];
-      // Row 1: clear accumulated depreciation
-      if (ad > 0.005) {
-        const { data: j } = await supabase.from('journals').insert({
-          company_id: companyId, date: disposalForm.date,
-          description: `Disposal — ${disposalAsset.name} — clear accum dep`,
-          debit_account: disposalAsset.accum_dep_nominal, credit_account: disposalAsset.asset_nominal,
-          amount: Math.round(ad * 100) / 100, reference: ref, vat_code: null, is_accrual_reversal: false,
-        }).select('id').single();
-        if (j?.id) jIds.push(j.id);
-      }
-      // Row 2: record proceeds (Dr bank / Cr asset cost)
-      if (proc > 0.005) {
-        const { data: j } = await supabase.from('journals').insert({
-          company_id: companyId, date: disposalForm.date,
-          description: `Disposal — ${disposalAsset.name} — proceeds`,
-          debit_account: disposalForm.proceeds_nominal || '1000', credit_account: disposalAsset.asset_nominal,
-          amount: Math.round(proc * 100) / 100, reference: ref, vat_code: null, is_accrual_reversal: false,
-        }).select('id').single();
-        if (j?.id) jIds.push(j.id);
-      }
-      // Row 3: gain or loss
-      const absGL = Math.abs(gain);
-      if (absGL > 0.005) {
-        const isGain = gain > 0;
-        const { data: j } = await supabase.from('journals').insert({
-          company_id: companyId, date: disposalForm.date,
-          description: `Disposal — ${disposalAsset.name} — ${isGain ? 'gain on disposal' : 'loss on disposal'}`,
-          debit_account:  isGain ? disposalAsset.asset_nominal : '6910',
-          credit_account: isGain ? '4200' : disposalAsset.asset_nominal,
-          amount: Math.round(absGL * 100) / 100, reference: ref, vat_code: null, is_accrual_reversal: false,
-        }).select('id').single();
-        if (j?.id) jIds.push(j.id);
-      }
-      // Mark asset disposed
-      const { error } = await supabase.from('fixed_assets').update({
-        status: 'disposed', disposal_date: disposalForm.date,
-        disposal_proceeds: proc, disposal_journal_ids: jIds,
-      }).eq('id', disposalAsset.id).eq('company_id', companyId);
-      if (error) throw error;
+      const { ad, gain } = dispPreview;
+      const proc = parseFloat(disposalForm.proceeds) || 0;
+      // All three journal legs + the fixed_assets status update happen atomically inside
+      // post_asset_disposal (one DB transaction) — a period-lock rejection on any leg
+      // rolls back the whole call, instead of leaving the asset "disposed" with some or
+      // all of its journals missing (the previous 3-independent-calls version's bug).
+      const { data, error } = await supabase.rpc('post_asset_disposal', {
+        p_company_id:       companyId,
+        p_asset_id:         disposalAsset.id,
+        p_date:             disposalForm.date,
+        p_accum_dep:        Math.round(ad * 100) / 100,
+        p_proceeds:         Math.round(proc * 100) / 100,
+        p_proceeds_nominal: disposalForm.proceeds_nominal || '1000',
+        p_gain:             Math.round(gain * 100) / 100,
+      });
+      if (error) throw new Error(error.message);
+      if (data?.error) throw new Error(data.error);
+      const jIds = data?.journal_ids || [];
       setAssets(prev => prev.map(a => a.id === disposalAsset.id
         ? { ...a, status: 'disposed', disposal_date: disposalForm.date, disposal_proceeds: proc, disposal_journal_ids: jIds }
         : a));
       setShowDisposal(false); setDisposalAsset(null);
-    } catch (e) { setDisposalErr(e.message); }
+    } catch (e) {
+      setDisposalErr(/period is locked/i.test(e.message)
+        ? "This disposal's date falls in a locked (filed) period — pick a date in an open period, or unlock the period first."
+        : e.message);
+    }
     setDisposalPosting(false);
   };
 
