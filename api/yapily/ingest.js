@@ -332,11 +332,21 @@ export default withSentry(async function handler(req, res) {
   // namespace from Yapily's own tx.id — the two will never collide even for the identical
   // real-world transaction. That's what Tier 2 below is for.
   const candidateIds = eurMapped.map(r => r.extId);
-  const { data: existingById } = await db
+  const { data: existingById, error: existingByIdErr } = await db
     .from('bank_transactions')
     .select('revolut_id')
     .eq('company_id', company_id)
     .in('revolut_id', candidateIds);
+
+  // Dedup is the only safety net against duplicate postings — if we can't verify what's
+  // already in the ledger, every candidate is untrustworthy at once (this is a whole-query
+  // failure, not a per-row one, so there's nothing granular to skip-and-flag). Abort the
+  // entire ingest rather than silently treating an unreadable dedup check as "nothing exists
+  // yet" and risk re-posting already-imported transactions.
+  if (existingByIdErr) {
+    captureError(existingByIdErr, { company_id, operation: 'yapily-ingest-dedup-tier1' });
+    return res.status(500).json({ error: 'Dedup check failed — ingest aborted to avoid risking duplicate transactions: ' + existingByIdErr.message });
+  }
 
   const existingIds   = new Set((existingById ?? []).map(r => r.revolut_id));
   const afterIdDedup   = eurMapped.filter(r => !existingIds.has(r.extId));
@@ -351,11 +361,16 @@ export default withSentry(async function handler(req, res) {
   const uniqueDates = [...new Set(afterIdDedup.map(r => r.date))];
   let crossSourceDupes = [];
   if (uniqueDates.length) {
-    const { data: sameDateExisting } = await db
+    const { data: sameDateExisting, error: sameDateErr } = await db
       .from('bank_transactions')
       .select('date, amount, description, revolut_id, bank_format')
       .eq('company_id', company_id)
       .in('date', uniqueDates);
+
+    if (sameDateErr) {
+      captureError(sameDateErr, { company_id, operation: 'yapily-ingest-dedup-tier2' });
+      return res.status(500).json({ error: 'Dedup check failed — ingest aborted to avoid risking duplicate transactions: ' + sameDateErr.message });
+    }
 
     const byDateAmount = new Map(); // "date|amount" → existing rows
     for (const row of (sameDateExisting ?? [])) {
