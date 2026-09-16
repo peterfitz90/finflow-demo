@@ -4060,6 +4060,7 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
   const [fixSrcSaving, setFixSrcSaving] = useState(false);
   // Unfile state
   const [unfileConfirm, setUnfileConfirm] = useState(false);
+  const [unfileReason,  setUnfileReason]  = useState('');
   const [unfiling,      setUnfiling]      = useState(false);
 
   const vatPeriod  = vatPeriods.find(p => p.val === selVal) ?? vatPeriods[0];
@@ -4332,23 +4333,30 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
       setMarkError(error.message);
     } else {
       setFiledMap(prev => ({ ...prev, [selVal]: payload }));
+      // Best-effort audit log: only writes a 'refiled' row if this period was previously
+      // unfiled (superseded_at set) — a normal first-time filing logs nothing. Never blocks
+      // or fails the filing itself if the log call errors.
+      supabase.rpc('log_vat_refile', { p_company_id: company.id, p_period_val: selVal })
+        .then(({ error: logErr }) => { if (logErr) console.warn('[vat] log_vat_refile failed:', logErr.message); });
     }
     setMarkingFiled(false);
   };
 
   const unfile = async () => {
     if (!company?.id || !filedReturn || unfiling) return;
-    setUnfiling(true);
-    const now = new Date().toISOString();
-    const { error } = await supabase.from('vat_returns')
-      .update({ status: 'draft', superseded_at: now })
-      .eq('company_id', company.id)
-      .eq('period_val', selVal);
+    if (!unfileReason.trim()) { setMarkError('A reason is required to unfile a period.'); return; }
+    setUnfiling(true); setMarkError(null);
+    const { data, error } = await supabase.rpc('unfile_vat_return', {
+      p_company_id: company.id, p_period_val: selVal, p_reason: unfileReason.trim(),
+    });
     if (error) {
       setMarkError(error.message);
+    } else if (data?.error) {
+      setMarkError(data.error);
     } else {
-      setFiledMap(prev => ({ ...prev, [selVal]: { ...filedReturn, status: 'draft', superseded_at: now } }));
+      setFiledMap(prev => ({ ...prev, [selVal]: { ...filedReturn, status: 'draft', superseded_at: data.superseded_at } }));
       setUnfileConfirm(false);
+      setUnfileReason('');
     }
     setUnfiling(false);
   };
@@ -4742,15 +4750,29 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
             <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.65)', zIndex: 1000, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>
               <div style={{ background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-card)', padding: '24px 28px', maxWidth: 460, width: '90%' }}>
                 <div style={{ fontWeight: 700, fontSize: 15, color: 'var(--text)', marginBottom: 10 }}>Unfile {vatPeriod?.label}?</div>
-                <div style={{ fontSize: 13, color: 'var(--text-muted)', lineHeight: 1.6, marginBottom: 18 }}>
+                <div style={{ fontSize: 13, color: 'var(--text-muted)', lineHeight: 1.6, marginBottom: 14 }}>
                   This unlocks {vatPeriod?.label}. Journals become editable and the filed snapshot is marked superseded — only do this if the return was not actually submitted to Revenue, or needs amendment.
                 </div>
+                <div style={{ marginBottom: 14 }}>
+                  <div style={{ fontSize: 10, color: unfileReason.trim() ? 'var(--text-faint)' : 'var(--danger)', marginBottom: 4, fontFamily: 'Source Code Pro,monospace', letterSpacing: '0.06em' }}>
+                    REASON FOR UNFILING — required
+                  </div>
+                  <textarea
+                    placeholder="e.g. Filed with wrong T2 figure; correcting before re-submitting to ROS…"
+                    value={unfileReason}
+                    onChange={e => setUnfileReason(e.target.value)}
+                    rows={2}
+                    style={{ width: '100%', fontSize: 12, background: 'var(--surface-2)', border: `1px solid ${unfileReason.trim() ? 'var(--border)' : 'rgba(239,68,68,0.4)'}`, borderRadius: 4, color: 'var(--text)', padding: '6px 8px', resize: 'vertical', outline: 'none', boxSizing: 'border-box' }}
+                  />
+                  <div style={{ fontSize: 10, color: 'var(--text-faint)', marginTop: 4 }}>Logged to this period's reopen history along with your name and the time.</div>
+                </div>
+                {markError && <div style={{ fontSize: 11, color: 'var(--danger)', marginBottom: 10 }}>{markError}</div>}
                 <div style={{ display: 'flex', gap: 10, justifyContent: 'flex-end' }}>
-                  <button className="btn btn-s" onClick={() => setUnfileConfirm(false)}>Cancel</button>
+                  <button className="btn btn-s" onClick={() => { setUnfileConfirm(false); setUnfileReason(''); setMarkError(null); }}>Cancel</button>
                   <button
                     className="btn btn-p btn-sm"
                     onClick={unfile}
-                    disabled={unfiling}
+                    disabled={unfiling || !unfileReason.trim()}
                     style={{ background: 'var(--danger)', borderColor: 'var(--danger)' }}
                   >
                     {unfiling ? 'Unlocking…' : 'Unfile — Unlock Period'}
