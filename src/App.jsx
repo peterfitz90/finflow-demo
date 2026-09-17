@@ -3340,6 +3340,17 @@ function APInvoices({ companyName = "Company", company, onNavigate, isBusinessOw
 
   const companyId = company?.id ?? null;
   const { accounts: coaAccounts } = useChartOfAccounts(companyId);
+  // Item 2 Stage 3 — resolve the AP payment nominal from the company's designated
+  // default AP payment account, falling back to its first active bank account.
+  const [bankAccounts, setBankAccounts] = useState([]);
+  useEffect(() => {
+    if (!companyId) return;
+    supabase.from('bank_accounts').select('id, nominal_code').eq('company_id', companyId).eq('is_active', true)
+      .then(({ data }) => setBankAccounts(data || []));
+  }, [companyId]);
+  const apPaymentNominal = bankAccounts.find(a => a.id === company?.default_ap_payment_account_id)?.nominal_code
+    || bankAccounts[0]?.nominal_code
+    || undefined;
   const apEmail      = company?.mailbox_slug ? `bills-${company.mailbox_slug}@inbound.ledgrly.ie` : null;
   const baseCurrency = company?.base_currency || company?.currency || "EUR";
   const fmt    = (n) => fmtCurrency(n, baseCurrency);
@@ -3441,7 +3452,7 @@ function APInvoices({ companyName = "Company", company, onNavigate, isBusinessOw
     e.stopPropagation();
     const paidAmt = Number(inv.gross_amount || inv.amount || 0);
     try {
-      await markApBillPaid(companyId, inv.id, paidAmt);
+      await markApBillPaid(companyId, inv.id, paidAmt, undefined, apPaymentNominal);
       // Provisional, not final — mark_ap_bill_paid now sets awaiting_bank_match, not paid.
       // It becomes 'paid' once the matching bank transaction is confirmed against it.
       setInvoices(prev => prev.map(i => i.id === inv.id ? { ...i, status: 'awaiting_bank_match', amount_paid: paidAmt } : i));

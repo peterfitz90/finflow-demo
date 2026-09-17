@@ -50,12 +50,13 @@ export async function approveApBill(bill) {
   if (data?.error) throw new Error(data.error);
 }
 
-export async function markApBillPaid(companyId, billId, paidAmt, date) {
+export async function markApBillPaid(companyId, billId, paidAmt, date, bankAccountNominal) {
   const { data, error } = await supabase.rpc('mark_ap_bill_paid', {
     p_company_id: companyId,
     p_bill_id:    billId,
     p_paid_amt:   paidAmt,
     p_date:       date ?? new Date().toISOString().slice(0, 10),
+    p_bank_account_nominal: bankAccountNominal ?? null,
   });
   if (error) throw new Error(error.message);
   if (data?.error) throw new Error(data.error);
