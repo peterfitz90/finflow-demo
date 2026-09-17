@@ -9090,6 +9090,9 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
   const [apInvoices, setApInvoices]   = useState([]);
   const [spendSort, setSpendSort]     = useState("desc");
   const [drillSupplier, setDrillSupplier] = useState(null);
+  // Part 2.4 — set by a BS/TB/P&L row click; switches to the GL tab pre-selected to that account.
+  const [drillAccountCode, setDrillAccountCode] = useState(null);
+  const drillToAccount = (code) => { setDrillAccountCode(code); setTab('gl'); };
 
   const periodLabel = new Date(selPeriod + '-01').toLocaleDateString("en-IE", { month: "long", year: "numeric" });
 
@@ -9268,7 +9271,7 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
   const fmtPctV  = (pct) => pct === null ? "—" : `${pct >= 0 ? "+" : ""}${pct.toFixed(1)}%`;
   const varColor = (abs) => abs === null ? "var(--dim)" : abs >= 0 ? "var(--teal)" : "var(--red)";
 
-  // GL Extract — individual lines from ledger
+  // GL Extract — individual lines from ledger (YTD-bound — correct for P&L accounts)
   const glLines = ledger.map(e => ({
     date: e.journal.date, ref: e.journal.reference, narrative: e.journal.description,
     account: e.account,
@@ -9278,6 +9281,28 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
   }));
   const glAccounts = [...new Map(glLines.map(l => [l.account, { code: l.account, name: l.accountName }])).values()]
     .sort((a, b) => a.code.localeCompare(b.code));
+
+  // Part 2.4 drill-down correctness fix: GL Extract's lines were always YTD-bound, but a
+  // Balance Sheet/TB row for an Asset/Liability/Equity account shows a CUMULATIVE-from-
+  // inception figure — drilling from such a row into the old YTD-only glLines would show an
+  // incomplete set of journals that doesn't reconcile to the figure it was drilled from. So we
+  // also build the cumulative equivalent from bsJournals, and GLExtract picks whichever set
+  // matches the selected account's own type, not a single screen-wide choice.
+  const bsGlLines = bsJournals.flatMap(j => [
+    { date: j.date, ref: j.reference, narrative: j.description, account: j.debit_account,
+      accountName: GL_ACCOUNTS.find(a => a.code === j.debit_account)?.name || j.debit_account,
+      debit: Number(j.amount), credit: 0 },
+    { date: j.date, ref: j.reference, narrative: j.description, account: j.credit_account,
+      accountName: GL_ACCOUNTS.find(a => a.code === j.credit_account)?.name || j.credit_account,
+      debit: 0, credit: Number(j.amount) },
+  ]);
+  const bsGlAccounts = [...new Map(bsGlLines.map(l => [l.account, { code: l.account, name: l.accountName }])).values()]
+    .sort((a, b) => a.code.localeCompare(b.code));
+  // Union of both account lists (for the dropdown) + a type map so GLExtract can resolve,
+  // for whichever account is currently selected, which journal set actually applies.
+  const allGlAccounts = [...new Map([...glAccounts, ...bsGlAccounts].map(a => [a.code, a])).values()]
+    .sort((a, b) => a.code.localeCompare(b.code));
+  const accountTypeMap = Object.fromEntries(allGlAccounts.map(a => [a.code, resolveAccountMeta(a.code).type]));
 
   // ── Balance Sheet computations ──
   const bsFixed      = tbRows.filter(r => r.code >= '1500' && r.code < '1600' && r.net !== 0);
@@ -9436,7 +9461,7 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
               <thead><tr><th style={{ width: 55 }}>Code</th><th>Account Name</th><th>Type</th><th className="r">Debit (€)</th><th className="r">Credit (€)</th><th className="r">Net Balance</th></tr></thead>
               <tbody>
                 {tbRowsDisplay.map((r, i) => (
-                  <tr key={i}>
+                  <tr key={i} onClick={r.code !== 'RE-PRIOR' ? () => drillToAccount(r.code) : undefined} style={{ cursor: r.code !== 'RE-PRIOR' ? "pointer" : undefined }} title={r.code !== 'RE-PRIOR' ? `View ${r.code} in the General Ledger` : undefined}>
                     <td className="mono" style={{ color: "var(--dim)" }}>{r.code}</td><td>{r.name}</td>
                     <td><span style={{ fontSize: 10, color: "var(--dim)", fontFamily: "Source Code Pro, monospace" }}>{r.type}</span></td>
                     <td className="r mono">{r.debit > 0 ? fmt(r.debit) : "—"}</td>
@@ -9484,7 +9509,7 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
                     const cmpV = showCmp ? (cmpRevMap[r.code] ?? null) : null;
                     const abs  = showCmp ? varAbs(r.amount, cmpV) : null;
                     return (
-                      <div key={i} className="pnl-row">
+                      <div key={i} className="pnl-row" onClick={() => drillToAccount(r.code)} style={{ cursor: "pointer" }} title={`View ${r.code} in the General Ledger`}>
                         <span className="pnl-n">{r.code} — {r.name}</span>
                         <span className="pnl-v">{fmt(r.amount)}</span>
                         {showCmp && <>
@@ -9514,7 +9539,7 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
                     const cmpV = showCmp ? (cmpCosMap[r.code] ?? null) : null;
                     const abs  = showCmp ? varAbs(r.amount, cmpV) : null;
                     return (
-                      <div key={i} className="pnl-row">
+                      <div key={i} className="pnl-row" onClick={() => drillToAccount(r.code)} style={{ cursor: "pointer" }} title={`View ${r.code} in the General Ledger`}>
                         <span className="pnl-n">{r.code} — {r.name}</span>
                         <span className="pnl-v">{fmt(r.amount)}</span>
                         {showCmp && <>
@@ -9544,7 +9569,7 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
                     const cmpV = showCmp ? (cmpOpexMap[r.code] ?? null) : null;
                     const abs  = showCmp ? varAbs(r.amount, cmpV) : null;
                     return (
-                      <div key={i} className="pnl-row">
+                      <div key={i} className="pnl-row" onClick={() => drillToAccount(r.code)} style={{ cursor: "pointer" }} title={`View ${r.code} in the General Ledger`}>
                         <span className="pnl-n">{r.code} — {r.name}</span>
                         <span className="pnl-v">{fmt(r.amount)}</span>
                         {showCmp && <>
@@ -9577,8 +9602,14 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
           const s = "€" + Math.abs(v).toLocaleString("en-IE", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
           return v < 0 ? `(${s})` : s;
         };
-        const bsRow = (label, amount, bold = false, indent = 0) => (
-          <div style={{ display: "flex", padding: "3px 0", paddingLeft: indent * 16, fontSize: 13 }}>
+        const bsRow = (label, amount, bold = false, indent = 0, code = null) => (
+          <div
+            onClick={code ? () => drillToAccount(code) : undefined}
+            title={code ? `View ${code} in the General Ledger` : undefined}
+            style={{ display: "flex", padding: "3px 0", paddingLeft: indent * 16, fontSize: 13, cursor: code ? "pointer" : undefined, borderRadius: 3 }}
+            onMouseEnter={code ? (e => e.currentTarget.style.background = "var(--surface-2)") : undefined}
+            onMouseLeave={code ? (e => e.currentTarget.style.background = "transparent") : undefined}
+          >
             <span style={{ flex: 1, color: bold ? "var(--text)" : "var(--muted)", fontWeight: bold ? 600 : 400 }}>{label}</span>
             {amount !== null && <span style={{ fontFamily: "'Source Code Pro',monospace", width: 120, textAlign: "right", fontSize: 12, fontWeight: bold ? 700 : 400, color: amount < 0 ? "var(--red)" : undefined }}>{bsAmt(amount)}</span>}
           </div>
@@ -9600,7 +9631,7 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
                 {bsFixed.length > 0 && (
                   <>
                     {bsHead("Fixed Assets")}
-                    {bsFixed.map(r => bsRow(`${r.code} · ${r.name}`, r.net, false, 1))}
+                    {bsFixed.map(r => bsRow(`${r.code} · ${r.name}`, r.net, false, 1, r.code))}
                     {bsDiv(false)}
                     {bsRow("Total Fixed Assets", bsFixedTotal, true)}
                   </>
@@ -9609,22 +9640,22 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
                 {/* Current Assets */}
                 {bsHead("Current Assets")}
                 {bsCurrAss.length > 0
-                  ? bsCurrAss.map(r => bsRow(`${r.code} · ${r.name}`, r.net, false, 1))
+                  ? bsCurrAss.map(r => bsRow(`${r.code} · ${r.name}`, r.net, false, 1, r.code))
                   : <div style={{ fontSize: 12, color: "var(--dim)", fontStyle: "italic", padding: "2px 0" }}>No current asset balances</div>}
                 {bsDiv(false)}
                 {bsRow("Total Current Assets", bsCurrAssTotal, true)}
 
                 {/* Creditors < 1yr */}
                 {bsHead("Creditors: due within one year")}
-                {bsCurrLiab.map(r => bsRow(`${r.code} · ${r.name}`, -Math.abs(r.net), false, 1))}
-                {bsOverdraft.map(r => bsRow(`${r.code} · ${r.name} (overdraft)`, -Math.abs(r.net), false, 1))}
+                {bsCurrLiab.map(r => bsRow(`${r.code} · ${r.name}`, -Math.abs(r.net), false, 1, r.code))}
+                {bsOverdraft.map(r => bsRow(`${r.code} · ${r.name} (overdraft)`, -Math.abs(r.net), false, 1, r.code))}
                 {bsCurrLiabTotal > 0 && (<>{bsDiv(false)}{bsRow("Total Creditors < 1yr", -bsCurrLiabTotal, true)}</>)}
 
                 {/* Creditors > 1yr */}
                 {bsLtLiab.length > 0 && (
                   <>
                     {bsHead("Creditors: due after one year")}
-                    {bsLtLiab.map(r => bsRow(`${r.code} · ${r.name}`, -Math.abs(r.net), false, 1))}
+                    {bsLtLiab.map(r => bsRow(`${r.code} · ${r.name}`, -Math.abs(r.net), false, 1, r.code))}
                     {bsDiv(false)}
                     {bsRow("Total Creditors > 1yr", -bsLtLiabTotal, true)}
                   </>
@@ -9653,7 +9684,19 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
         );
       })()}
 
-      {tab === "gl" && <GLExtract period={reportLabel} glLines={glLines} glAccounts={glAccounts} noJournals={noJournals} companyName={companyName} />}
+      {tab === "gl" && (
+        <GLExtract
+          period={reportLabel}
+          glLines={glLines}
+          bsGlLines={bsGlLines}
+          glAccounts={allGlAccounts}
+          accountTypeMap={accountTypeMap}
+          bsTypes={BS_TYPES}
+          noJournals={noBsJournals}
+          companyName={companyName}
+          initialCode={drillAccountCode}
+        />
+      )}
       {tab === "fullgl" && <FullGLReport companyId={companyId} companyName={companyName} company={company} coaAccounts={coaAccounts} />}
 
       {tab === "spend" && (() => {
@@ -9822,8 +9865,8 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
   );
 }
 
-function GLExtract({ period, glLines, glAccounts, noJournals, companyName = "Company" }) {
-  const [selectedCode, setSelectedCode] = useState(glAccounts[0]?.code || "");
+function GLExtract({ period, glLines, bsGlLines = [], glAccounts, accountTypeMap = {}, bsTypes = [], noJournals, companyName = "Company", initialCode = null }) {
+  const [selectedCode, setSelectedCode] = useState(initialCode || glAccounts[0]?.code || "");
 
   useEffect(() => {
     if (glAccounts.length > 0 && !glAccounts.find(a => a.code === selectedCode)) {
@@ -9831,7 +9874,21 @@ function GLExtract({ period, glLines, glAccounts, noJournals, companyName = "Com
     }
   }, [glAccounts]);
 
-  const lines = glLines.filter(l => l.account === selectedCode);
+  // Part 2.4 — a new drill-down click (initialCode changing) must move the selection even
+  // while this tab is already mounted on a different account.
+  useEffect(() => {
+    if (initialCode && initialCode !== selectedCode) setSelectedCode(initialCode);
+  }, [initialCode]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  // Correctness fix (Part 2.4): which journal set applies depends on the SELECTED account's own
+  // type, not a single screen-wide choice — Asset/Liability/Equity accounts are cumulative from
+  // inception (matching the Balance Sheet/TB rows they were drilled from), everything else is
+  // YTD-bound (matching the P&L). This is re-derived every time selectedCode changes, so
+  // switching the dropdown to a different account (after arriving via a drill) still shows the
+  // correct set for THAT account, not whichever set the drill happened to start from.
+  const isBsType = bsTypes.includes(accountTypeMap[selectedCode]);
+  const activeGlLines = isBsType ? bsGlLines : glLines;
+  const lines = activeGlLines.filter(l => l.account === selectedCode);
   const account = glAccounts.find(a => a.code === selectedCode);
 
   const withBalance = lines.reduce((acc, line) => {
@@ -9876,7 +9933,9 @@ function GLExtract({ period, glLines, glAccounts, noJournals, companyName = "Com
             <select className="gl-extract-select" value={selectedCode} onChange={e => setSelectedCode(e.target.value)} style={{ minWidth: 280 }}>
               {glAccounts.map(a => <option key={a.code} value={a.code}>{a.code} — {a.name}</option>)}
             </select>
-            <span style={{ fontSize: 10, fontFamily: "Source Code Pro, monospace", color: "var(--dim)", marginLeft: "auto" }}>Period: {period}</span>
+            <span style={{ fontSize: 10, fontFamily: "Source Code Pro, monospace", color: "var(--dim)", marginLeft: "auto" }}>
+              {isBsType ? "Cumulative from inception (Balance Sheet basis)" : `Period: ${period}`}
+            </span>
           </div>
           {account && (
             <div className="gl-acct-header">
