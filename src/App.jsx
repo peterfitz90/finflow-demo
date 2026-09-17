@@ -11296,6 +11296,10 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
   const [confidence, setConfidence] = useState({});
   const [fileName, setFileName] = useState("");
   const [bankFormat, setBankFormat] = useState(null);
+  // Item 2 — which real bank account this CSV import posts against, so its transactions
+  // (and their journal legs) carry that account's own nominal instead of a hardcoded '1000'.
+  const [bankAccounts, setBankAccounts] = useState([]);
+  const [selectedBankAccountId, setSelectedBankAccountId] = useState(null);
   const [over, setOver] = useState(false);
   const [alert, setAlert] = useState(null);
   const [toast, setToast] = useState(null);
@@ -11347,6 +11351,19 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
     isMountedRef.current = true;
     return () => { isMountedRef.current = false; };
   }, []);
+
+  // Load the company's active bank accounts (Item 2) so an import can be tagged to the
+  // right one; defaults to the first active account (today, every company has exactly one).
+  useEffect(() => {
+    if (!companyId) { setBankAccounts([]); setSelectedBankAccountId(null); return; }
+    supabase.from('bank_accounts').select('id, display_name, nominal_code')
+      .eq('company_id', companyId).eq('is_active', true).order('created_at')
+      .then(({ data }) => {
+        const accts = data || [];
+        setBankAccounts(accts);
+        setSelectedBankAccountId(prev => (prev && accts.some(a => a.id === prev)) ? prev : (accts[0]?.id ?? null));
+      });
+  }, [companyId]);
 
   // Refresh COA and transaction rules whenever the bank-import page becomes visible.
   // BankImport stays mounted behind display:none, so its useChartOfAccounts / useTransactionRules
@@ -12050,14 +12067,19 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
       }
       const db = supabase;
       const batchId = crypto.randomUUID();
+      // Item 2: the bank leg posts to the selected account's own nominal, not a hardcoded
+      // '1000' — falls back to '1000' only if no bank account is configured/selected yet
+      // (e.g. a company mid-onboarding before Item 2's backfill/first sync has run).
+      const bankAcct    = bankAccounts.find(a => a.id === selectedBankAccountId);
+      const bankNominal = bankAcct?.nominal_code || "1000";
       const journals = toPost.map(r => {
         const nominal  = nominals[r.revolut_id] || "6600";
         const isIn     = r.amount >= 0;
         const vatCode  = coaAccounts.find(a => a.code === nominal)?.default_vat_code ?? null;
         return {
           company_id: cid, date: sanitiseDate(r.date), description: r.description, reference: r.revolut_id,
-          debit_account: isIn ? "1000" : nominal,
-          credit_account: isIn ? nominal : "1000",
+          debit_account: isIn ? bankNominal : nominal,
+          credit_account: isIn ? nominal : bankNominal,
           amount: Math.abs(r.amount),
           import_batch_id: batchId,
           vat_code: vatCode,
@@ -12070,6 +12092,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
         company_id: cid, revolut_id: r.revolut_id, date: r.date,
         description: r.description, amount: r.amount, currency: r.currency,
         balance: r.balance, nominal_account: nominals[r.revolut_id] || "6600",
+        bank_account_id: bankAcct?.id ?? null,
         bank_format: bankFormat, import_batch_id: batchId,
         reconciled: true, reconciled_at: now,
       }));
@@ -12717,6 +12740,16 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
               <button className="btn btn-s btn-sm" onClick={() => { setRows([]); setFileName(""); setAlert(null); setSelected(new Set()); setCatProgress(null); setBankFormat(null); sessionStorage.removeItem('ledgrly_import_session'); sessionStorage.removeItem('ledgrly_import_nominals'); }}>
                 Clear
               </button>
+              {bankAccounts.length > 1 && (
+                <select
+                  value={selectedBankAccountId || ''}
+                  onChange={e => setSelectedBankAccountId(e.target.value)}
+                  title="Which bank account this import posts against"
+                  style={{ fontSize: 11, fontFamily: "Source Code Pro,monospace", padding: "4px 8px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)" }}
+                >
+                  {bankAccounts.map(a => <option key={a.id} value={a.id}>{a.display_name}</option>)}
+                </select>
+              )}
               <button className="btn btn-p btn-sm" onClick={post} disabled={posting || selected.size === 0 || !!catProgress}>
                 {posting ? "Posting…" : `Post ${selected.size > 0 ? selected.size + " " : ""}Selected to Ledger`}
               </button>
@@ -15360,6 +15393,16 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
   const [matchData, setMatchData]   = useState(null); // { expenseId, rows }
   const [approvingId, setApprovingId] = useState(null);
   const fileInputRef = useRef(null);
+  // Item 2 — the company's active bank account nominal, so approve() credits the
+  // right bank instead of a hardcoded '1000'. Every live company has exactly one
+  // active account today, so the first one found is used with no picker needed.
+  const [bankAccounts, setBankAccounts] = useState([]);
+  useEffect(() => {
+    if (!companyId) return;
+    supabase.from('bank_accounts').select('id, nominal_code').eq('company_id', companyId).eq('is_active', true)
+      .then(({ data }) => setBankAccounts(data || []));
+  }, [companyId]);
+  const defaultBankNominal = bankAccounts[0]?.nominal_code || '1000';
 
   const today = new Date();
   const thisMonth = today.toISOString().slice(0, 7);
@@ -15466,7 +15509,7 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
     setApprovingId(exp.id);
     setSaveError(null);
     const db = supabase;
-    const creditAcct = ["company_card","bank_transfer"].includes(exp.payment_method) ? "1000" : "2000";
+    const creditAcct = ["company_card","bank_transfer"].includes(exp.payment_method) ? defaultBankNominal : "2000";
     const ref = `EXP-${exp.id.slice(0, 6).toUpperCase()}`;
     const { data: jnl, error: jErr } = await db.from("journals").insert({
       company_id: companyId, date: sanitiseDate(exp.receipt_date),
@@ -15893,8 +15936,16 @@ function Reconciliation({ companyId, onNavigate }) {
   const [settleOnAcc, setSettleOnAcc]   = useState({ party_type: 'customer', party_name: '' });
   const [settleSaving, setSettleSaving] = useState(false);
   const [settleErr, setSettleErr]       = useState(null);
+  // Item 2 — active bank accounts, so the "Categorise" journal defaults to the
+  // transaction's own bank nominal instead of a hardcoded '1000'.
+  const [bankAccounts, setBankAccounts] = useState([]);
 
   useEffect(() => { if (companyId) loadAll(); }, [companyId]); // eslint-disable-line
+  useEffect(() => {
+    if (!companyId) return;
+    supabase.from('bank_accounts').select('id, nominal_code').eq('company_id', companyId).eq('is_active', true)
+      .then(({ data }) => setBankAccounts(data || []));
+  }, [companyId]);
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(null), 3200); };
 
@@ -16146,8 +16197,9 @@ function Reconciliation({ companyId, onNavigate }) {
   const openCreateJnl = (bt) => {
     const absAmt = Math.abs(Number(bt.amount));
     const isOut  = Number(bt.amount) < 0;
+    const bankNominal = bankAccounts.find(a => a.id === bt.bank_account_id)?.nominal_code || '1000';
     setCreateJnlFor(bt);
-    setJnlForm({ date: bt.date, description: bt.description || '', debit_account: isOut ? '6600' : '1000', credit_account: isOut ? '1000' : '4000', amount: absAmt.toFixed(2), reference: '' });
+    setJnlForm({ date: bt.date, description: bt.description || '', debit_account: isOut ? '6600' : bankNominal, credit_account: isOut ? bankNominal : '4000', amount: absAmt.toFixed(2), reference: '' });
   };
 
   const saveJnl = async () => {
@@ -17443,6 +17495,16 @@ function FixedAssets({ companyId, company, selPeriod }) {
   const [disposalErr,    setDisposalErr]     = useState(null);
   const [deleting,       setDeleting]        = useState(null); // asset.id being deleted
   const { accounts: coaAccounts } = useChartOfAccounts(companyId);
+  // Item 2 — default the proceeds nominal to the company's active bank account
+  // instead of a hardcoded '1000'; the dropdown itself already lets the user
+  // pick any nominal, so only the default needs to change.
+  const [bankAccounts, setBankAccounts] = useState([]);
+  useEffect(() => {
+    if (!companyId) return;
+    supabase.from('bank_accounts').select('id, nominal_code').eq('company_id', companyId).eq('is_active', true)
+      .then(({ data }) => setBankAccounts(data || []));
+  }, [companyId]);
+  const defaultBankNominal = bankAccounts[0]?.nominal_code || '1000';
 
   // ── Load assets ────────────────────────────────────────────────────────────
   const loadAssets = async () => {
@@ -17673,7 +17735,7 @@ function FixedAssets({ companyId, company, selPeriod }) {
   // ── Disposal ───────────────────────────────────────────────────────────────
   const openDisposal = (a) => {
     setDisposalAsset(a);
-    setDisposalForm({ date: new Date().toISOString().slice(0, 10), proceeds: '0', proceeds_nominal: '1000' });
+    setDisposalForm({ date: new Date().toISOString().slice(0, 10), proceeds: '0', proceeds_nominal: defaultBankNominal });
     setDisposalErr(null);
     setShowDisposal(true);
   };

@@ -220,6 +220,70 @@ export default withSentry(async function handler(req, res) {
     return res.status(200).json({ imported: 0, skipped: 0, message: 'No accounts on this connection' });
   }
 
+  // ── 2b. Resolve/auto-create a bank_accounts row per real Yapily account ───────
+  // Item 2: each account gets its own nominal_code instead of every transaction on this
+  // connection hardcoding '1000'. Only run (and only persist account_refs) on a real
+  // import — dry_run stays side-effect-free against the ledger AND connection metadata.
+  const { data: existingBankAccounts, error: bankAcctReadErr } = await db
+    .from('bank_accounts')
+    .select('id, external_account_id, nominal_code, display_name')
+    .eq('company_id', company_id)
+    .eq('bank_connection_id', conn.id);
+  if (bankAcctReadErr) {
+    captureError(bankAcctReadErr, { company_id, operation: 'yapily-ingest-bank-accounts-read' });
+    return res.status(500).json({ error: 'Failed to load bank account mappings: ' + bankAcctReadErr.message });
+  }
+
+  const bankAccountsByExternalId = {};
+  for (const row of (existingBankAccounts || [])) bankAccountsByExternalId[row.external_account_id] = row;
+
+  if (!dry_run) {
+    // Persist the current account list on the connection (previously only done by the
+    // diagnostic sync.js endpoint, never kept live by the real ingest path).
+    await db.from('bank_connections').update({
+      account_refs: accounts.map(a => ({ id: a.id, type: a.type, name: a.name, currency: a.currency })),
+      updated_at: new Date().toISOString(),
+    }).eq('id', conn.id);
+
+    // Auto-create a mapping (with the next free nominal in the reserved 1000-1099 "Bank"
+    // range) for any account on this consent we haven't seen before — a brand new account
+    // added to an existing connection, or the very first sync after connecting.
+    for (const account of accounts) {
+      if (bankAccountsByExternalId[account.id]) continue;
+
+      const { data: usedNominals } = await db.from('bank_accounts')
+        .select('nominal_code').eq('company_id', company_id).not('nominal_code', 'is', null);
+      const usedSet = new Set((usedNominals || []).map(r => r.nominal_code));
+      let nominal = null;
+      for (let n = 1000; n < 1100; n++) { const code = String(n); if (!usedSet.has(code)) { nominal = code; break; } }
+      if (!nominal) {
+        captureError(new Error('Bank nominal range (1000-1099) exhausted'), { company_id, operation: 'yapily-ingest-new-account', account_id: account.id });
+        continue; // this account's transactions fall back to the '1000' safety net below
+      }
+
+      const displayName = `${account.name || account.nickname || conn.institution_id} (${account.currency || 'EUR'})`;
+      const { data: newAcc, error: newAccErr } = await db.from('bank_accounts').insert({
+        company_id, bank_connection_id: conn.id, external_account_id: account.id,
+        display_name: displayName, nominal_code: nominal, currency: account.currency || 'EUR', is_active: true,
+      }).select('id, external_account_id, nominal_code, display_name').single();
+      if (newAccErr) {
+        captureError(newAccErr, { company_id, operation: 'yapily-ingest-new-account', account_id: account.id });
+        continue;
+      }
+      bankAccountsByExternalId[account.id] = newAcc;
+
+      // Register the new nominal as a real, named GL account too (trial balance, GL
+      // dropdowns) — otherwise it would post under a code that doesn't exist in the COA.
+      const { error: coaErr } = await db.from('chart_of_accounts').upsert({
+        company_id, code: nominal, name: displayName,
+        account_type: 'asset', category: 'Current Assets', is_active: true, is_system: false,
+      }, { onConflict: 'company_id,code' });
+      if (coaErr) captureError(coaErr, { company_id, operation: 'yapily-ingest-new-account-coa', account_id: account.id });
+
+      console.log(`[yapily/ingest] auto-created bank_accounts mapping: ${account.id} -> ${nominal} (${displayName})`);
+    }
+  }
+
   // ── 3. Fetch transactions across all accounts (90 days) ───────────────────────
   // AIB's real Open Banking rail rejects a date-only `from` ("2026-06-16") as invalid —
   // confirmed via the actual Yapily error body: "Pagination filter provided [from] with
@@ -264,7 +328,7 @@ export default withSentry(async function handler(req, res) {
       continue;
     }
     for (const tx of (data?.data ?? data ?? [])) {
-      rawTxns.push({ tx, accountCurrency: account.currency });
+      rawTxns.push({ tx, accountCurrency: account.currency, accountId: account.id });
     }
   }
   console.log(`[yapily/ingest] fetched ${rawTxns.length} raw across ${accounts.length} accounts (${accountErrors.length} account(s) errored)`);
@@ -299,13 +363,13 @@ export default withSentry(async function handler(req, res) {
   }
 
   // ── 5. Map to ledger shape ────────────────────────────────────────────────────
-  const allMapped = statusFiltered.map(({ tx, accountCurrency }) => {
+  const allMapped = statusFiltered.map(({ tx, accountCurrency, accountId }) => {
     const amount   = extractAmount(tx);
     const currency = extractCurrency(tx, accountCurrency);
     const date     = (tx.bookingDateTime ?? tx.date ?? '').slice(0, 10);
     const desc     = buildDescription(tx);
     const extId    = tx.id || tx.transactionHash || null;
-    return { extId, date, description: desc, amount, currency };
+    return { extId, date, description: desc, amount, currency, accountId };
   })
     .filter(r => r.extId && r.date) // drop any with no stable ID or date
     // Defensive: import_from is a convenience bound on what gets IMPORTED, independent of
@@ -634,18 +698,33 @@ export default withSentry(async function handler(req, res) {
   const batchId = crypto.randomUUID();
   const now     = new Date().toISOString();
 
+  // Resolves the account's own bank nominal (Item 2) instead of hardcoding '1000' for
+  // every transaction regardless of which real account it came from. Falls back to '1000'
+  // with a captured error only if a row's account somehow never got mapped above (should
+  // not happen given the auto-create step, but never silently drop a transaction over it).
+  const bankNominalFor = (row) => {
+    const acct = bankAccountsByExternalId[row.accountId];
+    if (acct?.nominal_code) return acct.nominal_code;
+    captureError(new Error('Transaction has no resolved bank_accounts mapping — falling back to 1000'), {
+      company_id, operation: 'yapily-ingest-unmapped-account', account_id: row.accountId, ext_id: row.extId,
+    });
+    return '1000';
+  };
+  const bankAccountIdFor = (row) => bankAccountsByExternalId[row.accountId]?.id ?? null;
+
   const journals = toProcess
     .filter(row => !suppressedExtIds.has(row.extId))
     .map(row => {
-      const nominal = finalNominals[row.extId];
-      const isIn    = row.amount >= 0;
+      const nominal     = finalNominals[row.extId];
+      const bankNominal = bankNominalFor(row);
+      const isIn        = row.amount >= 0;
       return {
         company_id,
         date:                row.date,
         description:         row.description,
         reference:           row.extId,
-        debit_account:       isIn ? '1000' : nominal,
-        credit_account:      isIn ? nominal : '1000',
+        debit_account:       isIn ? bankNominal : nominal,
+        credit_account:      isIn ? nominal : bankNominal,
         amount:              Math.abs(row.amount),
         vat_code:            finalVats[row.extId],
         import_batch_id:     batchId,
@@ -665,6 +744,7 @@ export default withSentry(async function handler(req, res) {
       currency:        row.currency,
       balance:         null,
       nominal_account: suppressed ? null : finalNominals[row.extId],
+      bank_account_id: bankAccountIdFor(row),
       bank_format:     'yapily',
       import_batch_id: batchId,
       reconciled:      !suppressed,
