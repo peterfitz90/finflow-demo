@@ -15942,6 +15942,302 @@ async function runMatchingEngine(companyId) {
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
+// Track B — anchor-balance worksheet (per selected bank account)
+// ─────────────────────────────────────────────────────────────────────────────
+const fmtWsDate = (d) => d ? new Date(d).toLocaleDateString('en-IE', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
+
+function StartSessionForm({ startForm, startErr, startSaving, onChange, onCancel, onSave }) {
+  const set = (k) => (e) => onChange(p => ({ ...p, [k]: e.target.value }));
+  return (
+    <div style={{ maxWidth: 420, margin: '0 auto' }}>
+      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>Start reconciliation</div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 10 }}>
+        <div>
+          <div style={{ fontSize: 10, color: 'var(--dim)', marginBottom: 3 }}>Anchor balance (€) *</div>
+          <input className="f-input" type="number" step="0.01" value={startForm.anchor_balance} onChange={set('anchor_balance')} style={{ fontSize: 12 }} />
+        </div>
+        <div>
+          <div style={{ fontSize: 10, color: 'var(--dim)', marginBottom: 3 }}>Anchor date *</div>
+          <input className="f-input" type="date" value={startForm.anchor_date} onChange={set('anchor_date')} style={{ fontSize: 12 }} />
+        </div>
+      </div>
+      <div style={{ fontSize: 10, color: 'var(--text-faint)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Target (optional — set once you have the next statement)</div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 14 }}>
+        <div>
+          <div style={{ fontSize: 10, color: 'var(--dim)', marginBottom: 3 }}>Target balance (€)</div>
+          <input className="f-input" type="number" step="0.01" value={startForm.target_balance} onChange={set('target_balance')} style={{ fontSize: 12 }} />
+        </div>
+        <div>
+          <div style={{ fontSize: 10, color: 'var(--dim)', marginBottom: 3 }}>Target date</div>
+          <input className="f-input" type="date" value={startForm.target_date} onChange={set('target_date')} style={{ fontSize: 12 }} />
+        </div>
+      </div>
+      {startErr && <div style={{ fontSize: 11, color: 'var(--danger)', marginBottom: 10 }}>{startErr}</div>}
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button className="btn btn-p btn-sm" onClick={onSave} disabled={startSaving}>{startSaving ? 'Starting…' : 'Start'}</button>
+        <button className="btn btn-s btn-sm" onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function FindMatchPanel({ searchQ, setSearchQ, filteredCands, typeTag, onLink }) {
+  return (
+    <div style={{ padding: '12px 18px', background: 'var(--surface-2)', borderBottom: '1px solid var(--border)' }}>
+      <input className="f-input" value={searchQ} autoFocus onChange={e => setSearchQ(e.target.value)}
+        placeholder="Search by ref, name, amount…" style={{ fontSize: 12, marginBottom: 8, width: '100%', boxSizing: 'border-box' }} />
+      <div style={{ maxHeight: 220, overflowY: 'auto' }}>
+        {filteredCands.length === 0 ? (
+          <div style={{ fontSize: 12, color: 'var(--text-faint)', padding: '6px 0' }}>No candidates found</div>
+        ) : filteredCands.slice(0, 25).map(cand => (
+          <div key={cand.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '7px 10px', borderRadius: 4, marginBottom: 3, background: 'var(--surface)', border: '1px solid var(--border)' }}>
+            <div style={{ flex: 1, minWidth: 0 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 1 }}>
+                {typeTag(cand._type)}
+                <span style={{ fontSize: 10, color: 'var(--text-faint)', fontVariantNumeric: 'tabular-nums' }}>{cand._date}</span>
+                {cand._crossAccountNominal && (
+                  <span title="This journal's bank leg belongs to a different account than the transaction you're matching" style={{ fontSize: 9, fontWeight: 700, color: 'var(--warn)', background: 'var(--warn-dim)', border: '1px solid rgba(251,191,36,0.35)', borderRadius: 3, padding: '1px 5px' }}>
+                    ⚠ Different account ({cand._crossAccountNominal})
+                  </span>
+                )}
+              </div>
+              <div style={{ fontSize: 12, color: 'var(--text)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cand._label}</div>
+            </div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
+              <span style={{ fontSize: 12, fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>{fmtEUR(cand.amount)}</span>
+              <button className="btn btn-p btn-sm" style={{ fontSize: 11 }} onClick={() => onLink(cand)}>Link</button>
+            </div>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function InlineCreateJnl({ jnlForm, setJnlForm, onSave, onCancel, savingJnl }) {
+  return (
+    <div style={{ padding: '14px 18px', background: 'var(--surface-2)', borderBottom: '1px solid var(--border)' }}>
+      <div style={{ fontSize: 10, color: 'var(--text-faint)', fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 10 }}>CREATE JOURNAL — prefilled from bank transaction</div>
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr 1fr', gap: 8, marginBottom: 8 }}>
+        {[
+          { lbl: 'Date',           key: 'date',           type: 'date' },
+          { lbl: 'Amount',         key: 'amount',         type: 'number' },
+          { lbl: 'Debit Account',  key: 'debit_account',  type: 'text', placeholder: 'e.g. 6600' },
+          { lbl: 'Credit Account', key: 'credit_account', type: 'text', placeholder: 'e.g. 1000' },
+        ].map(f => (
+          <div key={f.key}>
+            <div style={{ fontSize: 10, color: 'var(--dim)', marginBottom: 3 }}>{f.lbl}</div>
+            <input className="f-input" type={f.type} step={f.type === 'number' ? '0.01' : undefined}
+              value={jnlForm[f.key]} placeholder={f.placeholder || ''}
+              onChange={e => setJnlForm(p => ({ ...p, [f.key]: e.target.value }))}
+              style={{ fontSize: 12 }} />
+          </div>
+        ))}
+      </div>
+      <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: 8, marginBottom: 10 }}>
+        <div>
+          <div style={{ fontSize: 10, color: 'var(--dim)', marginBottom: 3 }}>Description</div>
+          <input className="f-input" value={jnlForm.description} onChange={e => setJnlForm(p => ({ ...p, description: e.target.value }))} style={{ fontSize: 12 }} />
+        </div>
+        <div>
+          <div style={{ fontSize: 10, color: 'var(--dim)', marginBottom: 3 }}>Reference (optional)</div>
+          <input className="f-input" value={jnlForm.reference} onChange={e => setJnlForm(p => ({ ...p, reference: e.target.value }))} placeholder="Auto-generated" style={{ fontSize: 12 }} />
+        </div>
+      </div>
+      <div style={{ display: 'flex', gap: 8 }}>
+        <button className="btn btn-p btn-sm" onClick={onSave} disabled={savingJnl}>{savingJnl ? 'Saving…' : 'Post & reconcile'}</button>
+        <button className="btn btn-s btn-sm" onClick={onCancel}>Cancel</button>
+      </div>
+    </div>
+  );
+}
+
+function ReconWorksheet({
+  sessionMode, session, sessionLoading, worksheetRows, worksheetLoading,
+  startForm, startErr, startSaving, completingSession,
+  onOpenStartSession, onChangeStartForm, onCancelStartSession, onSaveStartSession,
+  onCompleteSession, onReopenSession,
+  confBadge, typeTag,
+  onConfirmJournalMatch, onOpenSettleModal, onRejectMatch, onOpenCreateJnl,
+  createJnlFor, jnlForm, setJnlForm, onSaveJnl, savingJnl, onCancelCreateJnl,
+  findFor, onOpenFindMatch, onCloseFindMatch, searchQ, setSearchQ, filteredCands, onLinkManual,
+  settleModalOpen,
+}) {
+  // Minimal keyboard model (Track B Piece 4). Deliberately conservative — no precedent for
+  // row-focus keyboard navigation existed anywhere in this codebase before this. Guards
+  // against ever hijacking keystrokes meant for a text field or the full-screen Settle modal.
+  const [focusedIndex, setFocusedIndex] = useState(null);
+  const isActive = sessionMode === 'active';
+
+  useEffect(() => {
+    if (focusedIndex != null && focusedIndex >= worksheetRows.length) {
+      setFocusedIndex(worksheetRows.length ? worksheetRows.length - 1 : null);
+    }
+  }, [worksheetRows.length]); // eslint-disable-line
+
+  useEffect(() => {
+    const onKey = (e) => {
+      if (!isActive || !worksheetRows.length || settleModalOpen) return;
+      const tag = document.activeElement?.tagName;
+      if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
+
+      if (e.key === 'ArrowDown' || e.key === 'j') {
+        e.preventDefault();
+        setFocusedIndex(i => Math.min((i ?? -1) + 1, worksheetRows.length - 1));
+      } else if (e.key === 'ArrowUp' || e.key === 'k') {
+        e.preventDefault();
+        setFocusedIndex(i => Math.max((i ?? 0) - 1, 0));
+      } else if (e.key === 'Escape') {
+        setFocusedIndex(null);
+      } else if ((e.key === 'Enter' || e.key === 'y') && focusedIndex != null) {
+        const row = worksheetRows[focusedIndex];
+        if (row?.match) {
+          e.preventDefault();
+          if (row.match.matched_type === 'journal') onConfirmJournalMatch(row.match, row.bt);
+          else onOpenSettleModal(row.bt, row.entity);
+        }
+        // No suggestion on the focused row: Enter/y intentionally does nothing — accepting a
+        // fallback action (Settle/Categorise/Find match) via keyboard would be a guess about
+        // which one the accountant wants, so it's left to an explicit click.
+      } else if ((e.key === 'n' || e.key === 'Backspace') && focusedIndex != null) {
+        const row = worksheetRows[focusedIndex];
+        if (row?.match) { e.preventDefault(); onRejectMatch(row.match.id); }
+      }
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [isActive, worksheetRows, focusedIndex, settleModalOpen, onConfirmJournalMatch, onOpenSettleModal, onRejectMatch]);
+  if (sessionLoading) {
+    return <div className="card" style={{ padding: 48, textAlign: 'center', color: 'var(--text-faint)', fontSize: 12 }}>Loading…</div>;
+  }
+
+  if (sessionMode === 'none' || sessionMode === 'completed') {
+    return (
+      <div className="card" style={{ padding: 28 }}>
+        {startForm ? (
+          <StartSessionForm startForm={startForm} startErr={startErr} startSaving={startSaving}
+            onChange={onChangeStartForm} onCancel={onCancelStartSession} onSave={onSaveStartSession} />
+        ) : sessionMode === 'none' ? (
+          <div style={{ textAlign: 'center', padding: '20px 0' }}>
+            <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 14 }}>No reconciliation started for this account yet.</div>
+            <button className="btn btn-p btn-sm" onClick={onOpenStartSession}>Start reconciliation</button>
+          </div>
+        ) : (
+          <div style={{ textAlign: 'center', padding: '20px 0' }}>
+            <div style={{ fontSize: 13, color: 'var(--accent)', marginBottom: 4 }}>✓ Last reconciliation completed</div>
+            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 14 }}>
+              {session.target_date
+                ? `As of ${fmtWsDate(session.target_date)}, balance ${fmtEUR(session.target_balance)}`
+                : `Anchor ${fmtEUR(session.anchor_balance)} on ${fmtWsDate(session.anchor_date)}`}
+            </div>
+            <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
+              <button className="btn btn-p btn-sm" onClick={onOpenStartSession}>Start next reconciliation</button>
+              <button className="btn btn-s btn-sm" onClick={onReopenSession}>Reopen this one</button>
+            </div>
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  // sessionMode === 'active'
+  const finalRunning = worksheetRows.length ? worksheetRows[worksheetRows.length - 1].runningBalance : Number(session.anchor_balance);
+  const targetDiff    = session.target_balance != null ? Number(session.target_balance) - finalRunning : null;
+  const isBalanced    = targetDiff != null && Math.abs(targetDiff) < 0.005;
+
+  return (
+    <div>
+      <div className="card" style={{ padding: '14px 18px', marginBottom: 14, display: 'flex', flexWrap: 'wrap', gap: 24, alignItems: 'center' }}>
+        <div>
+          <div style={{ fontSize: 10, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Anchor</div>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>{fmtEUR(session.anchor_balance)} <span style={{ fontWeight: 400, color: 'var(--text-faint)', fontSize: 11 }}>on {fmtWsDate(session.anchor_date)}</span></div>
+        </div>
+        <div>
+          <div style={{ fontSize: 10, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Reconciled so far</div>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>{fmtEUR(finalRunning)}</div>
+        </div>
+        <div>
+          <div style={{ fontSize: 10, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Target</div>
+          <div style={{ fontSize: 13, fontWeight: 600 }}>{session.target_balance != null ? `${fmtEUR(session.target_balance)} on ${fmtWsDate(session.target_date)}` : '— not set'}</div>
+        </div>
+        {targetDiff != null && (
+          <div>
+            <div style={{ fontSize: 10, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Difference</div>
+            <div style={{ fontSize: 13, fontWeight: 700, color: isBalanced ? 'var(--accent)' : 'var(--warn)' }}>{isBalanced ? '✓ Balanced' : fmtEUR(targetDiff)}</div>
+          </div>
+        )}
+        <div style={{ marginLeft: 'auto' }}>
+          <button className="btn btn-p btn-sm" disabled={!isBalanced || completingSession} onClick={onCompleteSession} title={!isBalanced ? 'Reconciled balance must match the target before completing' : ''}>
+            {completingSession ? 'Completing…' : 'Complete reconciliation'}
+          </button>
+        </div>
+      </div>
+
+      <div style={{ fontSize: 10, color: 'var(--text-faint)', marginBottom: 6, paddingLeft: 2 }}>
+        ↑↓ navigate · Enter accept · N reject
+      </div>
+
+      <div className="card">
+        {worksheetLoading ? (
+          <div style={{ padding: 48, textAlign: 'center', color: 'var(--text-faint)', fontSize: 12 }}>Loading…</div>
+        ) : worksheetRows.length === 0 ? (
+          <div style={{ padding: 48, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>No transactions in this range yet.</div>
+        ) : worksheetRows.map((row, i) => (
+          <div key={row.bt.id} onClick={() => setFocusedIndex(i)} style={{ borderBottom: i < worksheetRows.length - 1 ? '1px solid var(--border)' : 'none', background: i === focusedIndex ? 'var(--accent-dim)' : undefined }}>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 100px 1fr 110px', alignItems: 'center', gap: 12, padding: '12px 18px', opacity: row.bt.reconciled ? 0.75 : 1 }}>
+              <div>
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                  <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>{row.bt.date}</span>
+                  {row.bt.reconciled && <span style={{ fontSize: 10, color: 'var(--accent)' }}>✓ reconciled</span>}
+                </div>
+                <div style={{ fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{row.bt.description}</div>
+              </div>
+              <div style={{ fontSize: 12, fontWeight: 600, textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: Number(row.bt.amount) >= 0 ? 'var(--accent)' : 'var(--danger)' }}>
+                {Number(row.bt.amount) >= 0 ? '+' : ''}{fmtEUR(row.bt.amount)}
+              </div>
+              <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
+                {row.bt.reconciled ? (
+                  <span style={{ fontSize: 11, color: 'var(--text-faint)' }}>—</span>
+                ) : row.match ? (
+                  <>
+                    {typeTag(row.entity ? row.entity._type : row.match.matched_type)}
+                    {confBadge(row.match.confidence)}
+                    <span style={{ fontSize: 11, maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.entity ? row.entity._label : ''}</span>
+                    {row.match.matched_type === 'journal'
+                      ? <button className="btn btn-p btn-sm" style={{ fontSize: 11 }} onClick={() => onConfirmJournalMatch(row.match, row.bt)}>Accept</button>
+                      : <button className="btn btn-p btn-sm" style={{ fontSize: 11 }} onClick={() => onOpenSettleModal(row.bt, row.entity)}>Settle…</button>}
+                    <button className="btn btn-s btn-sm" style={{ fontSize: 11, color: 'var(--danger)' }} onClick={() => onRejectMatch(row.match.id)}>Reject</button>
+                  </>
+                ) : (
+                  <>
+                    <button className="btn btn-s btn-sm" style={{ fontSize: 11 }} onClick={() => onOpenSettleModal(row.bt)}>Settle…</button>
+                    <button className="btn btn-s btn-sm" style={{ fontSize: 11 }} onClick={() => createJnlFor?.id === row.bt.id ? onCancelCreateJnl() : onOpenCreateJnl(row.bt)}>
+                      {createJnlFor?.id === row.bt.id ? 'Close' : 'Categorise'}
+                    </button>
+                    <button className="btn btn-s btn-sm" style={{ fontSize: 11 }} onClick={() => findFor?.id === row.bt.id ? onCloseFindMatch() : onOpenFindMatch(row.bt)}>
+                      {findFor?.id === row.bt.id ? 'Close' : 'Find match…'}
+                    </button>
+                  </>
+                )}
+              </div>
+              <div style={{ fontSize: 12, textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: 'var(--text-muted)' }}>
+                {fmtEUR(row.runningBalance)}
+              </div>
+            </div>
+            {createJnlFor?.id === row.bt.id && jnlForm && (
+              <InlineCreateJnl jnlForm={jnlForm} setJnlForm={setJnlForm} onSave={onSaveJnl} onCancel={onCancelCreateJnl} savingJnl={savingJnl} />
+            )}
+            {findFor?.id === row.bt.id && (
+              <FindMatchPanel searchQ={searchQ} setSearchQ={setSearchQ} filteredCands={filteredCands} typeTag={typeTag} onLink={(cand) => onLinkManual(row.bt, cand)} />
+            )}
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
 // Reconciliation page component
 // ─────────────────────────────────────────────────────────────────────────────
 function Reconciliation({ companyId, onNavigate }) {
@@ -15976,13 +16272,143 @@ function Reconciliation({ companyId, onNavigate }) {
   // Item 2 — active bank accounts, so the "Categorise" journal defaults to the
   // transaction's own bank nominal instead of a hardcoded '1000'.
   const [bankAccounts, setBankAccounts] = useState([]);
+  // Track B — anchor-balance worksheet, per selected account.
+  const { user: reconUser } = useUser();
+  const [selectedAccountId, setSelectedAccountId] = useState(null);
+  const [viewMode, setViewMode]             = useState('worksheet'); // 'worksheet' | 'history'
+  const [session, setSession]               = useState(null);        // this account's in_progress or latest completed reconciliation_sessions row
+  const [sessionLoading, setSessionLoading] = useState(false);
+  const [worksheetRows, setWorksheetRows]   = useState([]);
+  const [worksheetLoading, setWorksheetLoading] = useState(false);
+  const [startForm, setStartForm]           = useState(null);
+  const [startErr, setStartErr]             = useState(null);
+  const [startSaving, setStartSaving]       = useState(false);
+  const [completingSession, setCompletingSession] = useState(false);
 
   useEffect(() => { if (companyId) loadAll(); }, [companyId]); // eslint-disable-line
   useEffect(() => {
     if (!companyId) return;
-    supabase.from('bank_accounts').select('id, nominal_code').eq('company_id', companyId).eq('is_active', true)
-      .then(({ data }) => setBankAccounts(data || []));
+    supabase.from('bank_accounts').select('id, nominal_code, display_name').eq('company_id', companyId).eq('is_active', true)
+      .then(({ data }) => {
+        setBankAccounts(data || []);
+        setSelectedAccountId(prev => prev || data?.[0]?.id || null);
+      });
   }, [companyId]);
+
+  const loadSession = async () => {
+    if (!selectedAccountId) { setSession(null); return; }
+    setSessionLoading(true);
+    const { data: inProg } = await supabase.from('reconciliation_sessions').select('*')
+      .eq('bank_account_id', selectedAccountId).eq('status', 'in_progress').maybeSingle();
+    if (inProg) { setSession(inProg); setSessionLoading(false); return; }
+    const { data: lastCompleted } = await supabase.from('reconciliation_sessions').select('*')
+      .eq('bank_account_id', selectedAccountId).eq('status', 'completed')
+      .order('target_date', { ascending: false }).limit(1).maybeSingle();
+    setSession(lastCompleted || null);
+    setSessionLoading(false);
+  };
+  useEffect(() => { loadSession(); }, [selectedAccountId]); // eslint-disable-line
+
+  const sessionMode = !session ? 'none' : session.status === 'in_progress' ? 'active' : 'completed';
+
+  const loadWorksheet = async () => {
+    if (!session || session.status !== 'in_progress' || !selectedAccountId) { setWorksheetRows([]); return; }
+    setWorksheetLoading(true);
+    let q = supabase.from('bank_transactions').select('*')
+      .eq('company_id', companyId).eq('bank_account_id', selectedAccountId)
+      .gte('date', session.anchor_date);
+    if (session.target_date) q = q.lte('date', session.target_date);
+    const { data: txns } = await q.order('date', { ascending: true });
+
+    const btIds = (txns || []).map(t => t.id);
+    const { data: matches } = await supabase.from('bank_matches').select('*')
+      .eq('company_id', companyId).eq('status', 'suggested')
+      .in('bank_transaction_id', btIds.length ? btIds : ['00000000-0000-0000-0000-000000000000']);
+
+    const invIds = [...new Set((matches || []).filter(m => m.matched_type === 'invoice').map(m => m.matched_id))];
+    const apIds  = [...new Set((matches || []).filter(m => m.matched_type === 'ap_invoice').map(m => m.matched_id))];
+    const jnlIds = [...new Set((matches || []).filter(m => m.matched_type === 'journal').map(m => m.matched_id))];
+    const [{ data: invs }, { data: apInvs }, { data: jnls }] = await Promise.all([
+      invIds.length ? supabase.from('invoices').select('id,invoice_number,invoice_ref,client,total,amount,amount_paid').in('id', invIds) : { data: [] },
+      apIds.length  ? supabase.from('ap_invoices').select('id,invoice_ref,supplier,amount,gross_amount,amount_paid').in('id', apIds) : { data: [] },
+      jnlIds.length ? supabase.from('journals').select('id,date,description,amount,reference').in('id', jnlIds) : { data: [] },
+    ]);
+    const entMap = {};
+    for (const x of (invs || [])) { const tot = Number(x.total || x.amount || 0); entMap[x.id] = { ...x, _type: 'invoice', outstanding: Math.max(0, tot - Number(x.amount_paid || 0)), amount: tot, _label: `${x.invoice_number || x.invoice_ref} — ${x.client}` }; }
+    for (const x of (apInvs || [])) { const tot = Number(x.gross_amount || x.amount || 0); entMap[x.id] = { ...x, _type: 'ap_invoice', outstanding: Math.max(0, tot - Number(x.amount_paid || 0)), amount: tot, _label: `${x.invoice_ref} — ${x.supplier}` }; }
+    for (const x of (jnls || [])) entMap[x.id] = { ...x, _type: 'journal', _label: x.reference || x.description || 'Journal' };
+
+    const matchByBt = Object.fromEntries((matches || []).map(m => [m.bank_transaction_id, m]));
+
+    // Purely-derived running balance (Phase 2 decision): recomputed fresh from each
+    // transaction's live `reconciled` flag every load — no cached/stored running total, so
+    // rejecting or un-reconciling a row is automatically reflected on the next refresh with
+    // no special-case handling.
+    let running = Number(session.anchor_balance);
+    const rows = (txns || []).map(bt => {
+      if (bt.reconciled) running += Number(bt.amount);
+      const match = matchByBt[bt.id] || null;
+      const entity = match ? entMap[match.matched_id] || null : null;
+      return { bt, match, entity, runningBalance: running };
+    });
+    setWorksheetRows(rows);
+    setWorksheetLoading(false);
+  };
+  useEffect(() => { loadWorksheet(); }, [session, selectedAccountId]); // eslint-disable-line
+
+  const refreshCurrentView = async () => {
+    await loadAll();
+    if (viewMode === 'worksheet' && session?.status === 'in_progress') await loadWorksheet();
+  };
+
+  const openStartSession = async () => {
+    const { data: lastCompleted } = await supabase.from('reconciliation_sessions').select('target_balance,target_date')
+      .eq('bank_account_id', selectedAccountId).eq('status', 'completed')
+      .order('target_date', { ascending: false }).limit(1).maybeSingle();
+    setStartForm({
+      anchor_balance: lastCompleted?.target_balance != null ? String(lastCompleted.target_balance) : '',
+      anchor_date: lastCompleted?.target_date || '',
+      target_balance: '', target_date: '',
+    });
+    setStartErr(null);
+  };
+
+  const saveStartSession = async () => {
+    if (!startForm || startSaving) return;
+    const anchorBalance = parseFloat(startForm.anchor_balance);
+    if (!startForm.anchor_date || isNaN(anchorBalance)) { setStartErr('Anchor balance and date are required'); return; }
+    if ((startForm.target_balance !== '') !== !!startForm.target_date) { setStartErr('Target balance and target date must be set together, or both left blank'); return; }
+    const hasTarget = startForm.target_balance !== '' && startForm.target_date;
+    setStartSaving(true); setStartErr(null);
+    const { data, error } = await supabase.from('reconciliation_sessions').insert({
+      company_id: companyId, bank_account_id: selectedAccountId,
+      anchor_balance: anchorBalance, anchor_date: startForm.anchor_date,
+      target_balance: hasTarget ? parseFloat(startForm.target_balance) : null,
+      target_date: hasTarget ? startForm.target_date : null,
+      created_by: reconUser?.id || null,
+    }).select().single();
+    if (error) { setStartErr(error.message); setStartSaving(false); return; }
+    setSession(data); setStartForm(null); setStartSaving(false);
+  };
+
+  const completeSession = async () => {
+    if (!session || completingSession) return;
+    setCompletingSession(true);
+    const { data, error } = await supabase.from('reconciliation_sessions')
+      .update({ status: 'completed', completed_at: new Date().toISOString(), completed_by: reconUser?.id || null })
+      .eq('id', session.id).select().single();
+    if (!error) { setSession(data); showToast('Reconciliation completed'); }
+    else showToast('Error: ' + error.message);
+    setCompletingSession(false);
+  };
+
+  const reopenSession = async () => {
+    const { data, error } = await supabase.from('reconciliation_sessions')
+      .update({ status: 'in_progress', completed_at: null, completed_by: null })
+      .eq('id', session.id).select().single();
+    if (!error) setSession(data);
+    else showToast('Error: ' + error.message);
+  };
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(null), 3200); };
 
@@ -16103,7 +16529,7 @@ function Reconciliation({ companyId, onNavigate }) {
     try {
       const n = await runMatchingEngine(companyId);
       showToast(`${n} new suggestion${n !== 1 ? 's' : ''} created`);
-      await loadAll();
+      await refreshCurrentView();
     } catch (e) { setMatchError(e.message); }
     setMatching(false);
   };
@@ -16113,7 +16539,7 @@ function Reconciliation({ companyId, onNavigate }) {
     try {
       await confirmBankTxn(companyId, match.id, bt.id);
       showToast('Match confirmed');
-      await loadAll();
+      await refreshCurrentView();
     } catch (err) {
       captureError(err, { company_id: companyId, operation: 'confirm-journal-match' });
       showToast('Error: ' + err.message);
@@ -16123,7 +16549,7 @@ function Reconciliation({ companyId, onNavigate }) {
   const rejectMatch = async (matchId) => {
     await supabase.from('bank_matches').update({ status: 'rejected' }).eq('id', matchId);
     showToast('Match rejected');
-    await loadAll();
+    await refreshCurrentView();
   };
 
   // Bulk-confirm only journal matches (≥80%) — invoice settlements need individual review
@@ -16218,7 +16644,7 @@ function Reconciliation({ companyId, onNavigate }) {
         : `Settlement posted — ${settleAllocs.length} invoice${settleAllocs.length !== 1 ? 's' : ''} cleared`
       );
       setSettleFor(null); setSettleAllocs([]);
-      await loadAll();
+      await refreshCurrentView();
     } catch (err) { setSettleErr(err.message); }
     setSettleSaving(false);
   };
@@ -16228,12 +16654,22 @@ function Reconciliation({ companyId, onNavigate }) {
     const [{ data: arInvs }, { data: apInvs }, { data: jnls }] = await Promise.all([
       supabase.from('invoices').select('id,invoice_ref,client,amount,invoice_date').eq('company_id', companyId).neq('status', 'paid'),
       supabase.from('ap_invoices').select('id,invoice_ref,supplier,amount,invoice_date').eq('company_id', companyId).neq('status', 'paid'),
-      supabase.from('journals').select('id,date,description,amount,reference').eq('company_id', companyId).is('import_batch_id', null).order('date', { ascending: false }).limit(200),
+      // debit_account/credit_account added (Track B Piece 3) so cross-account journal
+      // candidates can be visually flagged below — a manual search shows every candidate
+      // regardless of account (unlike the automated engine's hard exclusion), since a human
+      // deliberately overriding is a different risk profile.
+      supabase.from('journals').select('id,date,description,amount,reference,debit_account,credit_account').eq('company_id', companyId).is('import_batch_id', null).order('date', { ascending: false }).limit(200),
     ]);
+    const btBankNominal  = bankAccounts.find(a => a.id === bt.bank_account_id)?.nominal_code;
+    const bankNominalSet = new Set(bankAccounts.map(a => a.nominal_code).filter(Boolean));
+    const flagCrossAccount = (j) => {
+      const leg = [j.debit_account, j.credit_account].find(a => bankNominalSet.has(a));
+      return !!(leg && btBankNominal && leg !== btBankNominal) ? leg : null;
+    };
     setAllCandidates([
       ...(arInvs  || []).map(x => ({ ...x, _type: 'invoice',    _label: `${x.invoice_ref} — ${x.client}`,   _date: x.invoice_date })),
       ...(apInvs  || []).map(x => ({ ...x, _type: 'ap_invoice', _label: `${x.invoice_ref} — ${x.supplier}`, _date: x.invoice_date })),
-      ...(jnls    || []).map(x => ({ ...x, _type: 'journal',    _label: x.reference || x.description || 'Journal', _date: x.date })),
+      ...(jnls    || []).map(x => ({ ...x, _type: 'journal',    _label: x.reference || x.description || 'Journal', _date: x.date, _crossAccountNominal: flagCrossAccount(x) })),
     ]);
   };
 
@@ -16246,7 +16682,7 @@ function Reconciliation({ companyId, onNavigate }) {
     if (error) { showToast('Error: ' + error.message); return; }
     setFindFor(null);
     showToast('Linked — confirm it in the Suggested tab');
-    await loadAll();
+    await refreshCurrentView();
   };
 
   const openCreateJnl = (bt) => {
@@ -16277,7 +16713,7 @@ function Reconciliation({ companyId, onNavigate }) {
     await supabase.from('bank_transactions').update({ reconciled: true, reconciled_at: now, settlement_type: 'categorise' }).eq('id', createJnlFor.id);
     setCreateJnlFor(null); setJnlForm(null);
     showToast('Journal posted and transaction reconciled');
-    await loadAll();
+    await refreshCurrentView();
     setSavingJnl(false);
   };
 
@@ -16348,6 +16784,31 @@ function Reconciliation({ companyId, onNavigate }) {
         ))}
       </div>
 
+      {/* ── Account selector + view mode ── */}
+      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14, flexWrap: 'wrap', gap: 10 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <span style={{ fontSize: 11, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Account</span>
+          {bankAccounts.length > 1 ? (
+            <select className="f-input" value={selectedAccountId || ''} onChange={e => setSelectedAccountId(e.target.value)} style={{ fontSize: 12, padding: '5px 8px' }}>
+              {bankAccounts.map(a => <option key={a.id} value={a.id}>{a.display_name}</option>)}
+            </select>
+          ) : (
+            <span style={{ fontSize: 12, fontWeight: 600, color: 'var(--text)' }}>{bankAccounts[0]?.display_name || '—'}</span>
+          )}
+        </div>
+        <div style={{ display: 'flex', gap: 0, border: '1px solid var(--border)', borderRadius: 6, overflow: 'hidden' }}>
+          {[['worksheet', 'Worksheet'], ['history', 'All activity']].map(([m, label]) => (
+            <button key={m} onClick={() => setViewMode(m)} style={{
+              padding: '6px 14px', fontSize: 12, fontWeight: viewMode === m ? 600 : 400,
+              background: viewMode === m ? 'var(--accent-dim)' : 'transparent', border: 'none', cursor: 'pointer',
+              color: viewMode === m ? 'var(--accent)' : 'var(--text-muted)',
+            }}>{label}</button>
+          ))}
+        </div>
+      </div>
+
+      {viewMode === 'history' && (
+      <>
       {/* ── Toolbar ── */}
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 14 }}>
         <div style={{ display: 'flex', gap: 0, borderBottom: '1px solid var(--border)' }}>
@@ -16440,33 +16901,14 @@ function Reconciliation({ companyId, onNavigate }) {
               <button className="btn btn-s btn-sm" onClick={() => createJnlFor?.id === bt.id ? setCreateJnlFor(null) : openCreateJnl(bt)}>
                 {createJnlFor?.id === bt.id ? 'Close' : 'Categorise'}
               </button>
+              <button className="btn btn-s btn-sm" onClick={() => findFor?.id === bt.id ? setFindFor(null) : openFindMatch(bt)}>
+                {findFor?.id === bt.id ? 'Close' : 'Find match…'}
+              </button>
             </div>
 
             {/* Inline find-match */}
             {findFor?.id === bt.id && (
-              <div style={{ padding: '12px 18px', background: 'var(--surface-2)', borderBottom: '1px solid var(--border)' }}>
-                <input className="f-input" value={searchQ} autoFocus onChange={e => setSearchQ(e.target.value)}
-                  placeholder="Search by ref, name, amount…" style={{ fontSize: 12, marginBottom: 8, width: '100%', boxSizing: 'border-box' }} />
-                <div style={{ maxHeight: 220, overflowY: 'auto' }}>
-                  {filteredCands.length === 0 ? (
-                    <div style={{ fontSize: 12, color: 'var(--text-faint)', padding: '6px 0' }}>No candidates found</div>
-                  ) : filteredCands.slice(0, 25).map(cand => (
-                    <div key={cand.id} style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', padding: '7px 10px', borderRadius: 4, marginBottom: 3, background: 'var(--surface)', border: '1px solid var(--border)' }}>
-                      <div style={{ flex: 1, minWidth: 0 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 1 }}>
-                          {typeTag(cand._type)}
-                          <span style={{ fontSize: 10, color: 'var(--text-faint)', fontVariantNumeric: 'tabular-nums' }}>{cand._date}</span>
-                        </div>
-                        <div style={{ fontSize: 12, color: 'var(--text)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{cand._label}</div>
-                      </div>
-                      <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexShrink: 0 }}>
-                        <span style={{ fontSize: 12, fontVariantNumeric: 'tabular-nums', fontWeight: 600 }}>{fmtEUR(cand.amount)}</span>
-                        <button className="btn btn-p btn-sm" style={{ fontSize: 11 }} onClick={() => linkManual(bt, cand)}>Link</button>
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
+              <FindMatchPanel searchQ={searchQ} setSearchQ={setSearchQ} filteredCands={filteredCands} typeTag={typeTag} onLink={(cand) => linkManual(bt, cand)} />
             )}
 
             {/* Inline create journal */}
@@ -16548,6 +16990,48 @@ function Reconciliation({ companyId, onNavigate }) {
         ))}
 
       </div>
+      </>
+      )}
+
+      {viewMode === 'worksheet' && (
+        <ReconWorksheet
+          sessionMode={sessionMode}
+          session={session}
+          sessionLoading={sessionLoading}
+          worksheetRows={worksheetRows}
+          worksheetLoading={worksheetLoading}
+          startForm={startForm}
+          startErr={startErr}
+          startSaving={startSaving}
+          completingSession={completingSession}
+          onOpenStartSession={openStartSession}
+          onChangeStartForm={setStartForm}
+          onCancelStartSession={() => { setStartForm(null); setStartErr(null); }}
+          onSaveStartSession={saveStartSession}
+          onCompleteSession={completeSession}
+          onReopenSession={reopenSession}
+          confBadge={confBadge}
+          typeTag={typeTag}
+          onConfirmJournalMatch={confirmJournalMatch}
+          onOpenSettleModal={openSettleModal}
+          onRejectMatch={rejectMatch}
+          onOpenCreateJnl={openCreateJnl}
+          createJnlFor={createJnlFor}
+          jnlForm={jnlForm}
+          setJnlForm={setJnlForm}
+          onSaveJnl={saveJnl}
+          savingJnl={savingJnl}
+          onCancelCreateJnl={() => { setCreateJnlFor(null); setJnlForm(null); }}
+          findFor={findFor}
+          onOpenFindMatch={openFindMatch}
+          onCloseFindMatch={() => setFindFor(null)}
+          searchQ={searchQ}
+          setSearchQ={setSearchQ}
+          filteredCands={filteredCands}
+          onLinkManual={linkManual}
+          settleModalOpen={!!settleFor}
+        />
+      )}
 
       {/* Toast */}
       {toast && (
