@@ -2096,18 +2096,24 @@ async function fetchNominalBalanceAsOf(companyId, nominalCodeOrCodes, asOfDate) 
   }, 0);
 }
 
-// Item 2 — a company's active bank_accounts nominal codes, so dashboard/Cash Flow balance
-// lookups can sum across every real account instead of assuming a single hardcoded nominal.
+// Item 2 — a company's active bank_accounts nominal codes, so balance lookups can sum across
+// every real account instead of assuming a single hardcoded nominal. Plain async function (not
+// a hook) so it can also be called per-company inside a loop (Practice Dashboard) where hooks
+// rules forbid calling useActiveBankNominals itself.
+async function fetchActiveBankNominals(companyId) {
+  if (!companyId) return [];
+  const { data } = await supabase.from('bank_accounts').select('nominal_code').eq('company_id', companyId).eq('is_active', true);
+  return (data || []).map(a => a.nominal_code).filter(Boolean);
+}
+
+// Hook wrapper over fetchActiveBankNominals for components (Overview, Cash Flow) that need it
+// as reactive state tied to companyId.
 function useActiveBankNominals(companyId) {
   const [nominals, setNominals] = useState([]);
   useEffect(() => {
     if (!companyId) { setNominals([]); return; }
     let cancelled = false;
-    supabase.from('bank_accounts').select('nominal_code').eq('company_id', companyId).eq('is_active', true)
-      .then(({ data }) => {
-        if (cancelled) return;
-        setNominals((data || []).map(a => a.nominal_code).filter(Boolean));
-      });
+    fetchActiveBankNominals(companyId).then(codes => { if (!cancelled) setNominals(codes); });
     return () => { cancelled = true; };
   }, [companyId]);
   return nominals;
@@ -2127,6 +2133,14 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
   const [openingBalance,   setOpeningBalance]   = useState(0);
   const [openingBalLoaded, setOpeningBalLoaded] = useState(false);
   const activeBankNominals = useActiveBankNominals(companyId);
+  // Part 2.3 — window-narrowing toggle, same YTD-start calc as GLReport's ytdMode. Defaults to
+  // false (single month) so existing behavior is unchanged unless the user opts in.
+  const [ytdMode, setYtdMode] = useState(false);
+  const [ytdPy, ytdPm] = selPeriod.split('-').map(Number);
+  const ytdYearEndMonth   = company?.year_end_month || 12;
+  const ytdYearStartMonth = (ytdYearEndMonth % 12) + 1;
+  const ytdStartYear = ytdPm >= ytdYearStartMonth ? ytdPy : ytdPy - 1;
+  const ytdStart = `${ytdStartYear}-${String(ytdYearStartMonth).padStart(2, '0')}-01`;
 
   useEffect(() => {
     if (!companyId) { setLoading(false); return; }
@@ -2149,8 +2163,16 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
   // it the running balance accumulates from zero instead of the real bank position.
   useEffect(() => {
     if (!companyId) { setOpeningBalLoaded(true); return; }
-    const [oy, om] = selPeriod.split('-').map(Number);
-    const dayBeforePeriodStart = new Date(oy, om - 1, 0).toISOString().slice(0, 10);
+    // ytdMode widens the anchor to the day before the fiscal year's start instead of the day
+    // before the selected month — same window-narrowing GLReport's ytdMode applies to journals.
+    let dayBeforePeriodStart;
+    if (ytdMode) {
+      const [ySy, ySm] = ytdStart.split('-').map(Number);
+      dayBeforePeriodStart = new Date(ySy, ySm - 1, 0).toISOString().slice(0, 10);
+    } else {
+      const [oy, om] = selPeriod.split('-').map(Number);
+      dayBeforePeriodStart = new Date(oy, om - 1, 0).toISOString().slice(0, 10);
+    }
     let cancelled = false;
     setOpeningBalLoaded(false);
     // Item 2 — sum across every active bank account instead of the single hardcoded nominal;
@@ -2161,7 +2183,7 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
       .catch(() => { if (!cancelled) setOpeningBalance(0); })
       .then(() => { if (!cancelled) setOpeningBalLoaded(true); });
     return () => { cancelled = true; };
-  }, [companyId, selPeriod, activeBankNominals]);
+  }, [companyId, selPeriod, activeBankNominals, ytdMode, ytdStart]);
 
   // ── Empty state ──
   if (!loading && txns.length === 0) return (
@@ -2178,10 +2200,22 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
   // ── Period bounds ──
   const isCurrentPeriod = selPeriod === currentMonth;
   const [py, pm] = selPeriod.split('-').map(Number);
-  const periodStart    = `${selPeriod}-01`;
+  // Part 2.3 — ytdMode widens the start to the fiscal year's start; end is unaffected.
+  const periodStart    = ytdMode ? ytdStart : `${selPeriod}-01`;
   const periodEndDate  = isCurrentPeriod ? now : new Date(py, pm, 0);
   const periodEndStr   = periodEndDate.toISOString().slice(0, 10);
-  const daysInPeriod   = isCurrentPeriod ? now.getDate() : new Date(py, pm, 0).getDate();
+  // Day count: kept as the OLD exact, ISO-conversion-free read when ytdMode is off (byte-
+  // identical to before this change). For ytdMode, a generic `new Date(periodEndStr) -
+  // new Date(periodStart)` subtraction turned out to be timezone-fragile — periodEndDate is
+  // built via new Date(y,m,d) (local midnight), and round-tripping that through
+  // toISOString() can shift the calendar date by a day in timezones ahead of UTC. Building
+  // the end string straight from periodEndDate's own local Y/M/D fields (never through
+  // toISOString) avoids that entirely; both endpoints then parse via the same explicit-UTC
+  // helper so only the calendar difference matters.
+  const toUTCDateNum = (s) => { const [y, m, d] = s.split('-').map(Number); return Date.UTC(y, m - 1, d); };
+  const daysInPeriod = ytdMode
+    ? Math.round((toUTCDateNum(`${periodEndDate.getFullYear()}-${String(periodEndDate.getMonth() + 1).padStart(2, '0')}-${String(periodEndDate.getDate()).padStart(2, '0')}`) - toUTCDateNum(periodStart)) / 86400000) + 1
+    : (isCurrentPeriod ? now.getDate() : new Date(py, pm, 0).getDate());
 
   // ── Derived figures ──
   const txnsUpToEnd = txns.filter(t => t.date <= periodEndStr);
@@ -2276,6 +2310,22 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
       {!cfLoading && (
         <>
 
+          {/* ── Month / YTD toggle ── */}
+          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
+            <div style={{ display: "inline-flex", border: "1px solid var(--border)", borderRadius: 6, overflow: "hidden" }}>
+              {[{ id: false, label: "Month" }, { id: true, label: "YTD" }].map(({ id, label }) => (
+                <button key={label} onClick={() => setYtdMode(id)} style={{
+                  padding: "4px 12px", fontSize: 11, fontFamily: "Source Code Pro, monospace",
+                  background: ytdMode === id ? "var(--surface-2)" : "var(--surface)",
+                  color: ytdMode === id ? "var(--text)" : "var(--text-muted)",
+                  border: "none", borderLeft: id ? "1px solid var(--border)" : "none",
+                  cursor: "pointer", fontWeight: ytdMode === id ? 600 : 400,
+                }}>{label}</button>
+              ))}
+            </div>
+            {ytdMode && <span style={{ fontSize: 10, color: "var(--dim)", fontFamily: "Source Code Pro, monospace" }}>from {ytdStart}</span>}
+          </div>
+
           {/* ── KPI row ── */}
           <div className="kpi-grid" style={{ gridTemplateColumns: "repeat(3,1fr)", marginBottom: 13 }}>
             <div className="kpi-card" style={{ "--tc": "var(--teal)" }}>
@@ -2365,9 +2415,23 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
           <div className="card full-col">
             <div className="card-header">
               <span className="card-title">Transactions</span>
-              <span style={{ fontSize: 10, fontFamily: "Source Code Pro, monospace", color: "var(--dim)" }}>
-                Last 10 in period · {periodTxns.length} total
-              </span>
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                <span style={{ fontSize: 10, fontFamily: "Source Code Pro, monospace", color: "var(--dim)" }}>
+                  Last 10 in period · {periodTxns.length} total
+                </span>
+                {periodTxnsWithBalance.length > 0 && (
+                  <ExportDropdown
+                    onCSV={() => downloadCSV(`cash-flow-${ytdMode ? `ytd-to-${selPeriod}` : selPeriod}.csv`, [
+                      ["Ledgrly — Cash Flow", periodStart, "to", periodEndStr],
+                      ["Exported", fmtIE(new Date().toISOString().slice(0, 10))],
+                      [],
+                      ["Date", "Description", "Nominal", "Amount (€)", "Balance (€)"],
+                      ...periodTxnsWithBalance.map(t => [t.date, t.description || "", t.nominal_account || "", fmtEUR(t.amount), fmtEUR(t.runningBalance)]),
+                    ])}
+                    onPrint={() => window.print()}
+                  />
+                )}
+              </div>
             </div>
             {recent10.length === 0 ? (
               <div style={{ padding: "32px 16px", textAlign: "center", color: "var(--dim)", fontSize: 12 }}>No transactions in this period.</div>
@@ -6297,13 +6361,27 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
   const chkPeriodKey   = new Date(selYear, selMo - 1, 1).toLocaleDateString("en-IE", { month: "long", year: "numeric" });
   const selPeriodLabel = chkPeriodKey;
 
+  // Part 2.3 — window-narrowing toggle for the cash sparkline ONLY. Deliberately does NOT
+  // widen `periodStart`/`periodEnd` themselves: the checklist lookup, the AP/AR overdue query,
+  // and the burn-rate journals query below all share those same variables and are monthly
+  // metrics by definition — widening them to YTD would silently change what "monthly burn"
+  // means (a YTD average, not this month's actual spend), not just its window. So this toggle
+  // only affects `chartRangeStart`, used solely by the sparkline's transaction fetch and its
+  // opening-balance anchor.
+  const [ytdMode, setYtdMode] = useState(false);
+  const ovYearEndMonth   = company?.year_end_month || 12;
+  const ovYearStartMonth = (ovYearEndMonth % 12) + 1;
+  const ovYtdStartYear   = selMo >= ovYearStartMonth ? selYear : selYear - 1;
+  const ytdStart         = `${ovYtdStartYear}-${String(ovYearStartMonth).padStart(2, '0')}-01`;
+  const chartRangeStart  = ytdMode ? ytdStart : periodStart;
+
 
   useEffect(() => {
     if (!companyId) { setLoading(false); return; }
     (async () => {
       setLoading(true);
       const today = new Date().toISOString().slice(0, 10);
-      const dayBeforePeriodStart = new Date(new Date(periodStart).getTime() - 86400000).toISOString().slice(0, 10);
+      const dayBeforeChartStart = new Date(new Date(chartRangeStart).getTime() - 86400000).toISOString().slice(0, 10);
 
       const [periodEndBal, openingForPeriod, btRecent, overdueRes, expRes, chkRes, jnlRes] = await Promise.all([
         // Bank nominal balance as at the end of the selected period — inception-unbounded, same
@@ -6311,14 +6389,14 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
         // that's only populated for CSV imports with a statement balance column: Yapily-fed rows
         // always leave it null, which is why this tile showed €0.
         fetchNominalBalanceAsOf(companyId, activeBankNominals, periodEnd).catch(() => null),
-        // Same, but as at the day before the period starts — the anchor for the sparkline's
-        // running balance below.
-        fetchNominalBalanceAsOf(companyId, activeBankNominals, dayBeforePeriodStart).catch(() => 0),
-        // Sparkline: rows within the selected month, chronological
+        // Same, but as at the day before the sparkline's window starts (month or YTD per
+        // ytdMode) — the anchor for the sparkline's running balance below.
+        fetchNominalBalanceAsOf(companyId, activeBankNominals, dayBeforeChartStart).catch(() => 0),
+        // Sparkline: rows within the selected window (month, or YTD when ytdMode is on), chronological
         supabase.from('bank_transactions')
           .select('date, amount, balance, nominal_account')
           .eq('company_id', companyId)
-          .gte('date', periodStart)
+          .gte('date', chartRangeStart)
           .lte('date', periodEnd)
           .order('date', { ascending: false })
           .limit(200),
@@ -6383,7 +6461,7 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
       }
       setLoading(false);
     })();
-  }, [companyId, selPeriod, activeBankNominals]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [companyId, selPeriod, activeBankNominals, chartRangeStart]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // All-time automation stats (not period-scoped)
   useEffect(() => {
@@ -6896,6 +6974,30 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
 
   return (
     <div className="fade-up" style={{ maxWidth: 1100 }}>
+
+      {/* Print-only — no CSV here: Overview is a mix of heterogeneous widgets (KPI tiles,
+          sparkline, checklist, insights), not one flat table, so there's no single natural
+          row shape for a CSV the way every other exported report has. */}
+      {!loading && (
+        <div style={{ display: "flex", justifyContent: "flex-end", alignItems: "center", gap: 10, marginBottom: 8 }}>
+          {/* Part 2.3 — window-narrowing toggle, scoped to the cash sparkline only (see the
+              comment above chartRangeStart): the checklist, burn rate, and AR/overdue figures
+              are monthly metrics by definition and are deliberately unaffected by this toggle. */}
+          <span style={{ fontSize: 10, color: "var(--dim)", fontFamily: "Source Code Pro, monospace" }}>Cash chart:</span>
+          <div style={{ display: "inline-flex", border: "1px solid var(--border)", borderRadius: 6, overflow: "hidden" }}>
+            {[{ id: false, label: "Month" }, { id: true, label: "YTD" }].map(({ id, label }) => (
+              <button key={label} onClick={() => setYtdMode(id)} style={{
+                padding: "3px 10px", fontSize: 11, fontFamily: "Source Code Pro, monospace",
+                background: ytdMode === id ? "var(--surface-2)" : "var(--surface)",
+                color: ytdMode === id ? "var(--text)" : "var(--text-muted)",
+                border: "none", borderLeft: id ? "1px solid var(--border)" : "none",
+                cursor: "pointer", fontWeight: ytdMode === id ? 600 : 400,
+              }}>{label}</button>
+            ))}
+          </div>
+          <button className="btn btn-s btn-sm" onClick={() => window.print()}>🖨 Print / Save PDF</button>
+        </div>
+      )}
 
       {/* ── Historical period banner ── */}
       {isHistorical && (
@@ -9125,6 +9227,39 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
     ]);
   };
 
+  const exportBS = () => {
+    const row = (label, amount) => ["", label, amount != null ? (amount < 0 ? "-" : "") + fmtEUR(Math.abs(amount)) : ""];
+    downloadCSV(`balance-sheet-${slug}.csv`, [
+      ["Ledgrly — Balance Sheet", companyName, `As at ${periodEnd}`],
+      ["Exported", exportDate],
+      [],
+      ["Section", "Account", "Net Balance"],
+      ...(bsFixed.length ? [
+        ["Fixed Assets", "", ""],
+        ...bsFixed.map(r => row(`${r.code} · ${r.name}`, r.net)),
+        row("Total Fixed Assets", bsFixedTotal),
+      ] : []),
+      ["Current Assets", "", ""],
+      ...(bsCurrAss.length ? bsCurrAss.map(r => row(`${r.code} · ${r.name}`, r.net)) : [["", "No current asset balances", ""]]),
+      row("Total Current Assets", bsCurrAssTotal),
+      ["Creditors: due within one year", "", ""],
+      ...bsCurrLiab.map(r => row(`${r.code} · ${r.name}`, -Math.abs(r.net))),
+      ...bsOverdraft.map(r => row(`${r.code} · ${r.name} (overdraft)`, -Math.abs(r.net))),
+      ...(bsCurrLiabTotal > 0 ? [row("Total Creditors < 1yr", -bsCurrLiabTotal)] : []),
+      ...(bsLtLiab.length ? [
+        ["Creditors: due after one year", "", ""],
+        ...bsLtLiab.map(r => row(`${r.code} · ${r.name}`, -Math.abs(r.net))),
+        row("Total Creditors > 1yr", -bsLtLiabTotal),
+      ] : []),
+      row("Net Assets", bsNetAssets),
+      ["Capital and Reserves", "", ""],
+      ...(bsShareCap !== 0 ? [row("Share Capital", bsShareCap)] : []),
+      ...(Math.abs(bsRetainedBfwd) >= 0.005 ? [row("Retained Earnings — brought forward", bsRetainedBfwd)] : []),
+      row("Retained Earnings — current period", np),
+      row("Total Capital and Reserves", bsTotalCapital),
+    ]);
+  };
+
   const emptyMsg = (title, sub) => (
     <div style={{ padding: "40px 24px", textAlign: "center", color: "var(--dim)", fontSize: 13 }}>
       <div style={{ fontSize: 15, fontWeight: 500, color: "var(--text-muted)", marginBottom: 8 }}>{title}</div>
@@ -9338,7 +9473,10 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
           <div className="card">
             <div className="card-header">
               <span className="card-title">Balance Sheet — {reportLabel}</span>
-              {!noBsJournals && <span style={{ fontSize: 10, fontFamily: "'Source Code Pro',monospace", color: "var(--muted)", letterSpacing: "0.06em" }}>AS AT {periodEnd.toUpperCase()}</span>}
+              <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                {!noBsJournals && <span style={{ fontSize: 10, fontFamily: "'Source Code Pro',monospace", color: "var(--muted)", letterSpacing: "0.06em" }}>AS AT {periodEnd.toUpperCase()}</span>}
+                {!noBsJournals && <ExportDropdown onCSV={exportBS} onPrint={() => window.print()} />}
+              </div>
             </div>
             {noBsJournals ? emptyMsg(`No balance sheet data for ${reportLabel}`, "Post journals to populate your balance sheet.") : (
               <div className="card-body" style={{ maxWidth: 560 }}>
@@ -15169,9 +15307,12 @@ function PracticeDashboard({ companies, onSelectCompany, onAddCompany }) {
     companies.forEach(async c => {
       try {
         const today = new Date().toISOString().slice(0, 10);
-        const [balRes, importRes, arRes, vatRes] = await Promise.all([
-          supabase.from('bank_transactions').select('balance')
-            .eq('company_id', c.id).order('date', { ascending: false }).limit(1),
+        // Item 3 — real balance via fetchNominalBalanceAsOf across the company's active bank
+        // accounts, replacing the raw bank_transactions.balance read (which returns null for
+        // every real company today, since the most recent transaction is almost always
+        // Yapily-fed and that source never populates the column).
+        const [nominals, importRes, arRes, vatRes] = await Promise.all([
+          fetchActiveBankNominals(c.id),
           supabase.from('bank_transactions').select('created_at')
             .eq('company_id', c.id).order('created_at', { ascending: false }).limit(1),
           supabase.from('invoices').select('total, amount_paid, due_date')
@@ -15181,6 +15322,8 @@ function PracticeDashboard({ companies, onSelectCompany, onAddCompany }) {
           supabase.from('vat_returns').select('period_val')
             .eq('company_id', c.id).eq('status', 'filed'),
         ]);
+        const bankCodes = nominals.length ? nominals : [BANK_NOMINAL_CODE];
+        const balance = await fetchNominalBalanceAsOf(c.id, bankCodes, today).catch(() => null);
         let arTotal = 0, arOverdue = 0;
         for (const inv of (arRes.data || [])) {
           const owed = Math.max(0, Number(inv.total || 0) - Number(inv.amount_paid || 0));
@@ -15192,7 +15335,7 @@ function PracticeDashboard({ companies, onSelectCompany, onAddCompany }) {
         setData(prev => ({
           ...prev,
           [c.id]: {
-            balance:    balRes.data?.[0] ? Number(balRes.data[0].balance) : null,
+            balance,
             lastImport: importRes.data?.[0]?.created_at || null,
             arTotal,
             arOverdue,
@@ -15303,6 +15446,26 @@ function PracticeDashboard({ companies, onSelectCompany, onAddCompany }) {
 
   const thCls = key => `prac-th${sortKey === key ? ` sort-${sortDir}` : ''}`;
 
+  const exportPractice = () => downloadCSV(`practice-dashboard-${new Date().toISOString().slice(0, 10)}.csv`, [
+    ["Ledgrly — Practice Dashboard"],
+    ["Exported", fmtIE(new Date().toISOString().slice(0, 10))],
+    [],
+    ["Client", "Status", "Reason", "Next VAT Due", "AR Owed", "AR Overdue", "Last Import", "Cash"],
+    ...sorted.map(c => {
+      const d = data[c.id];
+      const st = getClientStatus(c, d);
+      const nextVat = getNextVATDue(c);
+      return [
+        c.name, st.label, st.reason || "",
+        nextVat ? fmtDate(nextVat) : "—",
+        d ? fmtMoney(d.arTotal) : "—",
+        d ? fmtMoney(d.arOverdue) : "—",
+        d?.lastImport ? fmtDate(d.lastImport) : "Never",
+        d?.balance != null ? fmtMoney(d.balance) : "—",
+      ];
+    }),
+  ]);
+
   return (
     <div className="fade-up">
       <div style={{ marginBottom: 18, display: 'flex', alignItems: 'flex-start', justifyContent: 'space-between', gap: 12 }}>
@@ -15312,7 +15475,10 @@ function PracticeDashboard({ companies, onSelectCompany, onAddCompany }) {
             {companies.length} {companies.length === 1 ? 'workspace' : 'workspaces'} — sorted by status. Click a row to open.
           </div>
         </div>
-        <button className="btn btn-p btn-sm" onClick={onAddCompany}>⊕ Add company</button>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          {companies.length > 0 && <ExportDropdown onCSV={exportPractice} onPrint={() => window.print()} />}
+          <button className="btn btn-p btn-sm" onClick={onAddCompany}>⊕ Add company</button>
+        </div>
       </div>
 
       {/* ── Desktop table ── */}
