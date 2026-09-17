@@ -16453,6 +16453,10 @@ function ReconWorksheet({
   useEffect(() => {
     const onKey = (e) => {
       if (!isActive || !worksheetRows.length || settleModalOpen) return;
+      // Step aside for any modifier-held keystroke — not just Cmd/Ctrl+K specifically, so this
+      // never collides with the command palette (or anything else that reserves a modifier
+      // combo later) regardless of listener registration order.
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
       const tag = document.activeElement?.tagName;
       if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return;
 
