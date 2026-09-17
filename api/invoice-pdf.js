@@ -1,6 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { renderInvoicePDF } from "./_invoice-pdf-doc.js";
-import { withSentry } from './_sentry.js';
+import { withSentry, captureError } from './_sentry.js';
 
 export const config = { api: { bodyParser: { sizeLimit: "16kb" } } };
 
@@ -29,10 +29,22 @@ export default withSentry(async function handler(req, res) {
 
   if (!invRes.data) return res.status(404).json({ error: "Invoice not found" });
 
+  if (linesRes.error) {
+    captureError(linesRes.error, { company_id, operation: 'invoice-pdf-lines', invoice_id });
+    return res.status(500).json({ error: "Failed to load invoice lines — PDF generation aborted: " + linesRes.error.message });
+  }
+
   const inv         = invRes.data;
   const lines       = linesRes.data || [];
   const settings    = setRes.data;
   const companyName = compRes.data?.name || "";
+
+  // A properly finalized AR invoice always has line items (finaliseInvoice requires them) —
+  // reaching here with zero indicates an upstream problem, not a legitimately empty invoice.
+  if (!lines.length) {
+    captureError(new Error('Invoice has no line items — refusing to generate PDF'), { company_id, operation: 'invoice-pdf-empty-lines', invoice_id });
+    return res.status(422).json({ error: "Invoice has no line items — refusing to generate an empty invoice PDF" });
+  }
 
   let customer = null;
   if (inv.customer_id) {

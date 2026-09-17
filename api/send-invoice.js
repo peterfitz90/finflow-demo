@@ -31,10 +31,23 @@ export default withSentry(async function handler(req, res) {
 
   if (!invRes.data) return res.status(404).json({ error: "Invoice not found" });
 
+  if (linesRes.error) {
+    captureError(linesRes.error, { company_id, operation: 'send-invoice-lines', invoice_id });
+    return res.status(500).json({ error: "Failed to load invoice lines — send aborted: " + linesRes.error.message });
+  }
+
   const inv         = invRes.data;
   const lines       = linesRes.data || [];
   const settings    = setRes.data;
   const companyName = compRes.data?.name || "";
+
+  // A properly finalized AR invoice always has line items (finaliseInvoice requires them) —
+  // reaching here with zero indicates an upstream problem, not a legitimately empty invoice.
+  // Refuse rather than email a customer a total with nothing behind it.
+  if (!lines.length) {
+    captureError(new Error('Invoice has no line items — refusing to send'), { company_id, operation: 'send-invoice-empty-lines', invoice_id });
+    return res.status(422).json({ error: "Invoice has no line items — refusing to send an empty invoice" });
+  }
 
   let customer = null;
   if (inv.customer_id) {
