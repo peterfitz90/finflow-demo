@@ -2142,6 +2142,41 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
   const ytdStartYear = ytdPm >= ytdYearStartMonth ? ytdPy : ytdPy - 1;
   const ytdStart = `${ytdStartYear}-${String(ytdYearStartMonth).padStart(2, '0')}-01`;
 
+  // Balance comparison — "Balance as at [date] vs. as at [date]". Unlike GLReport's cmpMode
+  // (which compares two PERIOD FLOWS and so must gate "Previous period" behind !ytdMode, since
+  // comparing flows of mismatched lengths would be meaningless), this compares two POINT-IN-
+  // TIME balances via fetchNominalBalanceAsOf. The closing balance at periodEnd doesn't depend
+  // on ytdMode at all (only the opening anchor/window do), so both comparison options are
+  // valid regardless of ytdMode — no gating needed here.
+  const [cmpMode, setCmpMode] = useState("none");
+  const [cmpCurrentBalance, setCmpCurrentBalance] = useState(null);
+  const [cmpBalance, setCmpBalance] = useState(null);
+  const [cmpDates, setCmpDates] = useState(null); // { current, cmp }
+  const localDateStr = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+
+  useEffect(() => {
+    if (!companyId || cmpMode === 'none') { setCmpCurrentBalance(null); setCmpBalance(null); setCmpDates(null); return; }
+    const isCurPeriod = selPeriod === currentMonth;
+    const [cy, cm] = selPeriod.split('-').map(Number);
+    const curEndDate = isCurPeriod ? now : new Date(cy, cm, 0);
+    const curEndStr  = localDateStr(curEndDate);
+    const cmpDateStr = cmpMode === 'prev_year'
+      ? localDateStr(new Date(curEndDate.getFullYear() - 1, curEndDate.getMonth(), curEndDate.getDate()))
+      : localDateStr(new Date(cy, cm - 1, 0)); // 'prev': last day of the preceding calendar month
+    let cancelled = false;
+    const codes = activeBankNominals.length ? activeBankNominals : [BANK_NOMINAL_CODE];
+    Promise.all([
+      fetchNominalBalanceAsOf(companyId, codes, curEndStr),
+      fetchNominalBalanceAsOf(companyId, codes, cmpDateStr),
+    ]).then(([curBal, cBal]) => {
+      if (cancelled) return;
+      setCmpCurrentBalance(curBal);
+      setCmpBalance(cBal);
+      setCmpDates({ current: curEndStr, cmp: cmpDateStr });
+    }).catch(() => { if (!cancelled) { setCmpCurrentBalance(null); setCmpBalance(null); } });
+    return () => { cancelled = true; };
+  }, [companyId, selPeriod, cmpMode, activeBankNominals]); // eslint-disable-line react-hooks/exhaustive-deps
+
   useEffect(() => {
     if (!companyId) { setLoading(false); return; }
     (async () => {
@@ -2324,7 +2359,33 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
               ))}
             </div>
             {ytdMode && <span style={{ fontSize: 10, color: "var(--dim)", fontFamily: "Source Code Pro, monospace" }}>from {ytdStart}</span>}
+            <select value={cmpMode} onChange={e => setCmpMode(e.target.value)} style={{ fontSize: 11, fontFamily: "Source Code Pro, monospace", background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 4, padding: "3px 8px", cursor: "pointer" }}>
+              <option value="none">No comparison</option>
+              <option value="prev">Previous period</option>
+              <option value="prev_year">Previous year</option>
+            </select>
           </div>
+
+          {/* ── Balance comparison ── */}
+          {cmpMode !== "none" && cmpDates && (() => {
+            const fmtDateY = (d) => new Date(d + "T12:00:00").toLocaleDateString("en-IE", { day: "2-digit", month: "short", year: "numeric" });
+            const diff = (cmpCurrentBalance != null && cmpBalance != null) ? cmpCurrentBalance - cmpBalance : null;
+            return (
+              <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", padding: "10px 14px", marginBottom: 13, fontSize: 12 }}>
+                <span style={{ color: "var(--text-muted)" }}>
+                  Balance as at <strong style={{ color: "var(--text)" }}>{fmtDateY(cmpDates.current)}</strong> vs. as at <strong style={{ color: "var(--text)" }}>{fmtDateY(cmpDates.cmp)}</strong>
+                </span>
+                {cmpCurrentBalance != null && cmpBalance != null ? (
+                  <span style={{ fontFamily: "Source Code Pro, monospace", fontWeight: 600 }}>
+                    {fmt(cmpCurrentBalance)} vs. {fmt(cmpBalance)}
+                    <span style={{ color: diff >= 0 ? "var(--green)" : "var(--red)", marginLeft: 8 }}>
+                      ({diff >= 0 ? "+" : ""}{fmt(diff)})
+                    </span>
+                  </span>
+                ) : <span style={{ color: "var(--dim)" }}>Loading…</span>}
+              </div>
+            );
+          })()}
 
           {/* ── KPI row ── */}
           <div className="kpi-grid" style={{ gridTemplateColumns: "repeat(3,1fr)", marginBottom: 13 }}>
@@ -6375,6 +6436,35 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
   const ytdStart         = `${ovYtdStartYear}-${String(ovYearStartMonth).padStart(2, '0')}-01`;
   const chartRangeStart  = ytdMode ? ytdStart : periodStart;
 
+  // Balance comparison — "Balance as at [date] vs. as at [date]", entirely self-contained and
+  // independent of periodStart/periodEnd/chartRangeStart above: it does not touch the
+  // checklist/burn-rate/AR queries' scoping, only fetches two extra point-in-time balances via
+  // fetchNominalBalanceAsOf. Not gated by ytdMode, same reasoning as Cash Flow's — periodEnd
+  // itself doesn't depend on ytdMode, so both comparison options are always valid.
+  const [cmpMode, setCmpMode] = useState("none");
+  const [cmpCurrentBalance, setCmpCurrentBalance] = useState(null);
+  const [cmpBalance, setCmpBalance] = useState(null);
+  const [cmpDates, setCmpDates] = useState(null);
+  useEffect(() => {
+    if (!companyId || cmpMode === 'none') { setCmpCurrentBalance(null); setCmpBalance(null); setCmpDates(null); return; }
+    const localDateStr = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+    const curEndDate = new Date(selYear, selMo, 0); // last day of the selected month, same as `periodEnd` above
+    const cmpDateStr = cmpMode === 'prev_year'
+      ? localDateStr(new Date(curEndDate.getFullYear() - 1, curEndDate.getMonth(), curEndDate.getDate()))
+      : localDateStr(new Date(selYear, selMo - 1, 0)); // 'prev': last day of the preceding calendar month
+    let cancelled = false;
+    const codes = activeBankNominals.length ? activeBankNominals : [BANK_NOMINAL_CODE];
+    Promise.all([
+      fetchNominalBalanceAsOf(companyId, codes, periodEnd),
+      fetchNominalBalanceAsOf(companyId, codes, cmpDateStr),
+    ]).then(([curBal, cBal]) => {
+      if (cancelled) return;
+      setCmpCurrentBalance(curBal);
+      setCmpBalance(cBal);
+      setCmpDates({ current: periodEnd, cmp: cmpDateStr });
+    }).catch(() => { if (!cancelled) { setCmpCurrentBalance(null); setCmpBalance(null); } });
+    return () => { cancelled = true; };
+  }, [companyId, selPeriod, cmpMode, activeBankNominals]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!companyId) { setLoading(false); return; }
@@ -6995,9 +7085,35 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
               }}>{label}</button>
             ))}
           </div>
+          <select value={cmpMode} onChange={e => setCmpMode(e.target.value)} style={{ fontSize: 11, fontFamily: "Source Code Pro, monospace", background: "var(--surface)", color: "var(--text)", border: "1px solid var(--border)", borderRadius: 4, padding: "3px 8px", cursor: "pointer" }}>
+            <option value="none">No comparison</option>
+            <option value="prev">vs. previous period</option>
+            <option value="prev_year">vs. previous year</option>
+          </select>
           <button className="btn btn-s btn-sm" onClick={() => window.print()}>🖨 Print / Save PDF</button>
         </div>
       )}
+
+      {/* ── Balance comparison ── */}
+      {!loading && cmpMode !== "none" && cmpDates && (() => {
+        const fmtDateY = (d) => new Date(d + "T12:00:00").toLocaleDateString("en-IE", { day: "2-digit", month: "short", year: "numeric" });
+        const diff = (cmpCurrentBalance != null && cmpBalance != null) ? cmpCurrentBalance - cmpBalance : null;
+        return (
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", padding: "10px 14px", marginBottom: 12, fontSize: 12 }}>
+            <span style={{ color: "var(--text-muted)" }}>
+              Balance as at <strong style={{ color: "var(--text)" }}>{fmtDateY(cmpDates.current)}</strong> vs. as at <strong style={{ color: "var(--text)" }}>{fmtDateY(cmpDates.cmp)}</strong>
+            </span>
+            {cmpCurrentBalance != null && cmpBalance != null ? (
+              <span style={{ fontFamily: "Source Code Pro, monospace", fontWeight: 600 }}>
+                {fmt(cmpCurrentBalance)} vs. {fmt(cmpBalance)}
+                <span style={{ color: diff >= 0 ? "var(--green)" : "var(--red)", marginLeft: 8 }}>
+                  ({diff >= 0 ? "+" : ""}{fmt(diff)})
+                </span>
+              </span>
+            ) : <span style={{ color: "var(--dim)" }}>Loading…</span>}
+          </div>
+        );
+      })()}
 
       {/* ── Historical period banner ── */}
       {isHistorical && (
