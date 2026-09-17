@@ -15799,11 +15799,27 @@ function recFuzzyBonus(a, b) {
   const ratio = overlap / Math.min(sa.size || 1, sb.size || 1);
   return ratio >= 0.5 ? 15 : ratio >= 0.2 ? 10 : 0;
 }
-function recScoreCandidate(bt, cand) {
+// btBankNominal: the bank transaction's own resolved bank_accounts.nominal_code (or
+// undefined/null if unresolved). bankNominalSet: Set of every nominal_code the company's
+// bank_accounts hold. Both are optional — omitting them (as the settlement modal's
+// invoice-only scoring does) leaves behavior exactly as before this parameter existed.
+function recScoreCandidate(bt, cand, btBankNominal, bankNominalSet) {
   const absBt = Math.abs(Number(bt.amount));
   // Score against outstanding balance (net of prior payments) — falls back to gross amount
   const outs  = Number(cand.outstanding ?? cand.amount);
   if (absBt <= 0 || outs <= 0) return 0;
+
+  // Item 2 / roadmap Item 7: a journal candidate has a concrete bank leg (debit_account or
+  // credit_account). If that leg is a KNOWN bank nominal but a DIFFERENT one than the
+  // transaction's own resolved account, this candidate belongs to another real bank account
+  // entirely — hard-exclude rather than downweight, since amount/date/description can never
+  // resolve a genuine cross-account mismatch. No signal (no known bank leg, or the
+  // transaction's own account is unresolved) falls through unchanged, so single-account
+  // companies and legacy/unmapped rows are completely unaffected.
+  if (cand._type === 'journal' && btBankNominal && bankNominalSet) {
+    const candBankLeg = [cand.debit_account, cand.credit_account].find(a => bankNominalSet.has(a));
+    if (candBankLeg && candBankLeg !== btBankNominal) return 0;
+  }
 
   const diff    = absBt - outs;
   const diffAbs = Math.abs(diff);
@@ -15836,10 +15852,17 @@ function recScoreCandidate(bt, cand) {
 
 async function runMatchingEngine(companyId) {
   const { data: txns, error: txnErr } = await supabase
-    .from('bank_transactions').select('id,date,description,amount')
+    .from('bank_transactions').select('id,date,description,amount,bank_account_id')
     .eq('company_id', companyId).eq('reconciled', false).order('date', { ascending: false });
   if (txnErr) throw new Error(`Transactions: ${txnErr.message}`);
   if (!txns?.length) return 0;
+
+  // Item 2 / roadmap Item 7: resolve each transaction's own bank nominal so journal
+  // candidates whose bank leg belongs to a DIFFERENT account can be excluded below.
+  const { data: bankAccounts } = await supabase
+    .from('bank_accounts').select('id, nominal_code').eq('company_id', companyId);
+  const nominalByAccountId = Object.fromEntries((bankAccounts || []).map(a => [a.id, a.nominal_code]));
+  const bankNominalSet     = new Set((bankAccounts || []).map(a => a.nominal_code).filter(Boolean));
 
   const { data: existing } = await supabase
     .from('bank_matches').select('bank_transaction_id,matched_id,status').eq('company_id', companyId);
@@ -15885,11 +15908,13 @@ async function runMatchingEngine(companyId) {
       ...(jnls  || []).map(x => ({ ...x, _type: 'journal', _date: x.date })),
     ];
 
+    const btBankNominal = nominalByAccountId[bt.bank_account_id];
+
     let best = null, bestScore = 0;
     for (const c of candidates) {
       const key = `${bt.id}:${c.id}`;
       if (rejectedPairs.has(key) || suggestedPairs.has(key)) continue;
-      const s = recScoreCandidate(bt, c);
+      const s = recScoreCandidate(bt, c, btBankNominal, bankNominalSet);
       if (s >= 60 && s > bestScore) { bestScore = s; best = c; }
     }
     if (!best) continue;
@@ -15938,6 +15963,7 @@ function Reconciliation({ companyId, onNavigate }) {
   const [migrationNeeded, setMigrationNeeded] = useState(false);
   const [reconciledCount, setReconciledCount] = useState(0);
   const [reconciledPage, setReconciledPage]   = useState(0);
+  const [unreconciledCapHit, setUnreconciledCapHit] = useState(false);
   const RECON_PAGE = 50;
   // Settlement modal state
   const [settleFor, setSettleFor]       = useState(null);   // bank transaction being settled
@@ -15989,19 +16015,31 @@ function Reconciliation({ companyId, onNavigate }) {
     } catch (e) { console.error('[Reconciliation] loadReconciledPage:', e.message); }
   };
 
+  const UNRECONCILED_CAP = 5000;
+
   const loadAll = async () => {
     setLoading(true);
     setReconciledPage(0);
     try {
       const monthStart = new Date(); monthStart.setDate(1); monthStart.setHours(0, 0, 0, 0);
+      // Three purpose-built queries instead of one 500-row-capped fetch reused for
+      // everything: an unreconciled row that falls outside the most recent 500
+      // transactions by date used to silently vanish from the KPI stats and the
+      // Unmatched tab. Each of these mirrors what it actually needs, with no
+      // date-order cap on the correctness-critical unreconciled set (the same
+      // uncapped .eq('reconciled', false) pattern runMatchingEngine already uses).
       const [
-        { data: txns },
+        { data: unreconciledTxns },
+        { count: unreconciledCount },
+        { data: lastImportRows },
         { data: suggestedMatches, error: matchErr },
         { count: rcCount },
         { count: autoConfCount },
         { count: totalConfCount },
       ] = await Promise.all([
-        supabase.from('bank_transactions').select('*').eq('company_id', companyId).order('date', { ascending: false }).limit(500),
+        supabase.from('bank_transactions').select('*').eq('company_id', companyId).eq('reconciled', false).order('date', { ascending: false }).limit(UNRECONCILED_CAP),
+        supabase.from('bank_transactions').select('*', { count: 'exact', head: true }).eq('company_id', companyId).eq('reconciled', false),
+        supabase.from('bank_transactions').select('created_at').eq('company_id', companyId).order('created_at', { ascending: false }).limit(1),
         supabase.from('bank_matches').select('*').eq('company_id', companyId).eq('status', 'suggested').order('created_at', { ascending: false }),
         supabase.from('bank_matches').select('*', { count: 'exact', head: true }).eq('company_id', companyId).eq('status', 'confirmed'),
         supabase.from('bank_matches').select('*', { count: 'exact', head: true }).eq('company_id', companyId).eq('status', 'confirmed').eq('matched_by', 'auto').gte('confirmed_at', monthStart.toISOString()),
@@ -16012,20 +16050,26 @@ function Reconciliation({ companyId, onNavigate }) {
         setMigrationNeeded(true); setLoading(false); return;
       }
 
-      const unreconciled = (txns || []).filter(t => !t.reconciled);
-      const lastImport   = (txns || []).reduce((lx, t) => (!lx || new Date(t.created_at) > new Date(lx)) ? t.created_at : lx, null);
+      const unreconciled = unreconciledTxns || [];
+      const lastImport   = lastImportRows?.[0]?.created_at ?? null;
       const balance      = unreconciled.reduce((s, t) => s + Math.abs(Number(t.amount)), 0);
       const autoRate     = (totalConfCount || 0) > 0 ? Math.round((autoConfCount || 0) / (totalConfCount || 1) * 100) : 0;
-      setStats({ unreconciled: unreconciled.length, balance, autoMatchRate: autoRate, lastImport });
+      const trueUnreconciledCount = unreconciledCount ?? unreconciled.length;
+      setStats({ unreconciled: trueUnreconciledCount, balance, autoMatchRate: autoRate, lastImport });
+      setUnreconciledCapHit(trueUnreconciledCount > unreconciled.length);
       setReconciledCount(rcCount || 0);
 
       const invIds = [...new Set((suggestedMatches || []).filter(m => m.matched_type === 'invoice').map(m => m.matched_id))];
       const apIds  = [...new Set((suggestedMatches || []).filter(m => m.matched_type === 'ap_invoice').map(m => m.matched_id))];
       const jnlIds = [...new Set((suggestedMatches || []).filter(m => m.matched_type === 'journal').map(m => m.matched_id))];
-      const [{ data: invs }, { data: apInvs }, { data: jnls }] = await Promise.all([
+      const suggestedBtIds = [...new Set((suggestedMatches || []).map(m => m.bank_transaction_id))];
+      const [{ data: invs }, { data: apInvs }, { data: jnls }, { data: suggestedBts }] = await Promise.all([
         invIds.length  ? supabase.from('invoices').select('id,invoice_number,invoice_ref,client,total,amount,amount_paid,issue_date,invoice_date,status').in('id', invIds) : { data: [] },
         apIds.length   ? supabase.from('ap_invoices').select('id,invoice_ref,supplier,amount,gross_amount,amount_paid,invoice_date,status').in('id', apIds) : { data: [] },
         jnlIds.length  ? supabase.from('journals').select('id,date,description,amount,reference').in('id', jnlIds) : { data: [] },
+        // Fetched by exact id rather than reused from the (possibly capped) unreconciled
+        // list, so a suggested match never silently disappears regardless of its date.
+        suggestedBtIds.length ? supabase.from('bank_transactions').select('*').in('id', suggestedBtIds) : { data: [] },
       ]);
       const entMap = {};
       for (const x of (invs   || [])) {
@@ -16040,14 +16084,14 @@ function Reconciliation({ companyId, onNavigate }) {
       }
       for (const x of (jnls   || [])) entMap[x.id] = { ...x, _type: 'journal', _label: x.reference || x.description || 'Journal' };
 
-      const txnMap   = Object.fromEntries((txns || []).map(t => [t.id, t]));
+      const txnMap   = Object.fromEntries((suggestedBts || []).map(t => [t.id, t]));
       const suggested = (suggestedMatches || [])
         .map(m => { const bt = txnMap[m.bank_transaction_id]; return bt ? { match: m, bt, entity: entMap[m.matched_id] || null } : null; })
         .filter(Boolean)
         .sort((a, b) => b.match.confidence - a.match.confidence);
 
       setSuggestedItems(suggested);
-      setUnmatchedTxns((txns || []).filter(t => !t.reconciled));
+      setUnmatchedTxns(unreconciled);
       await loadReconciledPage(0);
     } catch (e) { console.error('[Reconciliation] loadAll:', e.message); }
     setLoading(false);
@@ -16256,6 +16300,10 @@ function Reconciliation({ companyId, onNavigate }) {
     return diff === 0 ? 'Today' : diff === 1 ? 'Yesterday' : `${diff}d ago`;
   };
   const filteredCands = allCandidates.filter(c => !searchQ || (c._label || '').toLowerCase().includes(searchQ.toLowerCase()) || String(c.amount).includes(searchQ));
+  // Item 2 Stage 5 (roadmap Item 7) — resolves the settlement preview's bank nominal the
+  // same way confirm_settlement itself does, so the text never shows '1000' for a
+  // transaction that will actually post against a different real account.
+  const settleBankNominal = bankAccounts.find(a => a.id === settleFor?.bank_account_id)?.nominal_code || '1000';
 
   // ── Row sub-components (used in all three tabs) ──
   const BtCell = ({ bt }) => (
@@ -16330,6 +16378,12 @@ function Reconciliation({ companyId, onNavigate }) {
       {matchError && (
         <div style={{ background: 'rgba(220,38,38,0.08)', border: '1px solid var(--red)', borderRadius: 'var(--radius-sm)', padding: '10px 14px', fontSize: 12, color: 'var(--red)', marginBottom: 12 }}>
           {matchError}
+        </div>
+      )}
+
+      {unreconciledCapHit && (
+        <div style={{ background: 'var(--warn-dim)', border: '1px solid rgba(251,191,36,0.3)', borderRadius: 'var(--radius-sm)', padding: '10px 14px', fontSize: 12, color: 'var(--warn)', marginBottom: 12 }}>
+          Showing the most recent {UNRECONCILED_CAP.toLocaleString()} of {stats.unreconciled.toLocaleString()} unreconciled transactions — the balance figure above only totals the ones shown. Reconcile some of these to bring the rest into view.
         </div>
       )}
 
@@ -16552,8 +16606,8 @@ function Reconciliation({ companyId, onNavigate }) {
                   </div>
                   <div style={{ padding: '8px 10px', background: 'var(--surface-2)', borderRadius: 4, fontSize: 11, color: 'var(--text-faint)', fontFamily: 'Source Code Pro, monospace' }}>
                     {Number(settleFor.amount) >= 0
-                      ? 'Dr Bank 1000  /  Cr Customer Advances 2350'
-                      : 'Dr Supplier Prepayments 1250  /  Cr Bank 1000'}
+                      ? `Dr Bank ${settleBankNominal}  /  Cr Customer Advances 2350`
+                      : `Dr Supplier Prepayments 1250  /  Cr Bank ${settleBankNominal}`}
                   </div>
                 </div>
               ) : (
