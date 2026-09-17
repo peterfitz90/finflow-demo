@@ -11332,6 +11332,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
   const [learnSaving, setLearnSaving]     = useState(false);
   const [learnApplied, setLearnApplied]   = useState(null); // { count, ruleId, appliedIds, originalCode, nominalCode }
   const [learnConflict, setLearnConflict] = useState(false);
+  const [learnError,    setLearnError]    = useState(null);
 
   // Sibling-apply opt-in prompt state
   // null | { revolut_id, code, nominalName, siblings: [{revolut_id, description, amount}], reviewing: bool }
@@ -12311,51 +12312,26 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
     if (kw.length < 3) return;
     setLearnSaving(true);
     setLearnConflict(false);
+    setLearnError(null);
     try {
       const nomName = GL_ACCOUNTS.find(a => a.code === learnCurrent.nominalCode)?.name || learnCurrent.nominalCode;
-      const { data: inserted, error: insErr } = await supabase
-        .from('transaction_rules')
-        .insert({ company_id: companyId, pattern: kw, match_type: 'contains', direction: learnCurrent.direction,
-                  nominal_code: learnCurrent.nominalCode, nominal_name: nomName,
-                  confidence: 'high', source: 'user', created_from: 'learned' })
-        .select('id').single();
-      if (insErr) {
-        if (insErr.code === '23505') { setLearnConflict(true); setLearnSaving(false); return; }
-        throw insErr;
-      }
-      // Apply rule to existing uncoded transactions; skip any transaction whose date
-      // falls inside a filed VAT return period (period-lock enforcement).
-      const lockedPeriods = await getLockedPeriods(companyId);
-      const { data: allUncoded } = await supabase
-        .from('bank_transactions').select('revolut_id, amount, date')
-        .eq('company_id', companyId).eq('nominal_account', '6600')
-        .ilike('description', `%${kw}%`);
-      const allRows    = allUncoded || [];
-      const eligible   = allRows.filter(t => !isDateLocked(t.date, lockedPeriods));
-      const skipped    = allRows.length - eligible.length;
-      const appliedIds = eligible.map(t => t.revolut_id);
-      if (appliedIds.length) {
-        await supabase.from('bank_transactions')
-          .update({ nominal_account: learnCurrent.nominalCode })
-          .eq('company_id', companyId).in('revolut_id', appliedIds);
-        const expenses = eligible.filter(t => Number(t.amount) < 0).map(t => t.revolut_id);
-        const income   = eligible.filter(t => Number(t.amount) >= 0).map(t => t.revolut_id);
-        if (expenses.length) await supabase.from('journals').update({ debit_account: learnCurrent.nominalCode }).eq('company_id', companyId).in('reference', expenses);
-        if (income.length)   await supabase.from('journals').update({ credit_account: learnCurrent.nominalCode }).eq('company_id', companyId).in('reference', income);
-        // Stamp bank_matches as overridden for auto-matched transactions we just re-coded
-        const { data: learnJnls } = await supabase.from('journals')
-          .select('id').eq('company_id', companyId).in('reference', appliedIds);
-        if (learnJnls?.length) {
-          await supabase.from('bank_matches')
-            .update({ suggestion_kept: false })
-            .eq('company_id', companyId).eq('matched_type', 'journal').eq('matched_by', 'auto')
-            .is('suggestion_kept', null).in('matched_id', learnJnls.map(j => j.id));
-        }
-      }
-      setLearnApplied({ count: appliedIds.length, skipped, ruleId: inserted.id, appliedIds, originalCode: '6600', nominalCode: learnCurrent.nominalCode });
+      // Atomic: rule insert + bank_transactions/journals/bank_matches updates all happen
+      // inside apply_learned_rule() as one DB transaction — either everything lands or
+      // none of it does (see add_learned_rule_apply_undo_rpcs migration).
+      const { data, error } = await supabase.rpc('apply_learned_rule', {
+        p_company_id: companyId, p_pattern: kw, p_match_type: 'contains', p_direction: learnCurrent.direction,
+        p_nominal_code: learnCurrent.nominalCode, p_nominal_name: nomName,
+      });
+      if (error) throw error;
+      if (data?.conflict) { setLearnConflict(true); setLearnSaving(false); return; }
+      setLearnApplied({ count: data.applied_count, skipped: data.skipped_count, ruleId: data.rule_id, appliedIds: data.applied_ids, originalCode: '6600', nominalCode: learnCurrent.nominalCode });
       setTimeout(advanceLearnQueue, 4000);
     } catch (e) {
       console.error('[learn] save rule failed:', e);
+      captureError(e, { company_id: companyId, operation: 'learn-save-rule' });
+      setLearnError(/period is locked/i.test(e.message)
+        ? "This falls in a locked (filed) period — nothing was changed."
+        : `Save failed: ${e.message}`);
     }
     setLearnSaving(false);
   };
@@ -12381,31 +12357,25 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
   const undoLearnedRule = async () => {
     if (!learnApplied || !companyId) return;
     const { ruleId, appliedIds, originalCode } = learnApplied;
+    setLearnError(null);
+    let ok = true;
     try {
-      if (ruleId) await supabase.from('transaction_rules').delete().eq('id', ruleId);
-      if (appliedIds.length) {
-        await supabase.from('bank_transactions')
-          .update({ nominal_account: originalCode })
-          .eq('company_id', companyId).in('revolut_id', appliedIds);
-        const { data: txns } = await supabase.from('bank_transactions').select('revolut_id, amount').eq('company_id', companyId).in('revolut_id', appliedIds);
-        const expenses = (txns || []).filter(t => Number(t.amount) < 0).map(t => t.revolut_id);
-        const income   = (txns || []).filter(t => Number(t.amount) >= 0).map(t => t.revolut_id);
-        if (expenses.length) await supabase.from('journals').update({ debit_account: originalCode }).eq('company_id', companyId).in('reference', expenses);
-        if (income.length)   await supabase.from('journals').update({ credit_account: originalCode }).eq('company_id', companyId).in('reference', income);
-        // Revert override stamp — rule removed, code restored to AI's original answer
-        const { data: undoJnls } = await supabase.from('journals')
-          .select('id').eq('company_id', companyId).in('reference', appliedIds);
-        if (undoJnls?.length) {
-          await supabase.from('bank_matches')
-            .update({ suggestion_kept: null })
-            .eq('company_id', companyId).eq('matched_type', 'journal').eq('matched_by', 'auto')
-            .eq('suggestion_kept', false).in('matched_id', undoJnls.map(j => j.id));
-        }
-      }
+      // Atomic, same reasoning as apply_learned_rule() — see that RPC's comment.
+      const { error } = await supabase.rpc('undo_learned_rule', {
+        p_company_id: companyId, p_rule_id: ruleId, p_applied_ids: appliedIds, p_original_nominal: originalCode,
+      });
+      if (error) throw error;
     } catch (e) {
+      ok = false;
       console.error('[learn] undo failed:', e);
+      captureError(e, { company_id: companyId, operation: 'learn-undo-rule' });
+      setLearnError(/period is locked/i.test(e.message)
+        ? "Can't undo — this now falls in a locked (filed) period."
+        : `Undo failed: ${e.message}`);
     }
-    advanceLearnQueue();
+    // Only advance the queue on confirmed success — a failed undo must stay visible,
+    // not silently move on as if it had worked.
+    if (ok) advanceLearnQueue();
   };
 
   const newRows = rows.filter(r => !r.imported);
@@ -12540,7 +12510,12 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
       {/* ── Rules learn prompt ── */}
       {learnCurrent && (
         <div style={{ background: "var(--accent-dim)", border: "1px solid rgba(52,211,153,0.3)", borderRadius: 8, padding: "10px 14px", marginBottom: 12, display: "flex", flexWrap: "wrap", gap: 8, alignItems: "center", fontSize: 12 }}>
-          {learnApplied ? (
+          {learnError ? (
+            <>
+              <span style={{ color: "var(--danger)", flex: 1 }}>⚠ {learnError}</span>
+              <button className="btn btn-s btn-sm" style={{ fontSize: 11 }} onClick={() => setLearnError(null)}>Dismiss</button>
+            </>
+          ) : learnApplied ? (
             <>
               <span style={{ color: "var(--text)", flex: 1 }}>
                 Rule saved{learnApplied.count > 0
