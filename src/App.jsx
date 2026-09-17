@@ -5960,12 +5960,12 @@ function SPill({ status }) {
 
 // Fetches all filed VAT return periods for a company (cheap — at most ~24 rows/year).
 // Returns array of { period_start, period_end, filed_at }.
+// Goes through the get_locked_periods RPC rather than querying vat_returns directly —
+// that table's SELECT RLS is accountant-only, so a plain client query here would come
+// back silently empty for a business_owner session (the exact bug this RPC exists to
+// close). The RPC is SECURITY DEFINER and separately checks company membership itself.
 async function getLockedPeriods(companyId) {
-  const { data, error } = await supabase
-    .from('vat_returns')
-    .select('period_start, period_end, filed_at')
-    .eq('company_id', companyId)
-    .eq('status', 'filed');
+  const { data, error } = await supabase.rpc('get_locked_periods', { p_company_id: companyId });
   if (error) throw new Error(`Could not load locked periods: ${error.message}`);
   return data || [];
 }
@@ -5975,19 +5975,12 @@ function isDateLocked(date, lockedPeriods) {
   return lockedPeriods.some(p => date >= p.period_start && date <= p.period_end);
 }
 
-// Single-date check used by the manual journal form.
+// Single-date check used by the manual journal form. Built on getLockedPeriods() (and so
+// the same RPC) rather than its own separate query, for the same RLS-blind-spot reason.
 async function isPeriodLocked(companyId, date) {
-  const { data, error } = await supabase
-    .from('vat_returns')
-    .select('filed_at')
-    .eq('company_id', companyId)
-    .eq('status', 'filed')
-    .lte('period_start', date)
-    .gte('period_end', date)
-    .limit(1);
-  if (error) throw new Error(`Could not check period lock: ${error.message}`);
-  if (data?.length) return { locked: true, filedAt: data[0].filed_at };
-  return { locked: false, filedAt: null };
+  const lockedPeriods = await getLockedPeriods(companyId);
+  const hit = lockedPeriods.find(p => date >= p.period_start && date <= p.period_end);
+  return hit ? { locked: true, filedAt: hit.filed_at } : { locked: false, filedAt: null };
 }
 
 // ── GL reclassification — correcting-journal helpers (never edit-in-place) ────
@@ -17458,6 +17451,7 @@ function FixedAssets({ companyId, company, selPeriod }) {
   const [catchingUp,     setCatchingUp]      = useState(false);
   const [depToast,       setDepToast]        = useState(null);
   const [depSkipped,     setDepSkipped]      = useState(0);
+  const [depErr,         setDepErr]          = useState(null);
   const [depWarning,     setDepWarning]      = useState(false);
   const [activeTab,      setActiveTab]       = useState('register');
   const [selectedId,     setSelectedId]      = useState(null);
@@ -17500,7 +17494,7 @@ function FixedAssets({ companyId, company, selPeriod }) {
   // ── Depreciation catch-up (same idempotent pattern as recurring journals) ─
   const runCatchUp = async (assetList) => {
     if (!companyId || !assetList.length) return;
-    setCatchingUp(true);
+    setCatchingUp(true); setDepErr(null);
     try {
       const earliestYM = assetList.reduce((min, a) => {
         const ym = a.purchase_date.slice(0, 7);
@@ -17516,6 +17510,7 @@ function FixedAssets({ companyId, company, selPeriod }) {
       const todayYM = new Date().toISOString().slice(0, 7);
       let ym = earliestYM, postedCount = 0, skippedCount = 0;
       const postedLabels = [];
+      let hardError = null;
 
       while (ym <= todayYM) {
         if (posted.has(ym)) { ym = faNextYM(ym); continue; }
@@ -17545,16 +17540,33 @@ function FixedAssets({ companyId, company, selPeriod }) {
         });
         const monthLabel = new Date(y, m - 1, 1).toLocaleDateString('en-IE', { month: 'long', year: 'numeric' });
         const jIds = [];
+        let postErr = null;
         for (const [nom, amt] of Object.entries(byNom)) {
-          const { data: jnl } = await supabase.from('journals').insert({
+          const { data: jnl, error: jErr } = await supabase.from('journals').insert({
             company_id: companyId, date: periodEnd,
             description: `Depreciation — ${monthLabel} (asset register)`,
             debit_account: '6950', credit_account: nom,
             amount: Math.round(amt * 100) / 100,
             vat_code: null, reference: `DEP-${ym}`, is_accrual_reversal: false,
           }).select('id').single();
+          if (jErr) { postErr = jErr; break; }
           if (jnl?.id) jIds.push(jnl.id);
         }
+
+        if (postErr) {
+          // Don't leave a claimed-but-nothing-posted run row behind — remove it so this
+          // period stays open to retry (once unlocked, if that's why it failed).
+          await supabase.from('asset_depreciation_runs').delete().eq('id', runRow.id);
+          if (/period is locked/i.test(postErr.message)) {
+            skippedCount++;
+            ym = faNextYM(ym);
+            continue;
+          }
+          captureError(postErr, { company_id: companyId, operation: 'fa-catchup-post' });
+          hardError = postErr.message;
+          break; // unexpected error — stop rather than silently skip to the next period
+        }
+
         if (jIds.length) await supabase.from('asset_depreciation_runs').update({ journal_ids: jIds }).eq('id', runRow.id);
 
         postedCount++;
@@ -17567,7 +17579,12 @@ function FixedAssets({ companyId, company, selPeriod }) {
         setTimeout(() => setDepToast(null), 6000);
       }
       setDepSkipped(skippedCount);
-    } catch (e) { console.error('[FA catch-up]', e.message); }
+      if (hardError) setDepErr(`Depreciation catch-up stopped: ${hardError}`);
+    } catch (e) {
+      console.error('[FA catch-up]', e.message);
+      captureError(e, { company_id: companyId, operation: 'fa-catchup' });
+      setDepErr(e.message);
+    }
     setCatchingUp(false);
   };
 
@@ -17771,6 +17788,9 @@ function FixedAssets({ companyId, company, selPeriod }) {
             <div style={{ fontSize: 11, color: 'var(--warn)', marginTop: 4 }}>
               ⚠ {depSkipped} depreciation period{depSkipped !== 1 ? 's' : ''} skipped — period locked.
             </div>
+          )}
+          {depErr && (
+            <div style={{ fontSize: 11, color: 'var(--danger)', marginTop: 4 }}>⚠ {depErr}</div>
           )}
           {catchingUp && <div style={{ fontSize: 11, color: 'var(--text-faint)' }}>Posting catch-up depreciation…</div>}
         </div>
@@ -19425,6 +19445,7 @@ export default function App() {
   // Recurring journal catch-up: runs on company load, posts any missed periods
   const [recurringToast, setRecurringToast]     = useState(null);
   const [recurringSkipped, setRecurringSkipped] = useState(0);
+  const [recurringErr, setRecurringErr]         = useState(null);
   useEffect(() => {
     if (!company?.id) return;
     (async () => {
@@ -19438,10 +19459,12 @@ export default function App() {
         const todayStr = today.toISOString().slice(0, 10);
         let posted = 0, lockedSkips = 0;
         const monthLabels = new Set();
+        let hardError = null;
 
         // Fetch locked periods once; reused for every template and period iteration
         const lockedPeriods = await getLockedPeriods(company.id);
 
+        templatesLoop:
         for (const tpl of templates) {
           // Iterate months from start_date up to today's month
           const [sy, sm] = tpl.start_date.slice(0, 7).split('-').map(Number);
@@ -19493,21 +19516,43 @@ export default function App() {
               vat_code: tpl.vat_code || null,
               source_recurring_id: tpl.id, is_accrual_reversal: false,
             };
-            const { data: jnl } = await supabase.from('journals').insert(jnlPayload).select('id').single();
+            const { data: jnl, error: jErr } = await supabase.from('journals').insert(jnlPayload).select('id').single();
+
+            if (jErr) {
+              // The run row above is already claimed with status='posted' but nothing
+              // actually posted — delete it rather than leave that lie on record. The
+              // posting attempt above is a plain INSERT (not an upsert), so any row left
+              // behind here — 'posted' or otherwise — would permanently block a future
+              // retry via the unique (recurring_journal_id, period) constraint even after
+              // the period is unlocked; deleting is what actually leaves it open to retry.
+              if (/period is locked/i.test(jErr.message)) {
+                await supabase.from('recurring_journal_runs').delete().eq('id', runData.id);
+                lockedSkips++;
+                if (m === 12) { y++; m = 1; } else { m++; }
+                continue;
+              }
+              captureError(jErr, { company_id: company.id, operation: 'recurring-post', template_id: tpl.id, period });
+              await supabase.from('recurring_journal_runs').delete().eq('id', runData.id);
+              hardError = jErr.message;
+              break templatesLoop; // unexpected error — stop rather than silently skip ahead
+            }
 
             // Update run with journal_id
             if (jnl?.id) {
               await supabase.from('recurring_journal_runs').update({ journal_id: jnl.id }).eq('id', runData.id);
             }
 
-            // Accrual reversal: debit/credit swapped, 1st of following month
+            // Accrual reversal: debit/credit swapped, 1st of following month. The primary
+            // journal above already posted successfully, so a reversal-only failure doesn't
+            // stop the engine — it's captured and surfaced, but this period still counts as
+            // posted (it's only the future-dated reversal leg that's missing).
             if (tpl.journal_type === 'accrual') {
               const nm = m === 12 ? 1 : m + 1;
               const ny = m === 12 ? y + 1 : y;
               const revDate = `${ny}-${String(nm).padStart(2, '0')}-01`;
               // Only post reversal if that date is also unlocked
               if (!isDateLocked(revDate, lockedPeriods)) {
-                await supabase.from('journals').insert({
+                const { error: revErr } = await supabase.from('journals').insert({
                   company_id: company.id, date: revDate,
                   description: `Reversal: ${desc}`,
                   debit_account: tpl.credit_account, credit_account: tpl.debit_account,
@@ -19515,6 +19560,7 @@ export default function App() {
                   vat_code: null,
                   source_recurring_id: tpl.id, is_accrual_reversal: true,
                 });
+                if (revErr) captureError(revErr, { company_id: company.id, operation: 'recurring-reversal', template_id: tpl.id, period });
               }
             }
 
@@ -19532,8 +19578,13 @@ export default function App() {
         if (lockedSkips > 0) {
           setRecurringSkipped(lockedSkips);
         }
+        if (hardError) {
+          setRecurringErr(`Recurring journal posting stopped: ${hardError}`);
+        }
       } catch (err) {
         console.error('[recurring] engine error:', err.message);
+        captureError(err, { company_id: company.id, operation: 'recurring-engine' });
+        setRecurringErr(err.message);
       }
     })();
   }, [company?.id]); // eslint-disable-line
@@ -19868,6 +19919,18 @@ export default function App() {
           }}>
             <span>↻</span><span>{recurringToast}</span>
             <button onClick={() => setRecurringToast(null)} style={{ marginLeft: 8, background: "none", border: "none", color: "var(--accent)", cursor: "pointer", fontSize: 14, lineHeight: 1 }}>×</button>
+          </div>
+        )}
+        {recurringErr && (
+          <div style={{
+            position: "fixed", bottom: 24, left: "50%", transform: "translateX(-50%)",
+            background: "var(--surface)", border: "1px solid rgba(239,68,68,0.4)",
+            color: "var(--danger)", borderRadius: 8, padding: "10px 20px",
+            fontSize: 13, fontWeight: 600, zIndex: 9999, boxShadow: "0 4px 24px rgba(0,0,0,0.4)",
+            display: "flex", alignItems: "center", gap: 10,
+          }}>
+            <span>⚠</span><span>{recurringErr}</span>
+            <button onClick={() => setRecurringErr(null)} style={{ marginLeft: 8, background: "none", border: "none", color: "var(--danger)", cursor: "pointer", fontSize: 14, lineHeight: 1 }}>×</button>
           </div>
         )}
         <div className={`app${chatOpen ? ' chat-is-open' : ''}`}>
