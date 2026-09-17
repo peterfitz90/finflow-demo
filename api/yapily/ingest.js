@@ -237,6 +237,22 @@ export default withSentry(async function handler(req, res) {
   const bankAccountsByExternalId = {};
   for (const row of (existingBankAccounts || [])) bankAccountsByExternalId[row.external_account_id] = row;
 
+  // Resolves the account's own bank nominal/id (Item 2) instead of hardcoding '1000' for
+  // every transaction regardless of which real account it came from. Falls back to '1000'
+  // with a captured error only if a row's account somehow never got mapped above (should
+  // not happen given the auto-create step, but never silently drop a transaction over it).
+  // Defined here (rather than at the posting step below) so Tier-2 dedup, which runs first,
+  // can also key on the resolved account instead of matching across accounts company-wide.
+  const bankNominalFor = (row) => {
+    const acct = bankAccountsByExternalId[row.accountId];
+    if (acct?.nominal_code) return acct.nominal_code;
+    captureError(new Error('Transaction has no resolved bank_accounts mapping — falling back to 1000'), {
+      company_id, operation: 'yapily-ingest-unmapped-account', account_id: row.accountId, ext_id: row.extId,
+    });
+    return '1000';
+  };
+  const bankAccountIdFor = (row) => bankAccountsByExternalId[row.accountId]?.id ?? null;
+
   if (!dry_run) {
     // Persist the current account list on the connection (previously only done by the
     // diagnostic sync.js endpoint, never kept live by the real ingest path).
@@ -416,18 +432,27 @@ export default withSentry(async function handler(req, res) {
   const afterIdDedup   = eurMapped.filter(r => !existingIds.has(r.extId));
   const idDupCount     = eurMapped.length - afterIdDedup.length;
 
-  // ── 7b. Dedup (Tier 2 — cross-source content match): date + amount + similar description ──
+  // ── 7b. Dedup (Tier 2 — cross-source content match): date + amount + account + similar description ──
   // Catches the case Tier 1 structurally cannot: the same real transaction already sitting in
   // the ledger from a prior CSV import. Matched on attributes any source reliably has (date,
   // amount, description) rather than a source-specific id. Requires an EXACT date+amount match
   // (the strong signal) before even looking at description — two genuinely different €50
   // payments on the same day only collide here if their descriptions are also similar.
+  //
+  // Item 2 Stage 4: the key also includes the resolved bank_account_id. Without this, a
+  // company with two real active accounts posting a same-day, same-amount, similarly-described
+  // transaction on EACH (e.g. a transfer between its own two accounts) would have the second
+  // account's transaction wrongly treated as a duplicate of the first and silently dropped —
+  // a false positive that structurally could not happen before Item 2 (every company had
+  // exactly one account, so the account dimension was always constant). For any single-account
+  // company this key resolves to the same account on every row, so matching behaves exactly
+  // as before.
   const uniqueDates = [...new Set(afterIdDedup.map(r => r.date))];
   let crossSourceDupes = [];
   if (uniqueDates.length) {
     const { data: sameDateExisting, error: sameDateErr } = await db
       .from('bank_transactions')
-      .select('date, amount, description, revolut_id, bank_format')
+      .select('date, amount, description, revolut_id, bank_format, bank_account_id')
       .eq('company_id', company_id)
       .in('date', uniqueDates);
 
@@ -436,17 +461,17 @@ export default withSentry(async function handler(req, res) {
       return res.status(500).json({ error: 'Dedup check failed — ingest aborted to avoid risking duplicate transactions: ' + sameDateErr.message });
     }
 
-    const byDateAmount = new Map(); // "date|amount" → existing rows
+    const byDateAmountAccount = new Map(); // "date|amount|account_id" → existing rows
     for (const row of (sameDateExisting ?? [])) {
-      const key = `${row.date}|${Number(row.amount).toFixed(2)}`;
-      if (!byDateAmount.has(key)) byDateAmount.set(key, []);
-      byDateAmount.get(key).push(row);
+      const key = `${row.date}|${Number(row.amount).toFixed(2)}|${row.bank_account_id ?? 'unmapped'}`;
+      if (!byDateAmountAccount.has(key)) byDateAmountAccount.set(key, []);
+      byDateAmountAccount.get(key).push(row);
     }
 
     crossSourceDupes = afterIdDedup
       .map(r => {
-        const key = `${r.date}|${Number(r.amount).toFixed(2)}`;
-        const candidates = byDateAmount.get(key) ?? [];
+        const key = `${r.date}|${Number(r.amount).toFixed(2)}|${bankAccountIdFor(r) ?? 'unmapped'}`;
+        const candidates = byDateAmountAccount.get(key) ?? [];
         const match = candidates.find(c => descriptionsLikelyMatch(c.description, r.description));
         return match ? { ...r, matched_revolut_id: match.revolut_id, matched_bank_format: match.bank_format } : null;
       })
@@ -697,20 +722,6 @@ export default withSentry(async function handler(req, res) {
   // ── 14. Build journal + bank_transaction rows and INSERT ──────────────────────
   const batchId = crypto.randomUUID();
   const now     = new Date().toISOString();
-
-  // Resolves the account's own bank nominal (Item 2) instead of hardcoding '1000' for
-  // every transaction regardless of which real account it came from. Falls back to '1000'
-  // with a captured error only if a row's account somehow never got mapped above (should
-  // not happen given the auto-create step, but never silently drop a transaction over it).
-  const bankNominalFor = (row) => {
-    const acct = bankAccountsByExternalId[row.accountId];
-    if (acct?.nominal_code) return acct.nominal_code;
-    captureError(new Error('Transaction has no resolved bank_accounts mapping — falling back to 1000'), {
-      company_id, operation: 'yapily-ingest-unmapped-account', account_id: row.accountId, ext_id: row.extId,
-    });
-    return '1000';
-  };
-  const bankAccountIdFor = (row) => bankAccountsByExternalId[row.accountId]?.id ?? null;
 
   const journals = toProcess
     .filter(row => !suppressedExtIds.has(row.extId))
