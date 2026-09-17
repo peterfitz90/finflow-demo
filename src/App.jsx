@@ -2067,24 +2067,50 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
 // api/yapily/ingest.js and the CSV BankImport pipeline. Not configurable per-account today.
 const BANK_NOMINAL_CODE = '1000';
 
-// Cumulative balance of a single nominal account, from inception up to and including `asOfDate`
-// — the same inception-unbounded, debit-normal approach the Balance Sheet fix uses for
-// Asset/Liability/Equity accounts (see GLReport's bsJournals/tbRows). Used here so Cash Flow's
-// opening balance always agrees with the Balance Sheet's bank balance as at that date, rather
-// than recomputing it a different way.
-async function fetchNominalBalanceAsOf(companyId, nominalCode, asOfDate) {
+// Cumulative balance of one or more nominal accounts, from inception up to and including
+// `asOfDate` — the same inception-unbounded, debit-normal approach the Balance Sheet fix uses
+// for Asset/Liability/Equity accounts (see GLReport's bsJournals/tbRows). Used here so Cash
+// Flow's opening balance always agrees with the Balance Sheet's bank balance as at that date,
+// rather than recomputing it a different way.
+//
+// Item 2 / balance-consolidation: nominalCodeOrCodes accepts a single code (unchanged
+// behavior, byte-identical query/result to before this change) or an array, so a company with
+// more than one real bank account can get its combined cash balance in one call instead of
+// every caller hardcoding a single nominal. A transfer between two of the summed accounts nets
+// to zero in the combined total, which is correct — total cash doesn't move.
+async function fetchNominalBalanceAsOf(companyId, nominalCodeOrCodes, asOfDate) {
+  const codes = Array.isArray(nominalCodeOrCodes) ? nominalCodeOrCodes : [nominalCodeOrCodes];
+  if (!codes.length) return 0;
+  const codeSet = new Set(codes);
   const { data, error } = await supabase.from('journals')
     .select('debit_account, credit_account, amount')
     .eq('company_id', companyId)
-    .or(`debit_account.eq.${nominalCode},credit_account.eq.${nominalCode}`)
+    .or(codes.map(c => `debit_account.eq.${c},credit_account.eq.${c}`).join(','))
     .lte('date', asOfDate);
   if (error) throw new Error(error.message);
   return (data || []).reduce((bal, j) => {
     const amt = Number(j.amount);
-    if (j.debit_account === nominalCode)  bal += amt; // debit-normal (asset)
-    if (j.credit_account === nominalCode) bal -= amt;
+    if (codeSet.has(j.debit_account))  bal += amt; // debit-normal (asset)
+    if (codeSet.has(j.credit_account)) bal -= amt;
     return bal;
   }, 0);
+}
+
+// Item 2 — a company's active bank_accounts nominal codes, so dashboard/Cash Flow balance
+// lookups can sum across every real account instead of assuming a single hardcoded nominal.
+function useActiveBankNominals(companyId) {
+  const [nominals, setNominals] = useState([]);
+  useEffect(() => {
+    if (!companyId) { setNominals([]); return; }
+    let cancelled = false;
+    supabase.from('bank_accounts').select('nominal_code').eq('company_id', companyId).eq('is_active', true)
+      .then(({ data }) => {
+        if (cancelled) return;
+        setNominals((data || []).map(a => a.nominal_code).filter(Boolean));
+      });
+    return () => { cancelled = true; };
+  }, [companyId]);
+  return nominals;
 }
 
 // ─── CASH FLOW PAGE ───────────────────────────────────────────────────────────
@@ -2100,6 +2126,7 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
   const [allInvoices, setAllInvoices] = useState([]);
   const [openingBalance,   setOpeningBalance]   = useState(0);
   const [openingBalLoaded, setOpeningBalLoaded] = useState(false);
+  const activeBankNominals = useActiveBankNominals(companyId);
 
   useEffect(() => {
     if (!companyId) { setLoading(false); return; }
@@ -2126,12 +2153,15 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
     const dayBeforePeriodStart = new Date(oy, om - 1, 0).toISOString().slice(0, 10);
     let cancelled = false;
     setOpeningBalLoaded(false);
-    fetchNominalBalanceAsOf(companyId, BANK_NOMINAL_CODE, dayBeforePeriodStart)
+    // Item 2 — sum across every active bank account instead of the single hardcoded nominal;
+    // falls back to BANK_NOMINAL_CODE if a company somehow has no bank_accounts rows yet.
+    const codes = activeBankNominals.length ? activeBankNominals : [BANK_NOMINAL_CODE];
+    fetchNominalBalanceAsOf(companyId, codes, dayBeforePeriodStart)
       .then(bal => { if (!cancelled) setOpeningBalance(bal); })
       .catch(() => { if (!cancelled) setOpeningBalance(0); })
       .then(() => { if (!cancelled) setOpeningBalLoaded(true); });
     return () => { cancelled = true; };
-  }, [companyId, selPeriod]);
+  }, [companyId, selPeriod, activeBankNominals]);
 
   // ── Empty state ──
   if (!loading && txns.length === 0) return (
@@ -6219,6 +6249,10 @@ const TILE_META = {
 
 function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, company, onNavigate, recurringPosted, recurringSkipped, onOpenWizard, onDismissGetStarted }) {
   const { user } = useUser();
+  // Item 2 — sum across every active bank account instead of a single hardcoded nominal;
+  // falls back to BANK_NOMINAL_CODE if a company somehow has no bank_accounts rows yet.
+  const activeBankNominalsRaw = useActiveBankNominals(companyId);
+  const activeBankNominals = activeBankNominalsRaw.length ? activeBankNominalsRaw : [BANK_NOMINAL_CODE];
   const [loading, setLoading]               = useState(true);
   const [btSparkline, setBtSparkline]       = useState([]);
   const [currentBalance, setCurrentBalance] = useState(null);
@@ -6276,10 +6310,10 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
         // calc the Balance Sheet and Cash Flow use. NOT the raw bank_transactions.balance column:
         // that's only populated for CSV imports with a statement balance column: Yapily-fed rows
         // always leave it null, which is why this tile showed €0.
-        fetchNominalBalanceAsOf(companyId, BANK_NOMINAL_CODE, periodEnd).catch(() => null),
+        fetchNominalBalanceAsOf(companyId, activeBankNominals, periodEnd).catch(() => null),
         // Same, but as at the day before the period starts — the anchor for the sparkline's
         // running balance below.
-        fetchNominalBalanceAsOf(companyId, BANK_NOMINAL_CODE, dayBeforePeriodStart).catch(() => 0),
+        fetchNominalBalanceAsOf(companyId, activeBankNominals, dayBeforePeriodStart).catch(() => 0),
         // Sparkline: rows within the selected month, chronological
         supabase.from('bank_transactions')
           .select('date, amount, balance, nominal_account')
@@ -6349,7 +6383,7 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
       }
       setLoading(false);
     })();
-  }, [companyId, selPeriod]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [companyId, selPeriod, activeBankNominals]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // All-time automation stats (not period-scoped)
   useEffect(() => {
@@ -6400,14 +6434,14 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
           .lte('date', end)
           .order('date', { ascending: false })
           .limit(500),
-        fetchNominalBalanceAsOf(companyId, BANK_NOMINAL_CODE, dayBeforeStart).catch(() => 0),
+        fetchNominalBalanceAsOf(companyId, activeBankNominals, dayBeforeStart).catch(() => 0),
       ]);
       if (!data) return;
       let running = openingBal;
       const withRunningBalance = [...data].reverse().map(r => { running += Number(r.amount); return { ...r, balance: running }; });
       setChartData(withRunningBalance);
     })();
-  }, [companyId, selPeriod]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [companyId, selPeriod, activeBankNominals]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // KPI strip: 30d-ago balance, total AR outstanding, AP bills due.
   // Debtors/creditors totals now use the same inception-unbounded nominal-balance calc as the
@@ -6421,7 +6455,7 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
     const d30ago = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
     const d30fwd = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
     Promise.all([
-      fetchNominalBalanceAsOf(companyId, BANK_NOMINAL_CODE, d30ago).catch(() => null),
+      fetchNominalBalanceAsOf(companyId, activeBankNominals, d30ago).catch(() => null),
       fetchNominalBalanceAsOf(companyId, '1100', today).catch(() => 0), // Debtors — asset, debit-normal
       fetchNominalBalanceAsOf(companyId, '2000', today).catch(() => 0), // Creditors — liability, credit-normal (negate below)
       supabase.from('invoices')
@@ -6449,7 +6483,7 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
       }
       setKpiApCount30d((apCountRes.data || []).length);
     }).catch(() => {});
-  }, [companyId]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [companyId, activeBankNominals]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
     if (!companyId) return;
