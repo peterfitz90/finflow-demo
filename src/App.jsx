@@ -20191,6 +20191,167 @@ const NAV = [
   ]},
 ];
 
+// Global search / command palette. Strictly scoped to the currently-selected company — no
+// cross-client element. Pages come from the existing NAV array, filtered the same way the
+// sidebar filters it (accountantOnly/feature-gated) and matched client-side with the same
+// case-insensitive substring pattern the Chart of Accounts search uses. Entity results (one
+// query per type, each capped at 5) come from the Stage 2 RPC functions, which already
+// lowercase the query internally and scope by company_id server-side.
+//
+// Scoping note: selecting an entity result navigates to the page that owns that entity type
+// (Invoices/Journals/Reconciliation), not to the specific record/row/tab within it — deep
+// row-level focus (e.g. landing directly on the Customers sub-tab, or highlighting one journal)
+// was left out to keep this stage's diff small; the palette gets you to the right screen, not
+// necessarily scrolled to the exact row.
+const SEARCH_ENTITY_EMPTY = { invoices: [], journals: [], bank_transactions: [], customers: [] };
+function GlobalSearchPalette({ open, onClose, companyId, company, isBusinessOwner, onNavigate, onUpgrade }) {
+  const [query, setQuery] = useState('');
+  const [results, setResults] = useState(SEARCH_ENTITY_EMPTY);
+  const [searching, setSearching] = useState(false);
+  const inputRef = useRef(null);
+
+  useEffect(() => {
+    if (!open) return;
+    setQuery('');
+    setResults(SEARCH_ENTITY_EMPTY);
+    const t = setTimeout(() => inputRef.current?.focus(), 0);
+    return () => clearTimeout(t);
+  }, [open]);
+
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e) => { if (e.key === 'Escape') onClose(); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [open, onClose]);
+
+  useEffect(() => {
+    if (!open || !companyId || !query.trim()) { setResults(SEARCH_ENTITY_EMPTY); setSearching(false); return; }
+    let cancelled = false;
+    setSearching(true);
+    const t = setTimeout(async () => {
+      const [inv, jnl, bt, cust] = await Promise.all([
+        supabase.rpc('search_invoices', { p_company_id: companyId, p_query: query }),
+        supabase.rpc('search_journals', { p_company_id: companyId, p_query: query }),
+        supabase.rpc('search_bank_transactions', { p_company_id: companyId, p_query: query }),
+        supabase.rpc('search_customers', { p_company_id: companyId, p_query: query }),
+      ]);
+      if (cancelled) return;
+      setResults({
+        invoices: inv.data || [], journals: jnl.data || [],
+        bank_transactions: bt.data || [], customers: cust.data || [],
+      });
+      setSearching(false);
+    }, 200);
+    return () => { cancelled = true; clearTimeout(t); };
+  }, [open, companyId, query]);
+
+  if (!open) return null;
+
+  const navPages = NAV.filter(group => {
+    if (group.practiceOnly) return can(company, 'practice_dashboard') && !isBusinessOwner;
+    if (group.accountantOnly) return !isBusinessOwner;
+    if (isBusinessOwner && group.items.every(item => item.accountantOnly)) return false;
+    return true;
+  }).flatMap(group => group.items)
+    .filter(item => !(isBusinessOwner && item.accountantOnly) && !item.action);
+
+  const q = query.trim().toLowerCase();
+  const filteredPages = (q ? navPages.filter(i => i.label.toLowerCase().includes(q)) : navPages).slice(0, 5);
+
+  const selectPage = (item) => {
+    const locked = !!(item.feature && !can(company, item.feature));
+    if (locked) { onUpgrade(item.feature); onClose(); return; }
+    onNavigate(item.id);
+    onClose();
+  };
+  const selectEntity = (page) => { onNavigate(page); onClose(); };
+
+  const resultCount = filteredPages.length + results.invoices.length + results.journals.length
+    + results.bank_transactions.length + results.customers.length;
+
+  const Section = ({ label, children }) => (
+    <div style={{ marginBottom: 6 }}>
+      <div style={{ padding: '8px 16px 4px', fontSize: 10, fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--text-faint)' }}>{label}</div>
+      {children}
+    </div>
+  );
+  const ResultRow = ({ onClick, icon, primary, secondary, tertiary }) => (
+    <button onClick={onClick} style={{
+      display: 'flex', alignItems: 'center', gap: 10, width: '100%', textAlign: 'left',
+      padding: '8px 16px', background: 'transparent', border: 'none', cursor: 'pointer', fontSize: 13, color: 'var(--text)',
+    }}
+      onMouseEnter={e => { e.currentTarget.style.background = 'var(--surface-2)'; }}
+      onMouseLeave={e => { e.currentTarget.style.background = 'transparent'; }}
+    >
+      {icon && <span style={{ width: 16, textAlign: 'center', color: 'var(--text-faint)', flexShrink: 0 }}>{icon}</span>}
+      <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{primary}</span>
+      {secondary && <span style={{ color: 'var(--text-muted)', fontSize: 12, flexShrink: 0, maxWidth: 160, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{secondary}</span>}
+      {tertiary && <span style={{ color: 'var(--text-faint)', fontSize: 12, flexShrink: 0, fontVariantNumeric: 'tabular-nums' }}>{tertiary}</span>}
+    </button>
+  );
+
+  return (
+    <div style={{ position: 'fixed', inset: 0, background: 'rgba(0,0,0,0.55)', zIndex: 900, display: 'flex', justifyContent: 'center', paddingTop: '12vh' }} onClick={onClose}>
+      <div style={{ width: 560, maxWidth: '90vw', maxHeight: '70vh', background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-card)', boxShadow: '0 20px 60px rgba(0,0,0,0.5)', display: 'flex', flexDirection: 'column', overflow: 'hidden' }} onClick={e => e.stopPropagation()}>
+        <div style={{ padding: '4px 16px', borderBottom: '1px solid var(--border)' }}>
+          <input
+            ref={inputRef} value={query} onChange={e => setQuery(e.target.value)}
+            placeholder="Search pages, invoices, journals, bank transactions, customers…"
+            style={{ width: '100%', background: 'transparent', border: 'none', outline: 'none', fontSize: 14, color: 'var(--text)', padding: '12px 0', boxSizing: 'border-box' }}
+          />
+        </div>
+        <div style={{ overflowY: 'auto', padding: '6px 0' }}>
+          {resultCount === 0 && (
+            <div style={{ padding: '28px 16px', textAlign: 'center', fontSize: 12, color: 'var(--text-faint)' }}>
+              {searching ? 'Searching…' : query ? 'No results' : 'No pages available'}
+            </div>
+          )}
+          {filteredPages.length > 0 && (
+            <Section label="Pages">
+              {filteredPages.map(item => (
+                <ResultRow key={item.id} onClick={() => selectPage(item)} icon={item.icon} primary={item.label} />
+              ))}
+            </Section>
+          )}
+          {results.invoices.length > 0 && (
+            <Section label="Invoices">
+              {results.invoices.map(r => (
+                <ResultRow key={r.id} onClick={() => selectEntity('invoices')}
+                  primary={r.invoice_number || r.invoice_ref || 'Invoice'} secondary={r.client} tertiary={fmtEUR(r.total)} />
+              ))}
+            </Section>
+          )}
+          {results.journals.length > 0 && (
+            <Section label="Journals">
+              {results.journals.map(r => (
+                <ResultRow key={r.id} onClick={() => selectEntity('journals')}
+                  primary={r.description || r.reference || 'Journal'} secondary={r.date} tertiary={fmtEUR(r.amount)} />
+              ))}
+            </Section>
+          )}
+          {results.bank_transactions.length > 0 && (
+            <Section label="Bank Transactions">
+              {results.bank_transactions.map(r => (
+                <ResultRow key={r.id} onClick={() => selectEntity('reconciliation')}
+                  primary={r.description || 'Transaction'} secondary={r.bank_account_name} tertiary={fmtEUR(r.amount)} />
+              ))}
+            </Section>
+          )}
+          {results.customers.length > 0 && (
+            <Section label="Customers">
+              {results.customers.map(r => (
+                <ResultRow key={r.id} onClick={() => selectEntity('invoices')}
+                  primary={r.name} secondary={r.email || r.phone} />
+              ))}
+            </Section>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 export default function App() {
   const { user, isLoaded } = useUser();
   const { signOut } = useClerk();
@@ -20237,6 +20398,7 @@ export default function App() {
   const [wizardInitStep, setWizardInitStep] = useState(1);
   const [showAddCompany, setShowAddCompany] = useState(false);
   const [upgradeFeature, setUpgradeFeature] = useState(null); // feature key → show upgrade card
+  const [searchOpen, setSearchOpen] = useState(false); // global search / command palette
 
   // Global period state — YYYY-MM, lifted from Overview so all pages share one source of truth
   const [selPeriod, setSelPeriod] = useState(() => {
@@ -20449,6 +20611,21 @@ export default function App() {
   const closeChat = () => { setChatOpen(false); try { localStorage.setItem('ledgrly_chat_dock_state', 'closed'); } catch {} };
   useEffect(() => {
     const onKey = (e) => { if (e.key === 'Escape') setChatOpen(false); };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, []); // eslint-disable-line
+
+  // Global search / command palette trigger. Cmd/Ctrl+K anywhere in the app. The Reconciliation
+  // worksheet's own keyboard nav already ignores any modifier-held keystroke (its k-conflict
+  // guard, shipped earlier), so this listener firing alongside that one on the same keydown
+  // event is safe regardless of registration order — that guard was built for exactly this.
+  useEffect(() => {
+    const onKey = (e) => {
+      if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault();
+        setSearchOpen(true);
+      }
+    };
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, []); // eslint-disable-line
@@ -20875,6 +21052,9 @@ export default function App() {
                     <div className="topbar-sub">Here's what's happening with <strong style={{color:"var(--text)"}}>{companyName}</strong> today.</div>
                   </div>
                   <div className="topbar-right">
+                    <button className="period-pill" style={{ cursor: "pointer" }} onClick={() => setSearchOpen(true)} title="Search (Cmd/Ctrl+K)">
+                      🔍
+                    </button>
                     {bankConnBadge && (
                       <div className="bank-pill bank-pill-ok">
                         <span className="bank-dot" />
@@ -20962,6 +21142,15 @@ export default function App() {
           {upgradeFeature && (
             <UpgradeCard feature={upgradeFeature} onClose={() => setUpgradeFeature(null)} />
           )}
+          <GlobalSearchPalette
+            open={searchOpen}
+            onClose={() => setSearchOpen(false)}
+            companyId={company?.id}
+            company={company}
+            isBusinessOwner={isBusinessOwner}
+            onNavigate={p => { setPage(p); setShowPractice(false); }}
+            onUpgrade={setUpgradeFeature}
+          />
         </div>
       </>
     </AuthGate>
