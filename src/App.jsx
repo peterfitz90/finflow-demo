@@ -16454,7 +16454,10 @@ function ReconWorksheet({
   // row-focus keyboard navigation existed anywhere in this codebase before this. Guards
   // against ever hijacking keystrokes meant for a text field or the full-screen Settle modal.
   const [focusedIndex, setFocusedIndex] = useState(null);
-  const isActive = sessionMode === 'active';
+  // Stage 2: no longer tied to a session — keyboard nav is available whenever a range is set,
+  // which is always true once an account is selected (Stage 1 gives windowStart/windowEnd a
+  // default). This is what fixes Stage 1's flagged gap for accounts with no session.
+  const isActive = !!(windowStart && windowEnd);
 
   useEffect(() => {
     if (focusedIndex != null && focusedIndex >= worksheetRows.length) {
@@ -16502,15 +16505,10 @@ function ReconWorksheet({
     return <div className="card" style={{ padding: 48, textAlign: 'center', color: 'var(--text-faint)', fontSize: 12 }}>Loading…</div>;
   }
 
-  // Stage 1: the row list (below) no longer requires a session to exist — it's driven purely
-  // by the date-range control. The legacy anchor/target/Complete header and its edit/abandon
-  // actions still render exactly as before when a session happens to be active, but they no
-  // longer gate the rest of the worksheet from rendering (Stage 2/3 own removing this block).
-  const finalRunning = sessionMode === 'active'
-    ? (worksheetRows.length ? worksheetRows[worksheetRows.length - 1].runningBalance : Number(session.anchor_balance))
-    : null;
-  const targetDiff = sessionMode === 'active' && session.target_balance != null ? Number(session.target_balance) - finalRunning : null;
-  const isBalanced = targetDiff != null && Math.abs(targetDiff) < 0.005;
+  // Stage 2: completion is now a passive, always-current fact about worksheetRows itself —
+  // no target to hit, no click to register it. Nothing to reconcile TO was never a real
+  // "incomplete" state (Phase 2's finding); it's just the account being fully up to date.
+  const outstandingCount = worksheetRows.filter(r => !r.bt.reconciled).length;
 
   return (
     <div>
@@ -16541,60 +16539,17 @@ function ReconWorksheet({
         </div>
       )}
 
-      {sessionMode === 'active' && (
-      <div className="card" style={{ padding: '14px 18px', marginBottom: 14, display: 'flex', flexWrap: 'wrap', gap: 24, alignItems: 'center' }}>
-        <div>
-          <div style={{ fontSize: 10, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Anchor</div>
-          <div style={{ fontSize: 13, fontWeight: 600 }}>{fmtEUR(session.anchor_balance)} <span style={{ fontWeight: 400, color: 'var(--text-faint)', fontSize: 11 }}>on {fmtWsDate(session.anchor_date)}</span></div>
-        </div>
-        <div>
-          <div style={{ fontSize: 10, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Reconciled so far</div>
-          <div style={{ fontSize: 13, fontWeight: 600 }}>{fmtEUR(finalRunning)}</div>
-        </div>
-        <div>
-          <div style={{ fontSize: 10, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Target</div>
-          <div style={{ fontSize: 13, fontWeight: 600 }}>{session.target_balance != null ? `${fmtEUR(session.target_balance)} on ${fmtWsDate(session.target_date)}` : '— not set'}</div>
-        </div>
-        {targetDiff != null && (
-          <div>
-            <div style={{ fontSize: 10, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Difference</div>
-            <div style={{ fontSize: 13, fontWeight: 700, color: isBalanced ? 'var(--accent)' : 'var(--warn)' }}>{isBalanced ? '✓ Balanced' : fmtEUR(targetDiff)}</div>
-          </div>
+      {/* Stage 2: passive, derived completion state — no target to hit, no click to register
+          it, always current with worksheetRows' own reconciled status. */}
+      <div className="card" style={{ padding: '14px 18px', marginBottom: 14, display: 'flex', alignItems: 'center', gap: 12 }}>
+        {worksheetRows.length === 0 ? (
+          <span style={{ fontSize: 13, color: 'var(--text-muted)' }}>No transactions in this range.</span>
+        ) : outstandingCount === 0 ? (
+          <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--accent)' }}>✓ All transactions in this range are reconciled</span>
+        ) : (
+          <span style={{ fontSize: 13, fontWeight: 600, color: 'var(--warn)' }}>{outstandingCount} of {worksheetRows.length} transactions in this range still need reconciling</span>
         )}
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
-          <button className="btn btn-s btn-sm" onClick={onOpenEditSession}>Edit anchor…</button>
-          <button className="btn btn-s btn-sm" style={{ color: 'var(--danger)' }} disabled={abandoning} onClick={onAbandonSession}>
-            {abandoning ? 'Abandoning…' : 'Abandon'}
-          </button>
-          {/* No target set is a legitimate working state (Phase 2's design), but never a
-              legitimate completion state — a reconciliation with nothing to reconcile TO isn't
-              complete, it's just unstarted on that front. Relabel the button to say what's
-              actually missing, and give a real, always-visible way to fix it — not just a
-              hover tooltip, which is low-discoverability and doesn't really exist on touch. */}
-          {session.target_balance == null && (
-            <button className="btn btn-s btn-sm" style={{ color: 'var(--accent)' }} onClick={onOpenEditSession}>→ Set a target now</button>
-          )}
-          <button
-            className="btn btn-p btn-sm"
-            disabled={!isBalanced || completingSession}
-            onClick={onCompleteSession}
-            title={session.target_balance == null ? 'No target set yet — use Edit anchor… or the link to add one' : !isBalanced ? 'Reconciled balance must match the target before completing' : ''}
-          >
-            {completingSession ? 'Completing…' : session.target_balance == null ? 'Set a target to complete' : 'Complete reconciliation'}
-          </button>
-        </div>
       </div>
-      )}
-
-      {sessionMode === 'active' && editForm && (
-        <div className="card" style={{ padding: 20, marginBottom: 14 }}>
-          <StartSessionForm
-            startForm={editForm} startErr={editErr} startSaving={editSaving}
-            onChange={onChangeEditForm} onCancel={onCancelEditSession} onSave={onSaveEditSession}
-            title="Edit anchor / target" saveLabel="Save" savingLabel="Saving…"
-          />
-        </div>
-      )}
 
       {/* Stage 1: replaces anchor_date/target_date as the row list's window. Independent of
           any session — defaults off the global period selector, always overridable here. */}
