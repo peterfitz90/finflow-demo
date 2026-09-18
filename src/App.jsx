@@ -808,6 +808,15 @@ const CSS = `
   .btn-sm { padding: 5px 12px; font-size: 12px; }
   .btn-d { background: rgba(220,38,38,0.07); color: var(--red); border: 1px solid rgba(220,38,38,0.2); }
   .btn-d:hover { background: rgba(220,38,38,0.12); }
+  /* A disabled button must never be visually indistinguishable from an enabled one — this was
+     the root cause behind the Reconciliation "Complete" button reading as clickable when it
+     wasn't. Inline style={{opacity:...}} on already-patched buttons still wins over these
+     (inline beats stylesheet regardless of :disabled specificity), so this only affects the
+     buttons that never got that manual per-instance workaround. */
+  .btn:disabled { opacity: 0.45; cursor: not-allowed; box-shadow: none; }
+  .btn-p:disabled, .btn-p:disabled:hover { background: var(--teal); box-shadow: none; }
+  .btn-s:disabled, .btn-s:disabled:hover { background: var(--white); color: var(--muted); }
+  .btn-d:disabled, .btn-d:disabled:hover { background: rgba(220,38,38,0.07); }
   /* chat-panel fills the dock container — dock handles positioning/sizing */
   .chat-panel { flex: 1; display: flex; flex-direction: column; overflow: hidden; background: var(--surface); min-width: 0; }
   /* ── CHAT DOCK ── */
@@ -16439,6 +16448,7 @@ function ReconWorksheet({
   settleModalOpen,
   editForm, editErr, editSaving, onOpenEditSession, onChangeEditForm, onCancelEditSession, onSaveEditSession,
   onAbandonSession, abandoning,
+  windowStart, windowEnd, onChangeWindowStart, onChangeWindowEnd,
 }) {
   // Minimal keyboard model (Track B Piece 4). Deliberately conservative — no precedent for
   // row-focus keyboard navigation existed anywhere in this codebase before this. Guards
@@ -16492,42 +16502,46 @@ function ReconWorksheet({
     return <div className="card" style={{ padding: 48, textAlign: 'center', color: 'var(--text-faint)', fontSize: 12 }}>Loading…</div>;
   }
 
-  if (sessionMode === 'none' || sessionMode === 'completed') {
-    return (
-      <div className="card" style={{ padding: 28 }}>
-        {startForm ? (
-          <StartSessionForm startForm={startForm} startErr={startErr} startSaving={startSaving}
-            onChange={onChangeStartForm} onCancel={onCancelStartSession} onSave={onSaveStartSession} />
-        ) : sessionMode === 'none' ? (
-          <div style={{ textAlign: 'center', padding: '20px 0' }}>
-            <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 14 }}>No reconciliation started for this account yet.</div>
-            <button className="btn btn-p btn-sm" onClick={onOpenStartSession}>Start reconciliation</button>
-          </div>
-        ) : (
-          <div style={{ textAlign: 'center', padding: '20px 0' }}>
-            <div style={{ fontSize: 13, color: 'var(--accent)', marginBottom: 4 }}>✓ Last reconciliation completed</div>
-            <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 14 }}>
-              {session.target_date
-                ? `As of ${fmtWsDate(session.target_date)}, balance ${fmtEUR(session.target_balance)}`
-                : `Anchor ${fmtEUR(session.anchor_balance)} on ${fmtWsDate(session.anchor_date)}`}
-            </div>
-            <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
-              <button className="btn btn-p btn-sm" onClick={onOpenStartSession}>Start next reconciliation</button>
-              <button className="btn btn-s btn-sm" onClick={onReopenSession}>Reopen this one</button>
-            </div>
-          </div>
-        )}
-      </div>
-    );
-  }
-
-  // sessionMode === 'active'
-  const finalRunning = worksheetRows.length ? worksheetRows[worksheetRows.length - 1].runningBalance : Number(session.anchor_balance);
-  const targetDiff    = session.target_balance != null ? Number(session.target_balance) - finalRunning : null;
-  const isBalanced    = targetDiff != null && Math.abs(targetDiff) < 0.005;
+  // Stage 1: the row list (below) no longer requires a session to exist — it's driven purely
+  // by the date-range control. The legacy anchor/target/Complete header and its edit/abandon
+  // actions still render exactly as before when a session happens to be active, but they no
+  // longer gate the rest of the worksheet from rendering (Stage 2/3 own removing this block).
+  const finalRunning = sessionMode === 'active'
+    ? (worksheetRows.length ? worksheetRows[worksheetRows.length - 1].runningBalance : Number(session.anchor_balance))
+    : null;
+  const targetDiff = sessionMode === 'active' && session.target_balance != null ? Number(session.target_balance) - finalRunning : null;
+  const isBalanced = targetDiff != null && Math.abs(targetDiff) < 0.005;
 
   return (
     <div>
+      {(sessionMode === 'none' || sessionMode === 'completed') && (
+        <div className="card" style={{ padding: 28, marginBottom: 14 }}>
+          {startForm ? (
+            <StartSessionForm startForm={startForm} startErr={startErr} startSaving={startSaving}
+              onChange={onChangeStartForm} onCancel={onCancelStartSession} onSave={onSaveStartSession} />
+          ) : sessionMode === 'none' ? (
+            <div style={{ textAlign: 'center', padding: '20px 0' }}>
+              <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 14 }}>No reconciliation started for this account yet.</div>
+              <button className="btn btn-p btn-sm" onClick={onOpenStartSession}>Start reconciliation</button>
+            </div>
+          ) : (
+            <div style={{ textAlign: 'center', padding: '20px 0' }}>
+              <div style={{ fontSize: 13, color: 'var(--accent)', marginBottom: 4 }}>✓ Last reconciliation completed</div>
+              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 14 }}>
+                {session.target_date
+                  ? `As of ${fmtWsDate(session.target_date)}, balance ${fmtEUR(session.target_balance)}`
+                  : `Anchor ${fmtEUR(session.anchor_balance)} on ${fmtWsDate(session.anchor_date)}`}
+              </div>
+              <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
+                <button className="btn btn-p btn-sm" onClick={onOpenStartSession}>Start next reconciliation</button>
+                <button className="btn btn-s btn-sm" onClick={onReopenSession}>Reopen this one</button>
+              </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {sessionMode === 'active' && (
       <div className="card" style={{ padding: '14px 18px', marginBottom: 14, display: 'flex', flexWrap: 'wrap', gap: 24, alignItems: 'center' }}>
         <div>
           <div style={{ fontSize: 10, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Anchor</div>
@@ -16547,18 +16561,32 @@ function ReconWorksheet({
             <div style={{ fontSize: 13, fontWeight: 700, color: isBalanced ? 'var(--accent)' : 'var(--warn)' }}>{isBalanced ? '✓ Balanced' : fmtEUR(targetDiff)}</div>
           </div>
         )}
-        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8 }}>
+        <div style={{ marginLeft: 'auto', display: 'flex', gap: 8, alignItems: 'center' }}>
           <button className="btn btn-s btn-sm" onClick={onOpenEditSession}>Edit anchor…</button>
           <button className="btn btn-s btn-sm" style={{ color: 'var(--danger)' }} disabled={abandoning} onClick={onAbandonSession}>
             {abandoning ? 'Abandoning…' : 'Abandon'}
           </button>
-          <button className="btn btn-p btn-sm" disabled={!isBalanced || completingSession} onClick={onCompleteSession} title={!isBalanced ? 'Reconciled balance must match the target before completing' : ''}>
-            {completingSession ? 'Completing…' : 'Complete reconciliation'}
+          {/* No target set is a legitimate working state (Phase 2's design), but never a
+              legitimate completion state — a reconciliation with nothing to reconcile TO isn't
+              complete, it's just unstarted on that front. Relabel the button to say what's
+              actually missing, and give a real, always-visible way to fix it — not just a
+              hover tooltip, which is low-discoverability and doesn't really exist on touch. */}
+          {session.target_balance == null && (
+            <button className="btn btn-s btn-sm" style={{ color: 'var(--accent)' }} onClick={onOpenEditSession}>→ Set a target now</button>
+          )}
+          <button
+            className="btn btn-p btn-sm"
+            disabled={!isBalanced || completingSession}
+            onClick={onCompleteSession}
+            title={session.target_balance == null ? 'No target set yet — use Edit anchor… or the link to add one' : !isBalanced ? 'Reconciled balance must match the target before completing' : ''}
+          >
+            {completingSession ? 'Completing…' : session.target_balance == null ? 'Set a target to complete' : 'Complete reconciliation'}
           </button>
         </div>
       </div>
+      )}
 
-      {editForm && (
+      {sessionMode === 'active' && editForm && (
         <div className="card" style={{ padding: 20, marginBottom: 14 }}>
           <StartSessionForm
             startForm={editForm} startErr={editErr} startSaving={editSaving}
@@ -16567,6 +16595,20 @@ function ReconWorksheet({
           />
         </div>
       )}
+
+      {/* Stage 1: replaces anchor_date/target_date as the row list's window. Independent of
+          any session — defaults off the global period selector, always overridable here. */}
+      <div className="card" style={{ padding: '10px 18px', marginBottom: 14, display: 'flex', gap: 16, alignItems: 'center', flexWrap: 'wrap' }}>
+        <span style={{ fontSize: 11, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em' }}>Range</span>
+        <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 12, color: 'var(--text-muted)' }}>
+          From
+          <input type="date" className="f-input" value={windowStart || ''} onChange={e => onChangeWindowStart(e.target.value)} style={{ fontSize: 12, padding: '4px 8px' }} />
+        </label>
+        <label style={{ display: 'flex', gap: 6, alignItems: 'center', fontSize: 12, color: 'var(--text-muted)' }}>
+          To
+          <input type="date" className="f-input" value={windowEnd || ''} onChange={e => onChangeWindowEnd(e.target.value)} style={{ fontSize: 12, padding: '4px 8px' }} />
+        </label>
+      </div>
 
       <div style={{ fontSize: 10, color: 'var(--text-faint)', marginBottom: 6, paddingLeft: 2 }}>
         ↑↓ navigate · Enter accept · N reject
@@ -16635,7 +16677,7 @@ function ReconWorksheet({
 // ─────────────────────────────────────────────────────────────────────────────
 // Reconciliation page component
 // ─────────────────────────────────────────────────────────────────────────────
-function Reconciliation({ companyId, onNavigate }) {
+function Reconciliation({ companyId, onNavigate, selPeriod }) {
   const [tab, setTab]                         = useState('suggested');
   const [loading, setLoading]                 = useState(true);
   const [matching, setMatching]               = useState(false);
@@ -16690,6 +16732,25 @@ function Reconciliation({ companyId, onNavigate }) {
   const [editSaving, setEditSaving] = useState(false);
   const [abandoning, setAbandoning] = useState(false);
 
+  // Stage 1 of replacing reconciliation_sessions as the worksheet's data source: an explicit
+  // date-range control, defaulting off the global selPeriod month the same way Cash Flow/
+  // Overview do (end = today if selPeriod is the current in-progress month, else month-end).
+  // Independent of any session — this is what will remain once anchor/target are fully removed.
+  const wsLocalDateStr = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+  const defaultWindowForPeriod = (period) => {
+    const [py, pm] = period.split('-').map(Number);
+    const now = new Date();
+    const curPeriod = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
+    const end = period === curPeriod ? wsLocalDateStr(now) : wsLocalDateStr(new Date(py, pm, 0));
+    return { start: `${period}-01`, end };
+  };
+  const [windowStart, setWindowStart] = useState(() => defaultWindowForPeriod(selPeriod).start);
+  const [windowEnd, setWindowEnd]     = useState(() => defaultWindowForPeriod(selPeriod).end);
+  useEffect(() => {
+    const d = defaultWindowForPeriod(selPeriod);
+    setWindowStart(d.start); setWindowEnd(d.end);
+  }, [selPeriod]); // eslint-disable-line
+
   useEffect(() => { if (companyId) loadAll(); }, [companyId]); // eslint-disable-line
   useEffect(() => {
     if (!companyId) return;
@@ -16717,13 +16778,21 @@ function Reconciliation({ companyId, onNavigate }) {
   const sessionMode = !session ? 'none' : session.status === 'in_progress' ? 'active' : 'completed';
 
   const loadWorksheet = async () => {
-    if (!session || session.status !== 'in_progress' || !selectedAccountId) { setWorksheetRows([]); return; }
+    if (!selectedAccountId || !windowStart || !windowEnd) { setWorksheetRows([]); return; }
+    const selectedAccount = bankAccounts.find(a => a.id === selectedAccountId);
+    if (!selectedAccount) { setWorksheetRows([]); return; }
     setWorksheetLoading(true);
-    let q = supabase.from('bank_transactions').select('*')
+    // Starting balance is now derived, not hand-typed: the same cumulative-from-inception
+    // nominal balance Cash Flow/Overview/GLReport already use, as of the day before the window
+    // opens — so it always agrees with the ledger instead of relying on someone re-typing it.
+    const dayBefore = new Date(windowStart);
+    dayBefore.setDate(dayBefore.getDate() - 1);
+    const startingBalance = await fetchNominalBalanceAsOf(companyId, selectedAccount.nominal_code, wsLocalDateStr(dayBefore));
+
+    const { data: txns } = await supabase.from('bank_transactions').select('*')
       .eq('company_id', companyId).eq('bank_account_id', selectedAccountId)
-      .gte('date', session.anchor_date);
-    if (session.target_date) q = q.lte('date', session.target_date);
-    const { data: txns } = await q.order('date', { ascending: true });
+      .gte('date', windowStart).lte('date', windowEnd)
+      .order('date', { ascending: true });
 
     const btIds = (txns || []).map(t => t.id);
     const { data: matches } = await supabase.from('bank_matches').select('*')
@@ -16749,7 +16818,7 @@ function Reconciliation({ companyId, onNavigate }) {
     // transaction's live `reconciled` flag every load — no cached/stored running total, so
     // rejecting or un-reconciling a row is automatically reflected on the next refresh with
     // no special-case handling.
-    let running = Number(session.anchor_balance);
+    let running = startingBalance;
     const rows = (txns || []).map(bt => {
       if (bt.reconciled) running += Number(bt.amount);
       const match = matchByBt[bt.id] || null;
@@ -16759,11 +16828,11 @@ function Reconciliation({ companyId, onNavigate }) {
     setWorksheetRows(rows);
     setWorksheetLoading(false);
   };
-  useEffect(() => { loadWorksheet(); }, [session, selectedAccountId]); // eslint-disable-line
+  useEffect(() => { loadWorksheet(); }, [selectedAccountId, windowStart, windowEnd]); // eslint-disable-line
 
   const refreshCurrentView = async () => {
     await loadAll();
-    if (viewMode === 'worksheet' && session?.status === 'in_progress') await loadWorksheet();
+    if (viewMode === 'worksheet') await loadWorksheet();
   };
 
   const openStartSession = async () => {
@@ -17485,6 +17554,10 @@ function Reconciliation({ companyId, onNavigate }) {
           onSaveEditSession={saveEditSession}
           onAbandonSession={abandonSession}
           abandoning={abandoning}
+          windowStart={windowStart}
+          windowEnd={windowEnd}
+          onChangeWindowStart={setWindowStart}
+          onChangeWindowEnd={setWindowEnd}
         />
       )}
 
@@ -21129,7 +21202,7 @@ export default function App() {
                     <BankImportErrorBoundary><BankImport companyId={company?.id} isActive={page === "bank-import"} company={company} /></BankImportErrorBoundary>
                   </div>
                   {page === "bank-feeds"     && <YapilyBankFeeds companyId={company?.id} company={company} isActive={page === "bank-feeds"} />}
-                  {page === "reconciliation" && <Reconciliation companyId={company?.id} onNavigate={setPage} />}
+                  {page === "reconciliation" && <Reconciliation companyId={company?.id} onNavigate={setPage} selPeriod={selPeriod} />}
                   {page === "revenue"        && <RevenueFeed companyId={company?.id} company={company} />}
                   {page === "compliance"      && <Compliance company={company} onNavigate={setPage} />}
                   {page === "vat-returns"    && <VATReturns company={company} onNavigate={setPage} isBusinessOwner={isBusinessOwner} />}
