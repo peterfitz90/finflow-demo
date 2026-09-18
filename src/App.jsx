@@ -16328,43 +16328,6 @@ async function runMatchingEngine(companyId) {
 // ─────────────────────────────────────────────────────────────────────────────
 // Track B — anchor-balance worksheet (per selected bank account)
 // ─────────────────────────────────────────────────────────────────────────────
-const fmtWsDate = (d) => d ? new Date(d).toLocaleDateString('en-IE', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
-
-function StartSessionForm({ startForm, startErr, startSaving, onChange, onCancel, onSave, title = 'Start reconciliation', saveLabel = 'Start', savingLabel = 'Starting…' }) {
-  const set = (k) => (e) => onChange(p => ({ ...p, [k]: e.target.value }));
-  return (
-    <div style={{ maxWidth: 420, margin: '0 auto' }}>
-      <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 12 }}>{title}</div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 10 }}>
-        <div>
-          <div style={{ fontSize: 10, color: 'var(--dim)', marginBottom: 3 }}>Anchor balance (€) *</div>
-          <input className="f-input" type="number" step="0.01" value={startForm.anchor_balance} onChange={set('anchor_balance')} style={{ fontSize: 12 }} />
-        </div>
-        <div>
-          <div style={{ fontSize: 10, color: 'var(--dim)', marginBottom: 3 }}>Anchor date *</div>
-          <input className="f-input" type="date" value={startForm.anchor_date} onChange={set('anchor_date')} style={{ fontSize: 12 }} />
-        </div>
-      </div>
-      <div style={{ fontSize: 10, color: 'var(--text-faint)', marginBottom: 8, textTransform: 'uppercase', letterSpacing: '0.06em' }}>Target (optional — set once you have the next statement)</div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, marginBottom: 14 }}>
-        <div>
-          <div style={{ fontSize: 10, color: 'var(--dim)', marginBottom: 3 }}>Target balance (€)</div>
-          <input className="f-input" type="number" step="0.01" value={startForm.target_balance} onChange={set('target_balance')} style={{ fontSize: 12 }} />
-        </div>
-        <div>
-          <div style={{ fontSize: 10, color: 'var(--dim)', marginBottom: 3 }}>Target date</div>
-          <input className="f-input" type="date" value={startForm.target_date} onChange={set('target_date')} style={{ fontSize: 12 }} />
-        </div>
-      </div>
-      {startErr && <div style={{ fontSize: 11, color: 'var(--danger)', marginBottom: 10 }}>{startErr}</div>}
-      <div style={{ display: 'flex', gap: 8 }}>
-        <button className="btn btn-p btn-sm" onClick={onSave} disabled={startSaving}>{startSaving ? savingLabel : saveLabel}</button>
-        <button className="btn btn-s btn-sm" onClick={onCancel}>Cancel</button>
-      </div>
-    </div>
-  );
-}
-
 function FindMatchPanel({ searchQ, setSearchQ, filteredCands, typeTag, onLink }) {
   return (
     <div style={{ padding: '12px 18px', background: 'var(--surface-2)', borderBottom: '1px solid var(--border)' }}>
@@ -16437,17 +16400,12 @@ function InlineCreateJnl({ jnlForm, setJnlForm, onSave, onCancel, savingJnl }) {
 }
 
 function ReconWorksheet({
-  sessionMode, session, sessionLoading, worksheetRows, worksheetLoading,
-  startForm, startErr, startSaving, completingSession,
-  onOpenStartSession, onChangeStartForm, onCancelStartSession, onSaveStartSession,
-  onCompleteSession, onReopenSession,
+  worksheetRows, worksheetLoading,
   confBadge, typeTag,
   onConfirmJournalMatch, onOpenSettleModal, onRejectMatch, onOpenCreateJnl,
   createJnlFor, jnlForm, setJnlForm, onSaveJnl, savingJnl, onCancelCreateJnl,
   findFor, onOpenFindMatch, onCloseFindMatch, searchQ, setSearchQ, filteredCands, onLinkManual,
   settleModalOpen,
-  editForm, editErr, editSaving, onOpenEditSession, onChangeEditForm, onCancelEditSession, onSaveEditSession,
-  onAbandonSession, abandoning,
   windowStart, windowEnd, onChangeWindowStart, onChangeWindowEnd,
 }) {
   // Minimal keyboard model (Track B Piece 4). Deliberately conservative — no precedent for
@@ -16501,9 +16459,6 @@ function ReconWorksheet({
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [isActive, worksheetRows, focusedIndex, settleModalOpen, onConfirmJournalMatch, onOpenSettleModal, onRejectMatch]);
-  if (sessionLoading) {
-    return <div className="card" style={{ padding: 48, textAlign: 'center', color: 'var(--text-faint)', fontSize: 12 }}>Loading…</div>;
-  }
 
   // Stage 2: completion is now a passive, always-current fact about worksheetRows itself —
   // no target to hit, no click to register it. Nothing to reconcile TO was never a real
@@ -16512,33 +16467,6 @@ function ReconWorksheet({
 
   return (
     <div>
-      {(sessionMode === 'none' || sessionMode === 'completed') && (
-        <div className="card" style={{ padding: 28, marginBottom: 14 }}>
-          {startForm ? (
-            <StartSessionForm startForm={startForm} startErr={startErr} startSaving={startSaving}
-              onChange={onChangeStartForm} onCancel={onCancelStartSession} onSave={onSaveStartSession} />
-          ) : sessionMode === 'none' ? (
-            <div style={{ textAlign: 'center', padding: '20px 0' }}>
-              <div style={{ fontSize: 13, color: 'var(--text-muted)', marginBottom: 14 }}>No reconciliation started for this account yet.</div>
-              <button className="btn btn-p btn-sm" onClick={onOpenStartSession}>Start reconciliation</button>
-            </div>
-          ) : (
-            <div style={{ textAlign: 'center', padding: '20px 0' }}>
-              <div style={{ fontSize: 13, color: 'var(--accent)', marginBottom: 4 }}>✓ Last reconciliation completed</div>
-              <div style={{ fontSize: 12, color: 'var(--text-muted)', marginBottom: 14 }}>
-                {session.target_date
-                  ? `As of ${fmtWsDate(session.target_date)}, balance ${fmtEUR(session.target_balance)}`
-                  : `Anchor ${fmtEUR(session.anchor_balance)} on ${fmtWsDate(session.anchor_date)}`}
-              </div>
-              <div style={{ display: 'flex', gap: 8, justifyContent: 'center' }}>
-                <button className="btn btn-p btn-sm" onClick={onOpenStartSession}>Start next reconciliation</button>
-                <button className="btn btn-s btn-sm" onClick={onReopenSession}>Reopen this one</button>
-              </div>
-            </div>
-          )}
-        </div>
-      )}
-
       {/* Stage 2: passive, derived completion state — no target to hit, no click to register
           it, always current with worksheetRows' own reconciled status. */}
       <div className="card" style={{ padding: '14px 18px', marginBottom: 14, display: 'flex', alignItems: 'center', gap: 12 }}>
@@ -16664,33 +16592,15 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
   // Item 2 — active bank accounts, so the "Categorise" journal defaults to the
   // transaction's own bank nominal instead of a hardcoded '1000'.
   const [bankAccounts, setBankAccounts] = useState([]);
-  // Track B — anchor-balance worksheet, per selected account.
-  const { user: reconUser } = useUser();
+  // Reconciliation worksheet, per selected account.
   const [selectedAccountId, setSelectedAccountId] = useState(null);
   const [viewMode, setViewMode]             = useState('worksheet'); // 'worksheet' | 'history'
-  const [session, setSession]               = useState(null);        // this account's in_progress or latest completed reconciliation_sessions row
-  const [sessionLoading, setSessionLoading] = useState(false);
   const [worksheetRows, setWorksheetRows]   = useState([]);
   const [worksheetLoading, setWorksheetLoading] = useState(false);
-  const [startForm, setStartForm]           = useState(null);
-  const [startErr, setStartErr]             = useState(null);
-  const [startSaving, setStartSaving]       = useState(false);
-  const [completingSession, setCompletingSession] = useState(false);
-  // Closing the reconciliation_sessions dead end: edit an in_progress session's anchor/target,
-  // and abandon (delete) one entirely if it was started wrong. Both are gated to
-  // sessionMode === 'active' in the UI, and both are additionally refused server-side for a
-  // completed session — edits by the existing lock trigger, abandon by the explicit
-  // session.status check below (nothing in the schema blocks deleting a completed row, so this
-  // check is the only thing protecting that historical record).
-  const [editForm, setEditForm]     = useState(null);
-  const [editErr, setEditErr]       = useState(null);
-  const [editSaving, setEditSaving] = useState(false);
-  const [abandoning, setAbandoning] = useState(false);
 
-  // Stage 1 of replacing reconciliation_sessions as the worksheet's data source: an explicit
-  // date-range control, defaulting off the global selPeriod month the same way Cash Flow/
-  // Overview do (end = today if selPeriod is the current in-progress month, else month-end).
-  // Independent of any session — this is what will remain once anchor/target are fully removed.
+  // Explicit date-range control the worksheet's row list and running-balance seed are sourced
+  // from, defaulting off the global selPeriod month the same way Cash Flow/Overview do (end =
+  // today if selPeriod is the current in-progress month, else month-end).
   const wsLocalDateStr = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   const defaultWindowForPeriod = (period) => {
     const [py, pm] = period.split('-').map(Number);
@@ -16716,21 +16626,6 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
       });
   }, [companyId]);
 
-  const loadSession = async () => {
-    if (!selectedAccountId) { setSession(null); return; }
-    setSessionLoading(true);
-    const { data: inProg } = await supabase.from('reconciliation_sessions').select('*')
-      .eq('bank_account_id', selectedAccountId).eq('status', 'in_progress').maybeSingle();
-    if (inProg) { setSession(inProg); setSessionLoading(false); return; }
-    const { data: lastCompleted } = await supabase.from('reconciliation_sessions').select('*')
-      .eq('bank_account_id', selectedAccountId).eq('status', 'completed')
-      .order('target_date', { ascending: false }).limit(1).maybeSingle();
-    setSession(lastCompleted || null);
-    setSessionLoading(false);
-  };
-  useEffect(() => { loadSession(); }, [selectedAccountId]); // eslint-disable-line
-
-  const sessionMode = !session ? 'none' : session.status === 'in_progress' ? 'active' : 'completed';
 
   const loadWorksheet = async () => {
     if (!selectedAccountId || !windowStart || !windowEnd) { setWorksheetRows([]); return; }
@@ -16790,95 +16685,6 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
     if (viewMode === 'worksheet') await loadWorksheet();
   };
 
-  const openStartSession = async () => {
-    const { data: lastCompleted } = await supabase.from('reconciliation_sessions').select('target_balance,target_date')
-      .eq('bank_account_id', selectedAccountId).eq('status', 'completed')
-      .order('target_date', { ascending: false }).limit(1).maybeSingle();
-    setStartForm({
-      anchor_balance: lastCompleted?.target_balance != null ? String(lastCompleted.target_balance) : '',
-      anchor_date: lastCompleted?.target_date || '',
-      target_balance: '', target_date: '',
-    });
-    setStartErr(null);
-  };
-
-  const saveStartSession = async () => {
-    if (!startForm || startSaving) return;
-    const anchorBalance = parseFloat(startForm.anchor_balance);
-    if (!startForm.anchor_date || isNaN(anchorBalance)) { setStartErr('Anchor balance and date are required'); return; }
-    if ((startForm.target_balance !== '') !== !!startForm.target_date) { setStartErr('Target balance and target date must be set together, or both left blank'); return; }
-    const hasTarget = startForm.target_balance !== '' && startForm.target_date;
-    setStartSaving(true); setStartErr(null);
-    const { data, error } = await supabase.from('reconciliation_sessions').insert({
-      company_id: companyId, bank_account_id: selectedAccountId,
-      anchor_balance: anchorBalance, anchor_date: startForm.anchor_date,
-      target_balance: hasTarget ? parseFloat(startForm.target_balance) : null,
-      target_date: hasTarget ? startForm.target_date : null,
-      created_by: reconUser?.id || null,
-    }).select().single();
-    if (error) { setStartErr(error.message); setStartSaving(false); return; }
-    setSession(data); setStartForm(null); setStartSaving(false);
-  };
-
-  const completeSession = async () => {
-    if (!session || completingSession) return;
-    setCompletingSession(true);
-    const { data, error } = await supabase.from('reconciliation_sessions')
-      .update({ status: 'completed', completed_at: new Date().toISOString(), completed_by: reconUser?.id || null })
-      .eq('id', session.id).select().single();
-    if (!error) { setSession(data); showToast('Reconciliation completed'); }
-    else showToast('Error: ' + error.message);
-    setCompletingSession(false);
-  };
-
-  const reopenSession = async () => {
-    const { data, error } = await supabase.from('reconciliation_sessions')
-      .update({ status: 'in_progress', completed_at: null, completed_by: null })
-      .eq('id', session.id).select().single();
-    if (!error) setSession(data);
-    else showToast('Error: ' + error.message);
-  };
-
-  const openEditSession = () => {
-    if (!session || session.status !== 'in_progress') return;
-    setEditForm({
-      anchor_balance: String(session.anchor_balance),
-      anchor_date: session.anchor_date,
-      target_balance: session.target_balance != null ? String(session.target_balance) : '',
-      target_date: session.target_date || '',
-    });
-    setEditErr(null);
-  };
-
-  const saveEditSession = async () => {
-    if (!editForm || editSaving || !session || session.status !== 'in_progress') return;
-    const anchorBalance = parseFloat(editForm.anchor_balance);
-    if (!editForm.anchor_date || isNaN(anchorBalance)) { setEditErr('Anchor balance and date are required'); return; }
-    if ((editForm.target_balance !== '') !== !!editForm.target_date) { setEditErr('Target balance and target date must be set together, or both left blank'); return; }
-    const hasTarget = editForm.target_balance !== '' && editForm.target_date;
-    setEditSaving(true); setEditErr(null);
-    const { data, error } = await supabase.from('reconciliation_sessions')
-      .update({
-        anchor_balance: anchorBalance, anchor_date: editForm.anchor_date,
-        target_balance: hasTarget ? parseFloat(editForm.target_balance) : null,
-        target_date: hasTarget ? editForm.target_date : null,
-      })
-      .eq('id', session.id).select().single();
-    if (error) { setEditErr(error.message); setEditSaving(false); return; }
-    setSession(data); setEditForm(null); setEditSaving(false);
-    showToast('Anchor updated');
-  };
-
-  const abandonSession = async () => {
-    if (!session || session.status !== 'in_progress' || abandoning) return;
-    if (!window.confirm('Abandon this reconciliation? This cannot be undone — you can start a new one immediately after.')) return;
-    setAbandoning(true);
-    const { error } = await supabase.from('reconciliation_sessions').delete().eq('id', session.id);
-    if (error) { showToast('Error: ' + error.message); setAbandoning(false); return; }
-    setSession(null); setWorksheetRows([]); setEditForm(null);
-    showToast('Reconciliation abandoned');
-    setAbandoning(false);
-  };
 
   const showToast = (msg) => { setToast(msg); setTimeout(() => setToast(null), 3200); };
 
@@ -17465,21 +17271,8 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
 
       {viewMode === 'worksheet' && (
         <ReconWorksheet
-          sessionMode={sessionMode}
-          session={session}
-          sessionLoading={sessionLoading}
           worksheetRows={worksheetRows}
           worksheetLoading={worksheetLoading}
-          startForm={startForm}
-          startErr={startErr}
-          startSaving={startSaving}
-          completingSession={completingSession}
-          onOpenStartSession={openStartSession}
-          onChangeStartForm={setStartForm}
-          onCancelStartSession={() => { setStartForm(null); setStartErr(null); }}
-          onSaveStartSession={saveStartSession}
-          onCompleteSession={completeSession}
-          onReopenSession={reopenSession}
           confBadge={confBadge}
           typeTag={typeTag}
           onConfirmJournalMatch={confirmJournalMatch}
@@ -17500,15 +17293,6 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
           filteredCands={filteredCands}
           onLinkManual={linkManual}
           settleModalOpen={!!settleFor}
-          editForm={editForm}
-          editErr={editErr}
-          editSaving={editSaving}
-          onOpenEditSession={openEditSession}
-          onChangeEditForm={setEditForm}
-          onCancelEditSession={() => { setEditForm(null); setEditErr(null); }}
-          onSaveEditSession={saveEditSession}
-          onAbandonSession={abandonSession}
-          abandoning={abandoning}
           windowStart={windowStart}
           windowEnd={windowEnd}
           onChangeWindowStart={setWindowStart}
