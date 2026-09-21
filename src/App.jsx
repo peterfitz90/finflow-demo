@@ -3735,6 +3735,10 @@ function APInvoices({ companyName = "Company", company, onNavigate, isBusinessOw
 
   return (
     <div className="fade-up">
+      <div className="print-only card-body">
+        <div className="print-title">{companyName} — Accounts Payable</div>
+        <div className="print-meta">Exported {fmtIE(today.toISOString().slice(0,10))}</div>
+      </div>
 
       {/* ── AP Mailbox address banner ── */}
       {apEmail && can(company, 'ap_mailbox') && (
@@ -3849,12 +3853,12 @@ function APInvoices({ companyName = "Company", company, onNavigate, isBusinessOw
 
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginBottom: 10 }}>
         {invoices.length > 0 && (
-          <button className="btn btn-s" onClick={() => downloadCSV(`ap-invoices-${fmtIE(today.toISOString().slice(0,10)).replace(/\//g,"-")}.csv`, [
+          <ExportDropdown onCSV={() => downloadCSV(`ap-invoices-${fmtIE(today.toISOString().slice(0,10)).replace(/\//g,"-")}.csv`, [
             ["Ledgrly — Accounts Payable", companyName, `Exported ${fmtIE(today.toISOString().slice(0,10))}`],
             [],
             ["AP Ref","Supplier","Invoice Ref","Amount (€)","Invoice Date","Due Date","Status","Payment Method","Notes"],
             ...invoices.map((i) => [i.id, i.supplier, i.invoice_ref, fmtEUR(i.amount), fmtIE(i.invoice_date), fmtIE(i.due_date), i.status, i.payment_method, i.notes || ""]),
-          ])}>⬇ Export CSV</button>
+          ])} onPrint={() => window.print()} />
         )}
         <button className="btn btn-p" onClick={() => { setShowForm((v) => !v); setSaveError(null); }}>
           {showForm ? "Cancel" : "+ New Invoice"}
@@ -5958,6 +5962,10 @@ function Contracts({ companyName = "Company", companyId }) {
 
   return (
     <div className="fade-up">
+      <div className="print-only card-body">
+        <div className="print-title">{companyName} — Contracts</div>
+        <div className="print-meta">Exported {fmtIE(today.toISOString().slice(0,10))}</div>
+      </div>
       {saveError && <div style={{marginBottom:12,fontSize:12,color:"var(--danger)",background:"rgba(220,38,38,0.06)",border:"1px solid rgba(220,38,38,0.2)",borderRadius:4,padding:"8px 12px"}} onClick={()=>setSaveError(null)}>{saveError} ✕</div>}
       {/* KPIs */}
       <div className="kpi-grid">
@@ -5998,7 +6006,7 @@ function Contracts({ companyName = "Company", companyId }) {
 
       {/* Toolbar */}
       <div style={{display:"flex",justifyContent:"flex-end",gap:8,marginBottom:10}}>
-        {contracts.length > 0 && <button className="btn btn-s" onClick={exportCSV}>⬇ Export CSV</button>}
+        {contracts.length > 0 && <ExportDropdown onCSV={exportCSV} onPrint={() => window.print()} />}
         <button className="btn btn-p" onClick={() => { setShowForm(v=>!v); setSaveError(null); setEditId(null); }}>
           {showForm ? "Cancel" : "+ Add Contract"}
         </button>
@@ -10203,12 +10211,7 @@ function FullGLReport({ companyId, companyName, company, coaAccounts }) {
               {balanced ? "✓ BALANCED" : "⚠ OUT OF BALANCE"}
             </span>
           )}
-          {rows.length > 0 && (
-            <>
-              <button onClick={exportCSV} style={{ ...btnInactive, fontSize: 11 }}>Download CSV</button>
-              <button onClick={() => window.print()} style={{ ...btnInactive, fontSize: 11 }}>Print / PDF</button>
-            </>
-          )}
+          {rows.length > 0 && <ExportDropdown onCSV={exportCSV} onPrint={() => window.print()} />}
         </div>
       </div>
       <div className="print-only card-body">
@@ -11178,8 +11181,23 @@ function Journals({ period, selPeriod, companyName, companyId: propCompanyId, re
     setShowForm(false);
   };
 
+  const exportCSV = () => downloadCSV(`journals-${selPeriod}.csv`, [
+    ["Ledgrly — Journal Postings", companyName, `${periodLabel} · Exported ${fmtIE(new Date().toISOString().slice(0,10))}`],
+    [],
+    ["Date", "Reference", "Description", "Debit Account", "Debit Account Name", "Credit Account", "Credit Account Name", "Amount (€)"],
+    ...filteredJournals.map(j => [
+      j.date, j.ref, j.description,
+      j.lines[0].account, j.lines[0].name, j.lines[1].account, j.lines[1].name,
+      fmtEUR(j.lines[0].debit),
+    ]),
+  ]);
+
   return (
     <div className="fade-up">
+      <div className="print-only card-body">
+        <div className="print-title">{companyName} — Journal Postings</div>
+        <div className="print-meta">Period: {periodLabel} · Exported: {fmtIE(new Date().toISOString().slice(0,10))}</div>
+      </div>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
         <div>
           <div style={{ fontSize: 17, fontWeight: 700, color: "var(--text)", marginBottom: 2 }}>Journal Postings — {periodLabel}</div>
@@ -11187,6 +11205,7 @@ function Journals({ period, selPeriod, companyName, companyId: propCompanyId, re
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           {readOnly && <span className="ro-badge">Read-only</span>}
+          {activeTab === 'journals' && filteredJournals.length > 0 && <ExportDropdown onCSV={exportCSV} onPrint={() => window.print()} />}
           {activeTab === 'journals' && !readOnly && <button className="btn btn-p" onClick={() => setShowForm(true)}>+ New Journal</button>}
         </div>
       </div>
@@ -16119,6 +16138,10 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
 
   return (
     <div className="fade-up">
+      <div className="print-only card-body">
+        <div className="print-title">{companyName} — Expenses</div>
+        <div className="print-meta">Exported {fmtIE(today.toISOString().slice(0,10))}</div>
+      </div>
       {/* KPIs */}
       <div className="kpi-grid">
         {[
@@ -16142,7 +16165,7 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
           {isAdmin && <button className={`gl-tab${view==="all"?" active":""}`} onClick={()=>setView("all")}>All Expenses</button>}
         </div>
         <div style={{display:"flex",gap:8}}>
-          {expenses.length > 0 && <button className="btn btn-s" onClick={exportCSV}>⬇ Export CSV</button>}
+          {expenses.length > 0 && <ExportDropdown onCSV={exportCSV} onPrint={() => window.print()} />}
           <input ref={fileInputRef} type="file" accept="image/*,application/pdf" style={{display:"none"}}
             onChange={e => { if (e.target.files[0]) { handleFile(e.target.files[0]); setShowForm(true); setSaveError(null); } }} />
           <button className="btn btn-s" onClick={()=>fileInputRef.current?.click()} disabled={extracting}>
