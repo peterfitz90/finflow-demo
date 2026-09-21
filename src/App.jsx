@@ -14938,6 +14938,15 @@ function FinancialStatements({ company, companyName }) {
   })();
   const [yearEnd, setYearEnd] = useState(yearEndOptions[0]?.val || "");
 
+  // Fiscal year start for the SELECTED yearEnd — same yearStartMonth logic GLReport's ytdStart
+  // uses, just anchored to the chosen year-end's own month instead of "today"'s selected period.
+  // yearEnd is always the last day of yeMonth (by construction in yearEndOptions above), so this
+  // never hits a day-overflow edge case the way subtracting a literal year from the date would.
+  const [yeSelYear] = yearEnd ? yearEnd.split('-').map(Number) : [null];
+  const yearStartMonth = (yeMonth % 12) + 1;
+  const fyStartYear = yeSelYear != null ? (yeMonth >= yearStartMonth ? yeSelYear : yeSelYear - 1) : null;
+  const fyStart = fyStartYear != null ? `${fyStartYear}-${String(yearStartMonth).padStart(2, '0')}-01` : null;
+
   const generate = async () => {
     if (!company?.id) return;
     setLoading(true);
@@ -14948,6 +14957,7 @@ function FinancialStatements({ company, companyName }) {
     setLoading(false);
   };
 
+  // Balance sheet accounts are cumulative from inception — unchanged, correct as before.
   const rawD = {}, rawC = {};
   journals.forEach(j => {
     const a = Number(j.amount);
@@ -14974,25 +14984,45 @@ function FinancialStatements({ company, companyName }) {
   const shareCapital  = sumRng("3000", "3099");
   const retainedEarns = totAssetsLCL - shareCapital; // balancing figure
 
+  // P&L accounts must be bound to the fiscal year, not cumulative — this app never posts
+  // automatic year-end closing journals, so income/expense balances otherwise accumulate
+  // indefinitely across every year a company has traded. Filtering the already-fetched
+  // cumulative set (rather than a second query) since it's already a superset.
+  const pnlJournals = fyStart ? journals.filter(j => j.date >= fyStart) : [];
+  const pnlRawD = {}, pnlRawC = {};
+  pnlJournals.forEach(j => {
+    const a = Number(j.amount);
+    pnlRawD[j.debit_account]  = (pnlRawD[j.debit_account]  || 0) + a;
+    pnlRawC[j.credit_account] = (pnlRawC[j.credit_account] || 0) + a;
+  });
+  const pnlCodes = [...new Set([...Object.keys(pnlRawD), ...Object.keys(pnlRawC)])];
+  const pnlAcctBal = code => {
+    const d = pnlRawD[code] || 0, c = pnlRawC[code] || 0;
+    const t = GL_ACCOUNTS.find(a => a.code === code)?.type || '';
+    return (t === 'Liability' || t === 'Equity' || t === 'Income') ? c - d : d - c;
+  };
+  const pnlSumRng = (f, t) => pnlCodes.filter(c => c >= f && c <= t).reduce((s, c) => s + pnlAcctBal(c), 0);
+
   // P&L figures
-  const turnover    = sumRng("4000", "4999");
-  const cos         = sumRng("5000", "5999");
+  const turnover    = pnlSumRng("4000", "4999");
+  const cos         = pnlSumRng("5000", "5999");
   const grossProfit = turnover - cos;
-  const adminExp    = sumRng("6000", "6999");
+  const adminExp    = pnlSumRng("6000", "6999");
   const opProfit    = grossProfit - adminExp;
-  const interest    = allCodes.filter(c => c >= "7000" && c <= "7999")
-    .reduce((s, c) => s + ((rawC[c] || 0) - (rawD[c] || 0)), 0);
+  const interest    = pnlCodes.filter(c => c >= "7000" && c <= "7999")
+    .reduce((s, c) => s + ((pnlRawC[c] || 0) - (pnlRawD[c] || 0)), 0);
   const pbt     = opProfit + interest;
   const pfYear  = pbt;
 
   useEffect(() => {
     if (!generated || allCodes.length === 0) return;
-    console.group("[FinancialStatements] Balance Sheet codes");
+    console.group("[FinancialStatements] Balance Sheet codes (cumulative from inception)");
     allCodes.slice().sort().forEach(c => {
       const d = rawD[c] || 0, cr = rawC[c] || 0;
       if (d || cr) console.log(`  ${c}: D=${d.toFixed(2)} C=${cr.toFixed(2)} net=${acctBal(c).toFixed(2)}`);
     });
-    console.log(`  cash=${cashAtBank.toFixed(2)} debtors=${debtors.toFixed(2)} fixed=${fixedAssets.toFixed(2)} creditors=${creditors.toFixed(2)} capital=${shareCapital.toFixed(2)} totalALC=${totAssetsLCL.toFixed(2)} turnover=${turnover.toFixed(2)} opProfit=${opProfit.toFixed(2)}`);
+    console.log(`  cash=${cashAtBank.toFixed(2)} debtors=${debtors.toFixed(2)} fixed=${fixedAssets.toFixed(2)} creditors=${creditors.toFixed(2)} capital=${shareCapital.toFixed(2)} totalALC=${totAssetsLCL.toFixed(2)}`);
+    console.log(`[FinancialStatements] P&L bound to fiscal year ${fyStart} .. ${yearEnd} — turnover=${turnover.toFixed(2)} opProfit=${opProfit.toFixed(2)}`);
     console.groupEnd();
   }, [journals]); // eslint-disable-line react-hooks/exhaustive-deps
 
