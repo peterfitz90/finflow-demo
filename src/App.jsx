@@ -9085,12 +9085,18 @@ function buildPnL(journals, coaAccounts) {
   return { revRows, cosRows, opexRows, totRev, gp, np };
 }
 
-function GLReport({ period, selPeriod, companyId, companyName = "Company", company }) {
+function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "Company", company, drillAccountCode, setDrillAccountCode }) {
   const now = new Date();
   const { accounts: coaAccounts } = useChartOfAccounts(companyId);
   const { balances: pyBalances }  = usePriorYearBalances(companyId);
 
-  const [tab, setTab]       = useState("tb");
+  // drillAccountCode is now lifted to App() (same pattern as selPeriod/windowStart) so a click
+  // from a different page — the Accounts/Balances tab — can land here pre-selected. GLReport
+  // and BankHub are never mounted simultaneously, so an external drill always reaches a fresh
+  // mount here; seeding the initial tab from the incoming prop covers that case with no extra
+  // re-sync effect needed. Internal drills (BS/TB/P&L/P&L Trend row clicks) still explicitly
+  // set the tab themselves via drillToAccount, unaffected by lifting the code itself.
+  const [tab, setTab]       = useState(drillAccountCode ? "gl" : "tb");
   const [journals, setJournals] = useState([]);
   const [loading, setLoading]   = useState(true);
   const [ytdMode, setYtdMode]         = useState(true);
@@ -9099,8 +9105,8 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
   const [apInvoices, setApInvoices]   = useState([]);
   const [spendSort, setSpendSort]     = useState("desc");
   const [drillSupplier, setDrillSupplier] = useState(null);
-  // Part 2.4 — set by a BS/TB/P&L row click; switches to the GL tab pre-selected to that account.
-  const [drillAccountCode, setDrillAccountCode] = useState(null);
+  // Part 2.4 — set by a BS/TB/P&L/P&L Trend row click; switches to the GL tab pre-selected to
+  // that account.
   const drillToAccount = (code) => { setDrillAccountCode(code); setTab('gl'); };
 
   const periodLabel = new Date(selPeriod + '-01').toLocaleDateString("en-IE", { month: "long", year: "numeric" });
@@ -9667,20 +9673,35 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
                 </thead>
                 <tbody>
                   {[
-                    { label: "Revenue", get: m => m.totRev, bold: false },
-                    { label: "Cost of Sales", get: m => m.cosRows.reduce((s, r) => s + r.amount, 0), bold: false },
-                    { label: "Gross Profit", get: m => m.gp, bold: true },
-                    { label: "Operating Expenses", get: m => m.opexRows.reduce((s, r) => s + r.amount, 0), bold: false },
-                    { label: "Net Profit", get: m => m.np, bold: true },
+                    { label: "Revenue", get: m => m.totRev, bold: false, rowsKey: "revRows" },
+                    { label: "Cost of Sales", get: m => m.cosRows.reduce((s, r) => s + r.amount, 0), bold: false, rowsKey: "cosRows" },
+                    { label: "Gross Profit", get: m => m.gp, bold: true, rowsKey: null },
+                    { label: "Operating Expenses", get: m => m.opexRows.reduce((s, r) => s + r.amount, 0), bold: false, rowsKey: "opexRows" },
+                    { label: "Net Profit", get: m => m.np, bold: true, rowsKey: null },
                   ].map(row => {
                     const values = trendByMonth.map(row.get);
                     const total  = values.reduce((s, v) => s + v, 0);
                     return (
                       <tr key={row.label} style={{ borderBottom: "1px solid var(--border)" }}>
                         <td style={{ padding: "8px 14px", fontWeight: row.bold ? 700 : 400, color: row.bold ? "var(--text)" : "var(--text-muted)" }}>{row.label}</td>
-                        {values.map((v, i) => (
-                          <td key={trendMonths[i].key} style={{ textAlign: "right", padding: "8px 10px", fontFamily: "'Source Code Pro',monospace", fontWeight: row.bold ? 700 : 400, color: row.bold && v < 0 ? "var(--red)" : "var(--text)" }}>{fmt(v)}</td>
-                        ))}
+                        {values.map((v, i) => {
+                          // Clicking a Revenue/COS/OpEx figure drills to the first account in
+                          // that category for that month — these are category totals, not a
+                          // single account, so "the relevant account" is necessarily a specific
+                          // choice within the category; GL Extract's own account dropdown lets
+                          // the user switch to any other account in the same category from there.
+                          // Also moves the report to that specific month (ytdMode off), so the
+                          // drilled ledger matches what was actually clicked, not whatever the
+                          // globally-selected period happens to be.
+                          const drillCode = row.rowsKey ? trendByMonth[i]?.[row.rowsKey]?.[0]?.code : null;
+                          return (
+                            <td key={trendMonths[i].key}
+                              onClick={drillCode ? () => { setSelPeriod(trendMonths[i].key); setYtdMode(false); drillToAccount(drillCode); } : undefined}
+                              style={{ textAlign: "right", padding: "8px 10px", fontFamily: "'Source Code Pro',monospace", fontWeight: row.bold ? 700 : 400, color: row.bold && v < 0 ? "var(--red)" : "var(--text)", cursor: drillCode ? "pointer" : undefined }}
+                              title={drillCode ? `View ${drillCode} in the General Ledger for ${trendMonths[i].label}` : undefined}
+                            >{fmt(v)}</td>
+                          );
+                        })}
                         <td style={{ textAlign: "right", padding: "8px 14px", fontFamily: "'Source Code Pro',monospace", fontWeight: 700, color: row.bold && total < 0 ? "var(--red)" : "var(--text)" }}>{fmt(total)}</td>
                       </tr>
                     );
@@ -20147,7 +20168,7 @@ function BulkARImport({ companyId }) {
 // Item (bank balances view) — per-account feed vs. ledger balance, using Stage 1's persisted
 // feed_balance/feed_balance_synced_at and the existing fetchNominalBalanceAsOf (same
 // cumulative-from-inception balance Cash Flow/Overview/Reconciliation already use).
-function BankBalances({ companyId }) {
+function BankBalances({ companyId, onDrillToGL }) {
   const [accounts, setAccounts] = useState([]);
   const [loading, setLoading]   = useState(true);
 
@@ -20202,8 +20223,12 @@ function BankBalances({ companyId }) {
               const absDiff = diff != null ? Math.abs(diff) : null;
               const largeThreshold = Math.max(50, Math.abs(Number(a.feed_balance || 0)) * 0.05);
               const tier = diff == null ? null : absDiff < 1 ? 'matched' : absDiff < largeThreshold ? 'difference' : 'large';
+              const canDrill = !!(a.nominal_code && onDrillToGL);
               return (
-                <tr key={a.id} style={{ borderBottom: '1px solid var(--border)' }}>
+                <tr key={a.id} style={{ borderBottom: '1px solid var(--border)', cursor: canDrill ? 'pointer' : undefined }}
+                  onClick={canDrill ? () => onDrillToGL(a.nominal_code) : undefined}
+                  title={canDrill ? `View ${a.nominal_code} in the General Ledger` : undefined}
+                >
                   <td style={{ padding: '10px 18px', fontWeight: 600 }}>{a.display_name}</td>
                   <td style={{ padding: '10px 18px', color: 'var(--text-muted)' }}>{a.currency}</td>
                   <td style={{ padding: '10px 18px', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{a.feed_balance != null ? fmtCurrencyFull(a.feed_balance, a.currency) : '—'}</td>
@@ -20233,7 +20258,7 @@ function BankBalances({ companyId }) {
   );
 }
 
-function BankHub({ companyId, company, isBusinessOwner = false }) {
+function BankHub({ companyId, company, isBusinessOwner = false, onDrillToGL }) {
   const [tab, setTab] = useState('feeds'); // 'feeds' | 'csv' | 'balances'
   return (
     <div className="fade-up">
@@ -20251,7 +20276,7 @@ function BankHub({ companyId, company, isBusinessOwner = false }) {
       <div style={{ display: tab === 'csv' ? 'block' : 'none' }}>
         <BankImportErrorBoundary><BankImport companyId={companyId} isActive={tab === 'csv'} company={company} /></BankImportErrorBoundary>
       </div>
-      {tab === 'balances' && <BankBalances companyId={companyId} />}
+      {tab === 'balances' && <BankBalances companyId={companyId} onDrillToGL={onDrillToGL} />}
     </div>
   );
 }
@@ -20576,6 +20601,14 @@ export default function App() {
   const [showAddCompany, setShowAddCompany] = useState(false);
   const [upgradeFeature, setUpgradeFeature] = useState(null); // feature key → show upgrade card
   const [searchOpen, setSearchOpen] = useState(false); // global search / command palette
+
+  // Cross-page drill-down into GL Reports' GL Extract tab — lifted out of GLReport's own local
+  // state (same prop-threading pattern as selPeriod/windowStart) so a click from a different
+  // page (the Accounts/Balances tab) can preselect an account there. GLReport and BankHub are
+  // never mounted simultaneously (mutually exclusive top-level pages), so this trigger always
+  // reaches a fresh GLReport mount — no extra re-sync effect needed for that path.
+  const [drillAccountCode, setDrillAccountCode] = useState(null);
+  const drillToGLAccount = (code) => { setDrillAccountCode(code); setPage('gl'); };
 
   // Global period state — YYYY-MM, lifted from Overview so all pages share one source of truth
   const [selPeriod, setSelPeriod] = useState(() => {
@@ -21292,8 +21325,8 @@ export default function App() {
                   {page === "checklist"    && <Checklist period={period} selPeriod={selPeriod} companyId={company?.id} company={company} />}
                   {page === "checklist"    && <SuggestedJournals period={selPeriod || period} companyId={company?.id} company={company} />}
                   {page === "journals"     && <Journals period={period} selPeriod={selPeriod} companyName={companyName} companyId={company?.id} readOnly={isReadOnly} company={company} />}
-                  {page === "gl"           && <GLReport period={period} selPeriod={selPeriod} companyId={company?.id} companyName={companyName} company={company} readOnly={isReadOnly} />}
-                  {page === "bank"         && <BankHub companyId={company?.id} company={company} isBusinessOwner={isBusinessOwner} />}
+                  {page === "gl"           && <GLReport period={period} selPeriod={selPeriod} setSelPeriod={setSelPeriod} companyId={company?.id} companyName={companyName} company={company} readOnly={isReadOnly} drillAccountCode={drillAccountCode} setDrillAccountCode={setDrillAccountCode} />}
+                  {page === "bank"         && <BankHub companyId={company?.id} company={company} isBusinessOwner={isBusinessOwner} onDrillToGL={drillToGLAccount} />}
                   <div style={{display: page === "bank-import" ? "block" : "none"}}>
                     <BankImportErrorBoundary><BankImport companyId={company?.id} isActive={page === "bank-import"} company={company} /></BankImportErrorBoundary>
                   </div>
