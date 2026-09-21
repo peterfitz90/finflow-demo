@@ -15105,6 +15105,47 @@ function FinancialStatements({ company, companyName }) {
     ["Note: These statements should be reviewed by a qualified accountant before CRO filing."],
   ].filter(r => r.length));
 
+  // ── Classification gate — statutory financial statements only apply to limited companies,
+  // and only FRS 105 has a real generator today. Checked before the setup screen so neither
+  // state can be reached for a company this page doesn't apply to. ──
+  const isLimitedCompany = company?.company_type === 'Limited Company';
+  const frsRegime = company?.frs_regime;
+
+  if (!isLimitedCompany) return (
+    <div className="fade-up">
+      <div className="card" style={{ maxWidth: 560, margin: "32px auto" }}>
+        <div className="card-header">
+          <span className="card-title">Financial Statements</span>
+        </div>
+        <div className="card-body" style={{ textAlign: "center", padding: "36px 28px" }}>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 16, fontWeight: 700, marginBottom: 10 }}>{companyName}</div>
+          <div style={{ fontSize: 13, color: "var(--muted)", lineHeight: 1.7 }}>
+            Statutory financial statements apply to limited companies. {companyName} is classified as
+            <strong style={{ color: "var(--text)" }}> {company?.company_type || 'not yet classified'}</strong> — this page isn't applicable for that company type.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  if (frsRegime !== 'FRS105') return (
+    <div className="fade-up">
+      <div className="card" style={{ maxWidth: 560, margin: "32px auto" }}>
+        <div className="card-header">
+          <span className="card-title">{frsRegime || 'Financial Statements'}</span>
+        </div>
+        <div className="card-body" style={{ textAlign: "center", padding: "36px 28px" }}>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 16, fontWeight: 700, marginBottom: 10 }}>{companyName}</div>
+          <div style={{ fontSize: 13, color: "var(--muted)", lineHeight: 1.7 }}>
+            {frsRegime
+              ? <>This company is classified under <strong style={{ color: "var(--text)" }}>{frsRegime}</strong>. Statement generation for {frsRegime} isn't built yet — only FRS 105 (micro-entity) is currently supported.</>
+              : <>No FRS regime is set for this company yet. Set one in Settings before generating statements.</>}
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
   // ── Setup screen ──
   if (!generated) return (
     <div className="fade-up">
