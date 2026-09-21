@@ -9184,6 +9184,47 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
     })();
   }, [companyId, tab]); // eslint-disable-line
 
+  // P&L Trend — the fiscal year's 12 months, computed from the same ytdStartYear/yearStartMonth
+  // already derived above (not from selPeriod's own month), so the trend always shows the
+  // whole fiscal year regardless of which single period is currently selected.
+  const trendMonths = useMemo(() => {
+    const months = [];
+    for (let i = 0; i < 12; i++) {
+      const mIdx = yearStartMonth - 1 + i;
+      const y = ytdStartYear + Math.floor(mIdx / 12);
+      const m = (mIdx % 12) + 1;
+      const start = `${y}-${String(m).padStart(2, '0')}-01`;
+      const endDate = new Date(y, m, 0);
+      const end = `${endDate.getFullYear()}-${String(endDate.getMonth() + 1).padStart(2, '0')}-${String(endDate.getDate()).padStart(2, '0')}`;
+      const key = `${y}-${String(m).padStart(2, '0')}`;
+      months.push({ key, label: new Date(y, m - 1, 1).toLocaleDateString('en-IE', { month: 'short' }), start, end });
+    }
+    return months;
+  }, [ytdStartYear, yearStartMonth]);
+
+  const [trendJournals, setTrendJournals] = useState([]);
+  const [trendLoading, setTrendLoading]   = useState(false);
+  useEffect(() => {
+    if (!companyId || tab !== 'pl_trend') return;
+    setTrendLoading(true);
+    (async () => {
+      // One query for the whole fiscal year, not twelve — bucketing happens in memory below.
+      const { data } = await supabase.from('journals').select('*')
+        .eq('company_id', companyId)
+        .gte('date', trendMonths[0].start).lte('date', trendMonths[11].end)
+        .order('date');
+      setTrendJournals(data || []);
+      setTrendLoading(false);
+    })();
+  }, [companyId, tab, trendMonths]); // eslint-disable-line
+
+  // buildPnL is a pure, in-memory function (no DB calls) — calling it once per month bucket
+  // here is cheap; the only real query is the single fetch above.
+  const trendByMonth = useMemo(() => trendMonths.map(mo => {
+    const monthJournals = trendJournals.filter(j => j.date.slice(0, 7) === mo.key);
+    return monthJournals.length ? buildPnL(monthJournals, coaAccounts) : { revRows: [], cosRows: [], opexRows: [], totRev: 0, gp: 0, np: 0 };
+  }), [trendJournals, trendMonths, coaAccounts]);
+
   const noJournals   = journals.length === 0;
   // TB/BS have data if EITHER the YTD set or the cumulative set has anything — a company with
   // only an opening-balance journal dated before the fiscal year start has no YTD journals yet,
@@ -9447,7 +9488,7 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
       </div>
 
       <div className="gl-tabs">
-        {[{ id: "tb", label: "Trial Balance" }, { id: "pnl", label: "Profit & Loss" }, { id: "bs", label: "Balance Sheet" }, { id: "gl", label: "General Ledger" }, { id: "fullgl", label: "Full GL" }, { id: "spend", label: "Supplier Spend" }, { id: "aged_ap", label: "Aged Creditors" }].map(t => (
+        {[{ id: "tb", label: "Trial Balance" }, { id: "pnl", label: "Profit & Loss" }, { id: "pl_trend", label: "P&L Trend" }, { id: "bs", label: "Balance Sheet" }, { id: "gl", label: "General Ledger" }, { id: "fullgl", label: "Full GL" }, { id: "spend", label: "Supplier Spend" }, { id: "aged_ap", label: "Aged Creditors" }].map(t => (
           <button key={t.id} className={`gl-tab ${tab === t.id ? "active" : ""}`} onClick={() => setTab(t.id)}>{t.label}</button>
         ))}
       </div>
@@ -9600,6 +9641,52 @@ function GLReport({ period, selPeriod, companyId, companyName = "Company", compa
                 </>; })()}
                 {!showCmp && hasPY && <span style={{ width: 110, textAlign: "right", fontFamily: "'Source Code Pro',monospace", fontSize: 13, fontWeight: 700, color: pyNP >= 0 ? "var(--dim)" : "var(--red)", paddingRight: 16 }}>{fmt(pyNP)}</span>}
               </div>
+            </div>
+          )}
+        </div>
+      )}
+
+      {tab === "pl_trend" && (
+        <div className="card">
+          <div className="card-header">
+            <span className="card-title">P&L Trend — FY {trendMonths[0]?.key?.slice(0, 4)}–{trendMonths[11]?.key?.slice(0, 4)}</span>
+          </div>
+          {trendLoading ? (
+            <div style={{ padding: 48, textAlign: "center", color: "var(--dim)", fontSize: 12 }}>Loading…</div>
+          ) : (
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr style={{ borderBottom: "1px solid var(--border)" }}>
+                    <th style={{ textAlign: "left", padding: "8px 14px", fontSize: 10, color: "var(--dim)", textTransform: "uppercase", letterSpacing: "0.06em" }}></th>
+                    {trendMonths.map(mo => (
+                      <th key={mo.key} style={{ textAlign: "right", padding: "8px 10px", fontSize: 10, color: "var(--dim)", textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "'Source Code Pro',monospace", whiteSpace: "nowrap" }}>{mo.label}</th>
+                    ))}
+                    <th style={{ textAlign: "right", padding: "8px 14px", fontSize: 10, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em", fontFamily: "'Source Code Pro',monospace", fontWeight: 700, whiteSpace: "nowrap" }}>FY Total</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {[
+                    { label: "Revenue", get: m => m.totRev, bold: false },
+                    { label: "Cost of Sales", get: m => m.cosRows.reduce((s, r) => s + r.amount, 0), bold: false },
+                    { label: "Gross Profit", get: m => m.gp, bold: true },
+                    { label: "Operating Expenses", get: m => m.opexRows.reduce((s, r) => s + r.amount, 0), bold: false },
+                    { label: "Net Profit", get: m => m.np, bold: true },
+                  ].map(row => {
+                    const values = trendByMonth.map(row.get);
+                    const total  = values.reduce((s, v) => s + v, 0);
+                    return (
+                      <tr key={row.label} style={{ borderBottom: "1px solid var(--border)" }}>
+                        <td style={{ padding: "8px 14px", fontWeight: row.bold ? 700 : 400, color: row.bold ? "var(--text)" : "var(--text-muted)" }}>{row.label}</td>
+                        {values.map((v, i) => (
+                          <td key={trendMonths[i].key} style={{ textAlign: "right", padding: "8px 10px", fontFamily: "'Source Code Pro',monospace", fontWeight: row.bold ? 700 : 400, color: row.bold && v < 0 ? "var(--red)" : "var(--text)" }}>{fmt(v)}</td>
+                        ))}
+                        <td style={{ textAlign: "right", padding: "8px 14px", fontFamily: "'Source Code Pro',monospace", fontWeight: 700, color: row.bold && total < 0 ? "var(--red)" : "var(--text)" }}>{fmt(total)}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
           )}
         </div>
