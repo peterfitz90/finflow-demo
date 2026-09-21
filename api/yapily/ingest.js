@@ -298,6 +298,27 @@ export default withSentry(async function handler(req, res) {
 
       console.log(`[yapily/ingest] auto-created bank_accounts mapping: ${account.id} -> ${nominal} (${displayName})`);
     }
+
+    // Persist each account's current feed balance + sync timestamp as a byproduct of this
+    // run — no new external call, the /accounts response above already carries it. Yapily's
+    // top-level `balance` field isn't institution-consistent (confirmed live against real
+    // connections: AIB returns its EXPECTED balance there, not the spendable INTERIM_AVAILABLE
+    // figure — a real ~€834 gap on a live account; Revolut only ever reports one type, so its
+    // top-level field happens to coincide). Resolve INTERIM_AVAILABLE from accountBalances[]
+    // explicitly first, falling back to the top-level field only when an institution doesn't
+    // report that type at all.
+    const feedSyncedAt = new Date().toISOString();
+    for (const account of accounts) {
+      const bankAcct = bankAccountsByExternalId[account.id];
+      if (!bankAcct) continue;
+      const interimAvailable = (account.accountBalances || []).find(b => b.type === 'INTERIM_AVAILABLE');
+      const feedBalance = interimAvailable?.balanceAmount?.amount ?? account.balance;
+      if (feedBalance == null) continue;
+      const { error: balErr } = await db.from('bank_accounts')
+        .update({ feed_balance: feedBalance, feed_balance_synced_at: feedSyncedAt })
+        .eq('id', bankAcct.id);
+      if (balErr) captureError(balErr, { company_id, operation: 'yapily-ingest-feed-balance', account_id: account.id });
+    }
   }
 
   // ── 3. Fetch transactions across all accounts (90 days) ───────────────────────
