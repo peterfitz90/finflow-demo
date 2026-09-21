@@ -4260,6 +4260,13 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
   const [unfileConfirm, setUnfileConfirm] = useState(false);
   const [unfileReason,  setUnfileReason]  = useState('');
   const [unfiling,      setUnfiling]      = useState(false);
+  // Request Filing state (business_owner) — vat_returns itself is accountant-only via RLS,
+  // so locked-period status here comes from the get_locked_periods RPC, not filedMap (which
+  // is silently empty for a business_owner session — see getLockedPeriods' own comment).
+  const [bizLockedPeriods, setBizLockedPeriods] = useState([]);
+  const [existingRequest,  setExistingRequest]  = useState(null); // most recent vat_filing_requests row for selVal
+  const [requesting,       setRequesting]       = useState(false);
+  const [requestError,     setRequestError]     = useState(null);
 
   const vatPeriod  = vatPeriods.find(p => p.val === selVal) ?? vatPeriods[0];
   const filedReturn = filedMap[selVal] ?? null;
@@ -4277,6 +4284,22 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
         setFiledMap(m);
       });
   }, [company?.id]); // eslint-disable-line
+
+  // business_owner: locked-period status via the RLS-safe RPC (see state comment above)
+  useEffect(() => {
+    if (!company?.id || !isBusinessOwner) return;
+    getLockedPeriods(company.id).then(setBizLockedPeriods).catch(() => {});
+  }, [company?.id, isBusinessOwner]); // eslint-disable-line
+
+  // business_owner: most recent filing request for the selected period, if any
+  useEffect(() => {
+    if (!company?.id || !isBusinessOwner || !selVal) { setExistingRequest(null); return; }
+    supabase.from('vat_filing_requests')
+      .select('status, requested_at, figures, vat_control_balance, vat_control_delta')
+      .eq('company_id', company.id).eq('period_val', selVal)
+      .order('requested_at', { ascending: false }).limit(1)
+      .then(({ data }) => setExistingRequest(data?.[0] ?? null));
+  }, [company?.id, isBusinessOwner, selVal]); // eslint-disable-line
 
   // Load journals + pending bills for selected period; restore EU fields from any filed return
   useEffect(() => {
@@ -4484,6 +4507,9 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
   const nomName = code => GL_ACCOUNTS.find(a => a.code === code)?.name || code;
   const hardBlockCount = pendingBills.length + unreconciledBt.length;
   const canFile = !isLocked && hardBlockCount === 0;
+  const isBizLocked = isDateLocked(vatPeriod.start, bizLockedPeriods);
+  const hasPendingRequest = existingRequest?.status === 'pending';
+  const canRequest = !isBizLocked && hardBlockCount === 0 && !hasPendingRequest;
 
   const xmlPreview = showXmlPanel
     ? validateVAT3({ company, vatPeriod, t1, t2, e1, e2, es1, es2, pa1, returnType: xmlReturnType })
@@ -4538,6 +4564,43 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
         .then(({ error: logErr }) => { if (logErr) console.warn('[vat] log_vat_refile failed:', logErr.message); });
     }
     setMarkingFiled(false);
+  };
+
+  // Request Filing — business_owner's pre-step to the accountant's Mark as Filed. Snapshots
+  // the same figures shape markFiled writes; the RPC independently re-checks the hard-block
+  // count and period-lock status server-side rather than trusting canRequest client-side.
+  const requestFiling = async () => {
+    if (!company?.id || !vatPeriod || requesting) return;
+    setRequesting(true); setRequestError(null);
+    const adjustments = [];
+    if (hasAdjT1) adjustments.push({ box: 'T1', computed: round2(t1), delta: round2(adjT1Num), final: t1Final, comment: adjT1Comment.trim(), ts: new Date().toISOString() });
+    if (hasAdjT2) adjustments.push({ box: 'T2', computed: round2(t2), delta: round2(adjT2Num), final: t2Final, comment: adjT2Comment.trim(), ts: new Date().toISOString() });
+    const figures = {
+      computed: { t1: round2(t1), t2: round2(t2), t3: round2(t3), t4: round2(t4), pa1: round2(pa1) },
+      adjustments,
+      final: { t1: t1Final, t2: t2Final, t3: t3Final, t4: t4Final },
+      e1: Number(e1)||0, e2: Number(e2)||0, es1: Number(es1)||0, es2: Number(es2)||0,
+    };
+    const { data, error } = await supabase.rpc('request_vat_filing', {
+      p_company_id: company.id,
+      p_period_val: selVal,
+      p_period_start: vatPeriod.start,
+      p_period_end: vatPeriod.end,
+      p_figures: figures,
+    });
+    if (error) {
+      captureError(error, { company_id: company.id, operation: 'vat-request-filing', period: selVal });
+      setRequestError(error.message);
+    } else {
+      setExistingRequest({
+        status: 'pending',
+        requested_at: data?.requested_at,
+        figures,
+        vat_control_balance: data?.vat_control_balance,
+        vat_control_delta: data?.vat_control_delta,
+      });
+    }
+    setRequesting(false);
   };
 
   const unfile = async () => {
@@ -5371,6 +5434,38 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
               >
                 {markingFiled ? "Saving…" : "Mark as Filed — Lock Period"}
               </button>
+            </div>
+          )}
+
+          {/* Request Filing — business_owner's pre-step to the accountant's Mark as Filed
+              above. Snapshots the current figures via request_vat_filing; grants no write
+              access to vat_returns itself. */}
+          {isBusinessOwner && !isBizLocked && (
+            <div style={{ display: "flex", alignItems: "center", justifyContent: "flex-end", gap: 10, marginTop: 8, flexWrap: "wrap" }}>
+              {hardBlockCount > 0 && (
+                <span style={{ fontSize: 11, color: "var(--danger)" }}>
+                  ⚠ {hardBlockCount} item{hardBlockCount !== 1 ? 's' : ''} blocking — see banners above
+                </span>
+              )}
+              {requestError && <span style={{ fontSize: 11, color: "var(--danger)" }}>{requestError}</span>}
+              {hasPendingRequest ? (
+                <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
+                  ✓ Filing requested{existingRequest?.requested_at ? ` ${new Date(existingRequest.requested_at).toLocaleDateString('en-IE')}` : ''} — awaiting accountant review
+                </span>
+              ) : (
+                <button
+                  className="btn btn-p btn-sm"
+                  onClick={requestFiling}
+                  disabled={requesting || !canRequest}
+                >
+                  {requesting ? "Submitting…" : "Request Filing"}
+                </button>
+              )}
+            </div>
+          )}
+          {isBusinessOwner && isBizLocked && (
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
+              <span style={{ fontSize: 12, color: "var(--text-muted)" }}>✓ This period has been filed.</span>
             </div>
           )}
 
