@@ -1555,6 +1555,11 @@ function Login({ onLogin }) {
 const OB_MONTHS = ["January","February","March","April","May","June","July","August","September","October","November","December"];
 const OB_CURRENCIES = ["EUR","GBP","USD"];
 const OB_TYPES = ["Limited Company","Sole Trader","Partnership"];
+// FRS regime only applies to limited companies — FinancialStatements gates on this (Stage 2).
+// Only FRS105 has a real generator today; FRS102/101 are selectable but show a "not yet
+// supported" state there rather than being hidden, since the classification itself is still a
+// real, useful thing to record even before that generator exists.
+const FRS_REGIMES = { FRS105: "FRS 105 — Micro-entity", FRS102: "FRS 102 — Small/Medium", FRS101: "FRS 101 — Reduced Disclosure" };
 const OB_STEP_LABELS = ["Company", "Tax", "Accounts", "Checklist", "Bank", "Opening Balances"];
 
 function GettingStartedCard({ company, onOpenStep, onDismiss }) {
@@ -1623,6 +1628,7 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
   const [s1, setS1] = useState({
     name:           company?.name           || (user?.firstName ? `${user.firstName} ${user.lastName ?? ""}`.trim() : ""),
     company_type:   company?.company_type   || "Limited Company",
+    frs_regime:     company?.frs_regime     || ((company?.company_type || "Limited Company") === "Limited Company" ? "FRS105" : ""),
     year_end_month: company?.year_end_month || 12,
     currency:       company?.currency       || "EUR",
   });
@@ -1660,6 +1666,7 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
           clerk_user_id:        user.id,
           name:                 s1.name.trim(),
           company_type:         s1.company_type,
+          frs_regime:           s1.company_type === 'Limited Company' ? s1.frs_regime : null,
           year_end_month:       Number(s1.year_end_month),
           currency:             s1.currency,
           vat_registered:       false,
@@ -1695,6 +1702,7 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
         const { data, error } = await supabase.from('companies').update({
           name:             s1.name.trim(),
           company_type:     s1.company_type,
+          frs_regime:       s1.company_type === 'Limited Company' ? s1.frs_regime : null,
           year_end_month:   Number(s1.year_end_month),
           currency:         s1.currency,
           onboarding_steps: steps,
@@ -1860,7 +1868,7 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
                 <div className="ob-group">
                   <label className="ob-label">Company Type</label>
                   <select className="ob-input" value={s1.company_type}
-                    onChange={e => setS1(p => ({ ...p, company_type: e.target.value }))}>
+                    onChange={e => setS1(p => ({ ...p, company_type: e.target.value, frs_regime: e.target.value === 'Limited Company' ? (p.frs_regime || 'FRS105') : '' }))}>
                     {OB_TYPES.map(t => <option key={t}>{t}</option>)}
                   </select>
                 </div>
@@ -1872,6 +1880,17 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
                   </select>
                 </div>
               </div>
+              {s1.company_type === 'Limited Company' && (
+                <div className="ob-row">
+                  <div className="ob-group">
+                    <label className="ob-label">FRS Regime</label>
+                    <select className="ob-input" value={s1.frs_regime}
+                      onChange={e => setS1(p => ({ ...p, frs_regime: e.target.value }))}>
+                      {Object.entries(FRS_REGIMES).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                    </select>
+                  </div>
+                </div>
+              )}
               <div className="ob-row">
                 <div className="ob-group">
                   <label className="ob-label">Base Currency</label>
@@ -13735,6 +13754,7 @@ function Settings({ company, onUpdate, onNavigate }) {
   const blank = () => ({
     name:            company?.name            || "",
     company_type:    company?.company_type    || "Limited Company",
+    frs_regime:      company?.frs_regime      || ((company?.company_type || "Limited Company") === "Limited Company" ? "FRS105" : ""),
     vat_registered:  company?.vat_registered  ?? false,
     vat_number:      company?.vat_number      || "",
     vat_period:      company?.vat_period      || "bimonthly",
@@ -14052,6 +14072,7 @@ function Settings({ company, onUpdate, onNavigate }) {
       .update({
         name:            form.name.trim(),
         company_type:    form.company_type,
+        frs_regime:      form.company_type === 'Limited Company' ? form.frs_regime : null,
         vat_registered:  form.vat_registered,
         vat_number:      form.vat_registered ? (form.vat_number.trim() || null) : null,
         vat_period:      form.vat_period,
@@ -14137,11 +14158,23 @@ function Settings({ company, onUpdate, onNavigate }) {
             <div className="f-group">
               <label className="f-label">Company Type</label>
               <select className="f-input" value={form.company_type}
-                onChange={e => setForm(p => ({ ...p, company_type: e.target.value }))}>
+                onChange={e => setForm(p => ({ ...p, company_type: e.target.value, frs_regime: e.target.value === 'Limited Company' ? (p.frs_regime || 'FRS105') : '' }))}>
                 {SETTINGS_TYPES.map(t => <option key={t}>{t}</option>)}
               </select>
             </div>
           </div>
+          {form.company_type === 'Limited Company' && (
+            <div className="f-row">
+              <div className="f-group">
+                <label className="f-label">FRS Regime</label>
+                <select className="f-input" value={form.frs_regime}
+                  onChange={e => setForm(p => ({ ...p, frs_regime: e.target.value }))}>
+                  {Object.entries(FRS_REGIMES).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+                </select>
+                <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 3 }}>Determines which statutory financial statements template is offered on the Fin. Statements page. Only FRS 105 has a working generator today.</div>
+              </div>
+            </div>
+          )}
           <div className="f-row" style={{ gridTemplateColumns: "1fr 1fr" }}>
             <div className="f-group">
               <label className="f-label">Base Currency</label>
@@ -15360,6 +15393,7 @@ function AddCompanyModal({ user, onSuccess, onClose }) {
   const BLANK = () => ({
     name:            "",
     company_type:    "Limited Company",
+    frs_regime:      "FRS105",
     year_end_month:  12,
     currency:        "EUR",
     vat_registered:  false,
@@ -15393,6 +15427,7 @@ function AddCompanyModal({ user, onSuccess, onClose }) {
       clerk_user_id:        user.id,
       name:                 form.name.trim(),
       company_type:         form.company_type,
+      frs_regime:           form.company_type === 'Limited Company' ? form.frs_regime : null,
       year_end_month:       Number(form.year_end_month),
       currency:             form.currency,
       base_currency:        form.currency,
@@ -15487,11 +15522,11 @@ function AddCompanyModal({ user, onSuccess, onClose }) {
         </div>
 
         {/* Type + Currency */}
-        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 14 }}>
+        <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: form.company_type === 'Limited Company' ? 12 : 14 }}>
           <div>
             <label className="f-label">Company Type</label>
             <select className="f-input" style={{ marginTop: 5, width: "100%" }} value={form.company_type}
-              onChange={e => f("company_type", e.target.value)}>
+              onChange={e => setForm(p => ({ ...p, company_type: e.target.value, frs_regime: e.target.value === 'Limited Company' ? (p.frs_regime || 'FRS105') : '' }))}>
               {SETTINGS_TYPES.map(t => <option key={t}>{t}</option>)}
             </select>
           </div>
@@ -15503,6 +15538,16 @@ function AddCompanyModal({ user, onSuccess, onClose }) {
             </select>
           </div>
         </div>
+
+        {form.company_type === 'Limited Company' && (
+          <div style={{ marginBottom: 14 }}>
+            <label className="f-label">FRS Regime</label>
+            <select className="f-input" style={{ marginTop: 5, width: "100%" }} value={form.frs_regime}
+              onChange={e => f("frs_regime", e.target.value)}>
+              {Object.entries(FRS_REGIMES).map(([v, l]) => <option key={v} value={v}>{l}</option>)}
+            </select>
+          </div>
+        )}
 
         {/* Year-end + ARD */}
         <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 14 }}>
