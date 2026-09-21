@@ -11035,6 +11035,24 @@ function Journals({ period, selPeriod, companyName, companyId: propCompanyId, re
   const [showForm, setShowForm]   = useState(false);
   const periodLabel = new Date(selPeriod + '-01').toLocaleDateString("en-IE", { month: "long", year: "numeric" });
 
+  // Client-side filter over the already-loaded journals — no new fetch. Same
+  // .toLowerCase().includes() pattern as Chart of Accounts / Global Search, applied here rather
+  // than a status filter: journals have no status to filter by (every one is "posted").
+  const [searchQ, setSearchQ] = useState('');
+  const [accountFilter, setAccountFilter] = useState('');
+  const filteredJournals = journals.filter(j => {
+    if (accountFilter && !j.lines.some(l => l.account === accountFilter)) return false;
+    if (!searchQ) return true;
+    const q = searchQ.toLowerCase();
+    return (j.ref || '').toLowerCase().includes(q)
+      || (j.description || '').toLowerCase().includes(q)
+      || j.lines.some(l => (l.account || '').toLowerCase().includes(q) || (l.name || '').toLowerCase().includes(q));
+  });
+  // The expanded row is tracked by its index into the rendered (filtered) list — reset it
+  // whenever the filter changes so it can't silently point at a different journal than the one
+  // the user actually expanded.
+  useEffect(() => { setExpanded(null); }, [searchQ, accountFilter]);
+
   const emptyForm = () => ({ date: new Date().toISOString().slice(0, 10), description: "", debit_account: "", credit_account: "", amount: "", reference: "" });
   const [form, setForm] = useState(emptyForm());
 
@@ -11165,7 +11183,7 @@ function Journals({ period, selPeriod, companyName, companyId: propCompanyId, re
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
         <div>
           <div style={{ fontSize: 17, fontWeight: 700, color: "var(--text)", marginBottom: 2 }}>Journal Postings — {periodLabel}</div>
-          <div style={{ fontSize: 12, color: "var(--muted)" }}>{journals.length} journal{journals.length !== 1 ? "s" : ""} in {periodLabel}</div>
+          <div style={{ fontSize: 12, color: "var(--muted)" }}>{filteredJournals.length} journal{filteredJournals.length !== 1 ? "s" : ""} in {periodLabel}</div>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
           {readOnly && <span className="ro-badge">Read-only</span>}
@@ -11200,6 +11218,17 @@ function Journals({ period, selPeriod, companyName, companyId: propCompanyId, re
 
       {activeTab === 'journals' && (
         <>
+          <div style={{ display: "flex", gap: 8, marginBottom: 14 }}>
+            <input className="f-input" value={searchQ} onChange={e => setSearchQ(e.target.value)}
+              placeholder="Search reference, description, account…" style={{ flex: 1, fontSize: 12 }} />
+            <select className="f-input" value={accountFilter} onChange={e => setAccountFilter(e.target.value)} style={{ fontSize: 12, minWidth: 220 }}>
+              <option value="">All accounts</option>
+              {(coaAccounts.filter(a => a.is_active !== false).length > 0 ? coaAccounts.filter(a => a.is_active !== false) : GL_ACCOUNTS).map(a => (
+                <option key={a.code} value={a.code}>{a.code} — {a.name}</option>
+              ))}
+            </select>
+          </div>
+
           {showForm && !readOnly && (
             <div className="jnl-form">
               <div className="jnl-fh"><span className="jnl-ft">New Journal Entry</span><button className="btn btn-s btn-sm" onClick={() => setShowForm(false)}>Cancel</button></div>
@@ -11254,7 +11283,7 @@ function Journals({ period, selPeriod, companyName, companyId: propCompanyId, re
           {loading && <div style={{ color: "var(--dim)", fontSize: 13, padding: "20px 0" }}>Loading journals…</div>}
 
           <div className="jnl-list">
-            {journals.map((j, ji) => (
+            {filteredJournals.map((j, ji) => (
               <div key={ji} className="jnl-card">
                 <div className="jnl-head" onClick={() => setExpanded(expanded === ji ? null : ji)}>
                   <div>
