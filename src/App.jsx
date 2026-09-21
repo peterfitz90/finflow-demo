@@ -9097,6 +9097,11 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
   // re-sync effect needed. Internal drills (BS/TB/P&L/P&L Trend row clicks) still explicitly
   // set the tab themselves via drillToAccount, unaffected by lifting the code itself.
   const [tab, setTab]       = useState(drillAccountCode ? "gl" : "tb");
+  // Consume the incoming drill once, on mount — GLExtract's own initialCode prop already
+  // captured it into its local state during this same render, so clearing it here doesn't lose
+  // it. Without this, a later plain sidebar visit to GL Reports (no new drill) would keep
+  // landing on GL Extract forever, since the App()-level value would otherwise never reset.
+  useEffect(() => { if (drillAccountCode) setDrillAccountCode(null); }, []); // eslint-disable-line
   const [journals, setJournals] = useState([]);
   const [loading, setLoading]   = useState(true);
   const [ytdMode, setYtdMode]         = useState(true);
