@@ -20057,12 +20057,101 @@ function BulkARImport({ companyId }) {
 // picker) survives switching tabs — but each gets `isActive` so it refetches its own data
 // (COA, rules, connections) when the user switches back to it, instead of showing whatever
 // was cached at mount time.
+// Item (bank balances view) — per-account feed vs. ledger balance, using Stage 1's persisted
+// feed_balance/feed_balance_synced_at and the existing fetchNominalBalanceAsOf (same
+// cumulative-from-inception balance Cash Flow/Overview/Reconciliation already use).
+function BankBalances({ companyId }) {
+  const [accounts, setAccounts] = useState([]);
+  const [loading, setLoading]   = useState(true);
+
+  useEffect(() => {
+    if (!companyId) { setAccounts([]); setLoading(false); return; }
+    let cancelled = false;
+    setLoading(true);
+    (async () => {
+      const { data } = await supabase.from('bank_accounts')
+        .select('id, display_name, currency, nominal_code, feed_balance, feed_balance_synced_at')
+        .eq('company_id', companyId).eq('is_active', true).order('display_name');
+      const today = new Date().toISOString().slice(0, 10);
+      const rows = await Promise.all((data || []).map(async (a) => ({
+        ...a,
+        ledgerBalance: a.nominal_code ? await fetchNominalBalanceAsOf(companyId, a.nominal_code, today) : null,
+      })));
+      if (!cancelled) { setAccounts(rows); setLoading(false); }
+    })();
+    return () => { cancelled = true; };
+  }, [companyId]);
+
+  const fmtLastSync = (iso) => {
+    if (!iso) return 'Never';
+    const diff = Math.floor((Date.now() - new Date(iso).setHours(0, 0, 0, 0)) / 86400000);
+    return diff === 0 ? 'Today' : diff === 1 ? 'Yesterday' : `${diff}d ago`;
+  };
+
+  return (
+    <div className="card">
+      {loading ? (
+        <div style={{ padding: 48, textAlign: 'center', color: 'var(--text-faint)', fontSize: 12 }}>Loading…</div>
+      ) : accounts.length === 0 ? (
+        <div style={{ padding: 48, textAlign: 'center', color: 'var(--text-muted)', fontSize: 13 }}>No active bank accounts.</div>
+      ) : (
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 13 }}>
+          <thead>
+            <tr style={{ borderBottom: '1px solid var(--border)' }}>
+              {['Account', 'Currency', 'Feed balance', 'Ledger balance', 'Difference', 'Last synced'].map((h, i) => (
+                <th key={h} style={{ textAlign: i >= 2 && i <= 4 ? 'right' : 'left', padding: '10px 18px', fontSize: 10, color: 'var(--text-faint)', textTransform: 'uppercase', letterSpacing: '0.06em', fontWeight: 600 }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {accounts.map(a => {
+              // Three tiers rather than matched/not — a small rounding-level gap (timing, FX)
+              // is routine and shouldn't read as alarming, but a large one (often a missing or
+              // incomplete Opening Balance) needs to visually stand apart from both, so a first
+              // large gap doesn't read as "the software is broken." Threshold combines an
+              // absolute floor (so small-balance accounts aren't flagged over a few euro) with
+              // a percentage cap (so large-balance accounts aren't flagged over noise).
+              const diff = (a.feed_balance != null && a.ledgerBalance != null) ? Number(a.feed_balance) - a.ledgerBalance : null;
+              const absDiff = diff != null ? Math.abs(diff) : null;
+              const largeThreshold = Math.max(50, Math.abs(Number(a.feed_balance || 0)) * 0.05);
+              const tier = diff == null ? null : absDiff < 1 ? 'matched' : absDiff < largeThreshold ? 'difference' : 'large';
+              return (
+                <tr key={a.id} style={{ borderBottom: '1px solid var(--border)' }}>
+                  <td style={{ padding: '10px 18px', fontWeight: 600 }}>{a.display_name}</td>
+                  <td style={{ padding: '10px 18px', color: 'var(--text-muted)' }}>{a.currency}</td>
+                  <td style={{ padding: '10px 18px', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{a.feed_balance != null ? fmtCurrencyFull(a.feed_balance, a.currency) : '—'}</td>
+                  <td style={{ padding: '10px 18px', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>{a.ledgerBalance != null ? fmtCurrencyFull(a.ledgerBalance, a.currency) : '—'}</td>
+                  <td style={{ padding: '10px 18px', textAlign: 'right', fontVariantNumeric: 'tabular-nums' }}>
+                    {tier === null ? (
+                      <span style={{ color: 'var(--text-faint)' }}>—</span>
+                    ) : tier === 'matched' ? (
+                      <span style={{ fontWeight: 600, color: 'var(--accent)' }}>✓ Matched</span>
+                    ) : tier === 'large' ? (
+                      <div>
+                        <div style={{ fontWeight: 700, color: 'var(--danger)' }}>⚠ {fmtCurrencyFull(diff, a.currency)}</div>
+                        <div style={{ fontSize: 10, color: 'var(--danger)', opacity: 0.8, marginTop: 2, fontWeight: 400, whiteSpace: 'nowrap' }}>Large difference — check this account's Opening Balance</div>
+                      </div>
+                    ) : (
+                      <span style={{ fontWeight: 600, color: 'var(--text)' }}>{fmtCurrencyFull(diff, a.currency)}</span>
+                    )}
+                  </td>
+                  <td style={{ padding: '10px 18px', color: 'var(--text-muted)' }}>{fmtLastSync(a.feed_balance_synced_at)}</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      )}
+    </div>
+  );
+}
+
 function BankHub({ companyId, company, isBusinessOwner = false }) {
-  const [tab, setTab] = useState('feeds'); // 'feeds' | 'csv'
+  const [tab, setTab] = useState('feeds'); // 'feeds' | 'csv' | 'balances'
   return (
     <div className="fade-up">
       <div style={{ display: 'flex', gap: 3, marginBottom: 14 }}>
-        {[['feeds', 'Connected feeds'], ['csv', 'Import CSV']].map(([id, label]) => (
+        {[['feeds', 'Connected feeds'], ['csv', 'Import CSV'], ['balances', 'Accounts/Balances']].map(([id, label]) => (
           <button key={id} onClick={() => setTab(id)}
             style={{ padding: '5px 14px', fontSize: 12, fontWeight: tab === id ? 700 : 400, borderRadius: 4, border: '1px solid ' + (tab === id ? 'var(--accent)' : 'var(--border)'), background: tab === id ? 'rgba(80,140,255,0.1)' : 'var(--surface-2)', color: tab === id ? 'var(--accent)' : 'var(--muted)', cursor: 'pointer' }}>
             {label}
@@ -20075,6 +20164,7 @@ function BankHub({ companyId, company, isBusinessOwner = false }) {
       <div style={{ display: tab === 'csv' ? 'block' : 'none' }}>
         <BankImportErrorBoundary><BankImport companyId={companyId} isActive={tab === 'csv'} company={company} /></BankImportErrorBoundary>
       </div>
+      {tab === 'balances' && <BankBalances companyId={companyId} />}
     </div>
   );
 }
