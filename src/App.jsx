@@ -1189,6 +1189,17 @@ const CSS = `
   .prac-compact-row { display: flex; align-items: center; gap: 12px; padding: 12px 0; border-bottom: 1px solid var(--border); cursor: pointer; }
   .prac-compact-row:hover { opacity: 0.8; }
   @media (max-width: 680px) { .prac-table-wrap { display: none; } .prac-compact { display: block; } }
+  /* ── MOBILE RESPONSIVENESS — business-owner path (Overview, forms, tables, VAT Returns,
+     Reconciliation) ── all runtime-computed inline column counts need !important to be
+     overridden here, since inline styles otherwise beat any class-level media rule. */
+  @media (max-width: 680px) {
+    .ov-kpi-grid { grid-template-columns: repeat(2, 1fr) !important; }
+    .ov-vis-large, .ov-vis-small { grid-template-columns: 1fr !important; }
+    .f-row { grid-template-columns: 1fr !important; }
+    .vat-tbox-grid { grid-template-columns: repeat(2, 1fr) !important; }
+    .vat-ebox-grid { grid-template-columns: 1fr !important; }
+    .rc-type-tag, .rc-conf-badge { white-space: normal !important; }
+  }
   /* ── READ-ONLY BADGE ── */
   .ro-badge { display: inline-flex; align-items: center; gap: 4px; font-size: 9px; font-family: 'Source Code Pro', monospace; color: var(--gold); background: rgba(184,134,11,0.08); padding: 2px 8px; border-radius: 20px; border: 1px solid rgba(184,134,11,0.2); letter-spacing: 0.06em; text-transform: uppercase; }
   /* ── BRIGHTPAY IMPORTER ── */
@@ -2473,6 +2484,7 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
               {upcomingAP.length === 0 ? (
                 <div style={{ padding: "32px 16px", textAlign: "center", color: "var(--dim)", fontSize: 12 }}>No invoices due in this window.</div>
               ) : (
+                <div style={{ overflowX: "auto" }}>
                 <table className="gl-table">
                   <thead><tr><th>Client</th><th className="r">Amount</th><th className="r">Due</th></tr></thead>
                   <tbody>
@@ -2495,6 +2507,7 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
                     </tr>
                   </tbody>
                 </table>
+                </div>
               )}
             </div>
           </div>
@@ -2524,6 +2537,7 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
             {recent10.length === 0 ? (
               <div style={{ padding: "32px 16px", textAlign: "center", color: "var(--dim)", fontSize: 12 }}>No transactions in this period.</div>
             ) : (
+              <div style={{ overflowX: "auto" }}>
               <table className="gl-table">
                 <thead>
                   <tr><th style={{ width: 80 }}>Date</th><th>Description</th><th style={{ width: 120 }}>Nominal</th><th className="r" style={{ width: 110 }}>Amount</th><th className="r" style={{ width: 120 }}>Balance</th></tr>
@@ -2549,6 +2563,7 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
                   })}
                 </tbody>
               </table>
+              </div>
             )}
           </div>
 
@@ -2561,6 +2576,7 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
                   3+ occurrences · all-time · sorted by amount
                 </span>
               </div>
+              <div style={{ overflowX: "auto" }}>
               <table className="gl-table">
                 <thead>
                   <tr>
@@ -2585,6 +2601,7 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
                   ))}
                 </tbody>
               </table>
+              </div>
             </div>
           )}
         </>
@@ -3033,6 +3050,7 @@ function Invoices({ companyName, companyId: propCid, company, onNavigate, isBusi
                   {filter === 'all' ? 'No invoices yet — click + New Invoice to start.' : `No ${AR_STATUS_LABELS[filter] || filter} invoices.`}
                 </div>
               ) : (
+                <div style={{ overflowX: "auto" }}>
                 <table className="gl-table">
                   <thead><tr><th>Number</th><th>Customer</th><th>Date</th><th>Due</th><th>Status</th><th className="r">Total</th><th className="r">Outstanding</th><th></th></tr></thead>
                   <tbody>
@@ -3078,6 +3096,7 @@ function Invoices({ companyName, companyId: propCid, company, onNavigate, isBusi
                     })}
                   </tbody>
                 </table>
+                </div>
               )}
             </div>
           )}
@@ -3089,6 +3108,7 @@ function Invoices({ companyName, companyId: propCid, company, onNavigate, isBusi
               {filterList(creditNotes).length === 0 ? (
                 <div style={{ padding: '36px 0', textAlign: 'center', fontSize: 13, color: 'var(--dim)' }}>No credit notes yet.</div>
               ) : (
+                <div style={{ overflowX: "auto" }}>
                 <table className="gl-table">
                   <thead><tr><th>Number</th><th>Customer</th><th>Date</th><th>Against</th><th>Status</th><th className="r">Amount</th><th></th></tr></thead>
                   <tbody>
@@ -3125,6 +3145,7 @@ function Invoices({ companyName, companyId: propCid, company, onNavigate, isBusi
                     })}
                   </tbody>
                 </table>
+                </div>
               )}
             </div>
           )}
@@ -3136,6 +3157,7 @@ function Invoices({ companyName, companyId: propCid, company, onNavigate, isBusi
               {customers.length === 0 ? (
                 <div style={{ padding: '36px 0', textAlign: 'center', fontSize: 13, color: 'var(--dim)' }}>No customers yet — click + New Customer.</div>
               ) : (
+                <div style={{ overflowX: "auto" }}>
                 <table className="gl-table">
                   <thead><tr><th>Name</th><th>Email</th><th>Phone</th><th>VAT Number</th><th className="r">Total Invoiced</th><th></th></tr></thead>
                   <tbody>
@@ -3154,6 +3176,7 @@ function Invoices({ companyName, companyId: propCid, company, onNavigate, isBusi
                     })}
                   </tbody>
                 </table>
+                </div>
               )}
             </div>
           )}
@@ -3165,6 +3188,7 @@ function Invoices({ companyName, companyId: propCid, company, onNavigate, isBusi
               {Object.keys(agedByCust).length === 0 ? (
                 <div style={{ padding: '36px 0', textAlign: 'center', fontSize: 13, color: 'var(--dim)' }}>No outstanding debtors.</div>
               ) : (
+                <div style={{ overflowX: "auto" }}>
                 <table className="gl-table">
                   <thead>
                     <tr>
@@ -3208,6 +3232,7 @@ function Invoices({ companyName, companyId: propCid, company, onNavigate, isBusi
                     })()}
                   </tbody>
                 </table>
+                </div>
               )}
             </div>
           )}
@@ -3953,6 +3978,7 @@ function APInvoices({ companyName = "Company", company, onNavigate, isBusinessOw
         ) : invoices.length === 0 ? (
           <div style={{ padding: "32px 16px", fontSize: 13, color: "var(--dim)", textAlign: "center" }}>No AP invoices yet — add one above.</div>
         ) : (
+          <div style={{ overflowX: "auto" }}>
           <table className="gl-table">
             <thead>
               <tr><th>Supplier</th><th>Invoice Ref</th><th>Issued</th><th>Due</th><th>Days</th><th>Status</th><th>Method</th><th className="r">Amount</th><th></th></tr>
@@ -3994,6 +4020,7 @@ function APInvoices({ companyName = "Company", company, onNavigate, isBusinessOw
               </tr>
             </tbody>
           </table>
+          </div>
         )}
         {selInv && (() => {
           const d = daysFromToday(selInv.due_date);
@@ -4025,6 +4052,7 @@ function APInvoices({ companyName = "Company", company, onNavigate, isBusinessOw
           <div style={{ padding: "20px 16px", fontSize: 13, color: "var(--dim)" }}>Loading…</div>
         ) : (
           <>
+            <div style={{ overflowX: "auto" }}>
             <table className="gl-table">
               <thead>
                 <tr><th>Bucket</th><th>Description</th><th>Invoices</th><th className="r">Amount</th><th className="r">% of AP</th></tr>
@@ -4049,6 +4077,7 @@ function APInvoices({ companyName = "Company", company, onNavigate, isBusinessOw
                 </tr>
               </tbody>
             </table>
+            </div>
             {agedTotal > 0 && (
               <div style={{ padding: "12px 16px", borderTop: "1px solid var(--border)" }}>
                 <div style={{ height: 7, borderRadius: 4, overflow: "hidden", display: "flex" }}>
@@ -5222,7 +5251,7 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
       ) : (
         <>
           {/* T1 / T2 / T3 / T4 */}
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 12, marginBottom: 4 }}>
+          <div className="vat-tbox-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 12, marginBottom: 4 }}>
             <VATBox label="T1" title="VAT on Sales (Output)" value={t1Final} color="var(--accent)" drill
               sub={hasAdjT1
                 ? `Computed: ${fmtEUR(round2(t1))} · adj: ${adjT1Num >= 0 ? '+' : ''}${fmtEUR(adjT1Num)}`
@@ -5386,7 +5415,7 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
               fully-taxable trader, only shows up if input VAT recovery is restricted. */}
           <div style={{ marginBottom: 4 }}>
             <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)", marginBottom: 8, letterSpacing: "0.04em" }}>POSTPONED ACCOUNTING <span style={{ fontWeight: 400, color: "var(--text-faint)" }}>(enter manually if you have goods imported under postponed accounting — 0 for domestic-only)</span></div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
+            <div className="vat-ebox-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
               <EUField label="PA1" title="Customs Value of Goods Imported" value={paCustomsValue} onChange={setPaCustomsValue} />
               <EUField label="PA VAT" title="Postponed VAT — added to both T1 and T2" value={paVatAmount} onChange={setPaVatAmount} />
             </div>
@@ -5395,7 +5424,7 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
           {/* EU fields — always shown, default 0 for domestic-only */}
           <div style={{ marginBottom: 4 }}>
             <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)", marginBottom: 8, letterSpacing: "0.04em" }}>INTRA-EU TRANSACTIONS <span style={{ fontWeight: 400, color: "var(--text-faint)" }}>(auto-populates from RC_EU journals; enter manually if applicable — 0 for domestic-only)</span></div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 12, marginBottom: 16 }}>
+            <div className="vat-ebox-grid" style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr 1fr", gap: 12, marginBottom: 16 }}>
               <EUField label="E1"  title="EU Goods Supplied"         value={e1}  onChange={setE1}  />
               <EUField label="E2"  title="EU Goods Acquired"         value={e2}  onChange={setE2}  />
               <EUField label="ES1" title="EU Services Supplied"      value={es1} onChange={setEs1} />
@@ -5488,6 +5517,7 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
                 </span>
               </div>
               <div style={{ padding: "10px 16px 16px" }}>
+                <div style={{ overflowX: "auto" }}>
                 <table className="gl-table">
                   <thead>
                     <tr><th></th><th className="r">At Request</th><th className="r">Live (now)</th></tr>
@@ -5527,6 +5557,7 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
                     </tr>
                   </tbody>
                 </table>
+                </div>
                 {hasFilingDrift && (
                   <div style={{ marginTop: 10, fontSize: 11, color: "var(--danger)" }}>
                     ⚠ One or more figures changed after this request was made — likely a journal posted into the period since
@@ -5878,6 +5909,7 @@ function Compliance({ company, onNavigate }) {
             <span style={{ color: "var(--teal)" }}>● Upcoming</span>
           </div>
         </div>
+        <div style={{ overflowX: "auto" }}>
         <table className="gl-table">
           <thead>
             <tr><th style={{ width: 70 }}>Type</th><th>Description</th><th style={{ width: 200 }}>Detail</th><th className="r" style={{ width: 120 }}>Due Date</th><th className="r" style={{ width: 90 }}>Status</th><th style={{ width: 90 }}></th></tr>
@@ -5907,6 +5939,7 @@ function Compliance({ company, onNavigate }) {
             })}
           </tbody>
         </table>
+        </div>
       </div>
 
       {contractRenewals.length > 0 && (
@@ -5915,6 +5948,7 @@ function Compliance({ company, onNavigate }) {
             <span className="card-title">Contract Renewals</span>
             <span style={{ fontSize: 10, color: "var(--gold)", fontFamily: "Source Code Pro, monospace" }}>NEXT 90 DAYS</span>
           </div>
+          <div style={{ overflowX: "auto" }}>
           <table className="gl-table">
             <thead>
               <tr><th>Contract</th><th>Counterparty</th><th>Type</th><th className="r">Renewal Date</th><th className="r">Days</th><th className="r">Notice Period</th><th className="r">Auto-Renews</th></tr>
@@ -5937,6 +5971,7 @@ function Compliance({ company, onNavigate }) {
               })}
             </tbody>
           </table>
+          </div>
         </div>
       )}
     </div>
@@ -6150,6 +6185,7 @@ function Contracts({ companyName = "Company", companyId }) {
         ) : contracts.length === 0 ? (
           <div style={{padding:"32px 16px",fontSize:13,color:"var(--dim)",textAlign:"center"}}>No contracts yet — add one above.</div>
         ) : (
+          <div style={{ overflowX: "auto" }}>
           <table className="gl-table">
             <thead>
               <tr><th>Title</th><th>Counterparty</th><th>Type</th><th>Renewal</th><th>End Date</th><th>Days</th><th>Status</th><th className="r">Value</th><th></th></tr>
@@ -6186,6 +6222,7 @@ function Contracts({ companyName = "Company", companyId }) {
               })}
             </tbody>
           </table>
+          </div>
         )}
 
         {/* Expanded detail / inline edit */}
@@ -7290,7 +7327,7 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
 
       {/* ── KPI Strip ── */}
       {!loading && (
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 14 }}>
+        <div className="ov-kpi-grid" style={{ display: "grid", gridTemplateColumns: "repeat(4, 1fr)", gap: 10, marginBottom: 14 }}>
           {/* CASH */}
           <div style={{ background: "var(--surface)", border: "1px solid var(--border)", borderRadius: "var(--radius-card)", padding: "12px 14px" }}>
             <div style={{ fontSize: 9, fontWeight: 600, letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--text-faint)", marginBottom: 6 }}>Cash</div>
@@ -7743,14 +7780,14 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
           <>
             {/* Row 1: large tiles (Work Queue + Cash Position) */}
             {visLarge.length > 0 && (
-              <div style={{ display:"grid", gridTemplateColumns: visLarge.length === 1 ? "1fr" : "5fr 7fr", gap:16, marginBottom:16, alignItems:"start" }}>
+              <div className="ov-vis-large" style={{ display:"grid", gridTemplateColumns: visLarge.length === 1 ? "1fr" : "5fr 7fr", gap:16, marginBottom:16, alignItems:"start" }}>
                 {visLarge.map(t => tileWrap(t.id, largeTiles, tileContent[t.id]))}
               </div>
             )}
 
             {/* Row 2: small tiles */}
             {visSmall.length > 0 && (
-              <div style={{ display:"grid", gridTemplateColumns:`repeat(${visSmall.length}, 1fr)`, gap:16 }}>
+              <div className="ov-vis-small" style={{ display:"grid", gridTemplateColumns:`repeat(${visSmall.length}, 1fr)`, gap:16 }}>
                 {visSmall.map(t => tileWrap(t.id, smallTiles, tileContent[t.id]))}
               </div>
             )}
@@ -9681,6 +9718,7 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
             <div className="print-meta">Period: {reportLabel} · Exported: {exportDate}</div>
           </div>
           {noBsJournals ? emptyMsg(`No trial balance data for ${reportLabel}`, "Post journals to populate your trial balance.") : (
+            <div style={{ overflowX: "auto" }}>
             <table className="gl-table">
               <thead><tr><th style={{ width: 55 }}>Code</th><th>Account Name</th><th>Type</th><th className="r">Debit (€)</th><th className="r">Credit (€)</th><th className="r">Net Balance</th></tr></thead>
               <tbody>
@@ -9696,6 +9734,7 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
                 <tr className="tot"><td colSpan={3} style={{ fontWeight: 600 }}>Total</td><td className="r mono">{fmt(tbTotDr)}</td><td className="r mono">{fmt(tbTotCr)}</td><td className="r mono" style={{ color: tbTotDr === tbTotCr ? "var(--green)" : "var(--red)", fontWeight: 700 }}>{tbTotDr === tbTotCr ? "—" : fmt(Math.abs(tbTotDr - tbTotCr))}</td></tr>
               </tbody>
             </table>
+            </div>
           )}
         </div>
       )}
@@ -10018,6 +10057,7 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
             {rows.length === 0
               ? emptyMsg("No supplier spend for this period", "AP invoices with an invoice date in the selected period will appear here.")
               : (
+                <div style={{ overflowX: "auto" }}>
                 <table className="gl-table">
                   <thead>
                     <tr>
@@ -10055,6 +10095,7 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
                     </tr>
                   </tbody>
                 </table>
+                </div>
               )}
           </div>
         );
@@ -10107,6 +10148,7 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
             {suppliers.length === 0
               ? emptyMsg("No outstanding AP invoices", "All invoices have been paid, or there are no approved invoices yet.")
               : (
+                <div style={{ overflowX: "auto" }}>
                 <table className="gl-table">
                   <thead>
                     <tr>
@@ -10142,6 +10184,7 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
                     </tr>
                   </tbody>
                 </table>
+                </div>
               )}
           </div>
         );
@@ -10389,6 +10432,7 @@ function FullGLReport({ companyId, companyName, company, coaAccounts }) {
         </div>
       ) : (
         <>
+          <div style={{ overflowX: "auto" }}>
           <table className="gl-table">
             <thead>
               <tr>
@@ -10449,6 +10493,7 @@ function FullGLReport({ companyId, companyName, company, coaAccounts }) {
               </tr>
             </tfoot>
           </table>
+          </div>
         </>
       )}
       {reclassTarget && (
@@ -13292,6 +13337,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
           ) : history.length === 0 ? (
             <div style={{ padding: "28px 24px", textAlign: "center", color: "var(--dim)", fontSize: 12 }}>No previous imports found.</div>
           ) : (
+            <div style={{ overflowX: "auto" }}>
             <table className="gl-table">
               <thead>
                 <tr>
@@ -13368,6 +13414,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
                 })}
               </tbody>
             </table>
+            </div>
           )}
           {!historyLoading && (
             <div style={{ padding: "10px 16px", borderTop: history.length ? "1px solid var(--border)" : "none", display: "flex", justifyContent: "flex-end" }}>
@@ -14879,6 +14926,7 @@ function Settings({ company, onUpdate, onNavigate }) {
             <div style={{ fontSize: 12, color: "var(--dim)", marginBottom: 10 }}>No company-specific rules yet. Add one above or override a system rule.</div>
           ) : (
             companyRules.length > 0 && (
+              <div style={{ overflowX: "auto" }}>
               <table className="gl-table" style={{ marginBottom: 12 }}>
                 <thead><tr><th>Pattern</th><th>Type</th><th>Dir</th><th>Nominal</th><th>Source</th><th style={{ width: 80 }}>Active</th><th style={{ width: 70 }}></th></tr></thead>
                 <tbody>
@@ -14908,6 +14956,7 @@ function Settings({ company, onUpdate, onNavigate }) {
                   ))}
                 </tbody>
               </table>
+              </div>
             )
           )}
           {/* System Rules (collapsible) */}
@@ -14916,6 +14965,7 @@ function Settings({ company, onUpdate, onNavigate }) {
             {showSystemRules ? "Hide" : "Show"} {systemRules.length} system rules
           </button>
           {showSystemRules && (
+            <div style={{ overflowX: "auto" }}>
             <table className="gl-table" style={{ marginTop: 8 }}>
               <thead><tr><th>Pattern</th><th>Type</th><th>Dir</th><th>Nominal</th></tr></thead>
               <tbody>
@@ -14929,6 +14979,7 @@ function Settings({ company, onUpdate, onNavigate }) {
                 ))}
               </tbody>
             </table>
+            </div>
           )}
         </div>
       </div>
@@ -16861,6 +16912,7 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
         ) : displayed.length === 0 ? (
           <div style={{padding:"32px 16px",fontSize:13,color:"var(--dim)",textAlign:"center"}}>No expenses yet — upload a receipt or click Add Expense.</div>
         ) : (
+          <div style={{ overflowX: "auto" }}>
           <table className="gl-table">
             <thead>
               <tr>
@@ -16900,6 +16952,7 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
               })}
             </tbody>
           </table>
+          </div>
         )}
 
         {/* Expanded detail */}
@@ -17775,13 +17828,13 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
     const col = c >= 80 ? 'var(--accent)' : c >= 60 ? 'var(--warn)' : 'var(--text-muted)';
     const bg  = c >= 80 ? 'var(--accent-dim)' : c >= 60 ? 'var(--warn-dim)' : 'var(--surface-2)';
     const brd = c >= 80 ? 'rgba(52,211,153,0.3)' : c >= 60 ? 'rgba(251,191,36,0.3)' : 'var(--border)';
-    return <span style={{ background: bg, border: `1px solid ${brd}`, borderRadius: 'var(--radius-pill)', padding: '1px 8px', fontSize: 10, color: col, fontWeight: 700, whiteSpace: 'nowrap' }}>{Math.round(c)}% match confidence</span>;
+    return <span className="rc-conf-badge" style={{ background: bg, border: `1px solid ${brd}`, borderRadius: 'var(--radius-pill)', padding: '1px 8px', fontSize: 10, color: col, fontWeight: 700, whiteSpace: 'nowrap' }}>{Math.round(c)}% match confidence</span>;
   };
   const typeTag = (t) => {
     const map = { invoice: 'Sales Invoice', ap_invoice: 'Supplier Invoice', journal: 'Journal Entry' };
     const col = { invoice: 'var(--accent)', ap_invoice: 'var(--danger)', journal: 'var(--info)' };
     const bg  = { invoice: 'var(--accent-dim)', ap_invoice: 'var(--danger-dim)', journal: 'rgba(96,165,250,0.12)' };
-    return <span style={{ background: bg[t] || 'var(--surface-2)', border: `1px solid ${col[t] || 'var(--border)'}40`, borderRadius: 3, padding: '1px 6px', fontSize: 9, fontWeight: 700, letterSpacing: '0.02em', whiteSpace: 'nowrap', color: col[t] || 'var(--text-muted)' }}>{map[t] || t}</span>;
+    return <span className="rc-type-tag" style={{ background: bg[t] || 'var(--surface-2)', border: `1px solid ${col[t] || 'var(--border)'}40`, borderRadius: 3, padding: '1px 6px', fontSize: 9, fontWeight: 700, letterSpacing: '0.02em', whiteSpace: 'nowrap', color: col[t] || 'var(--text-muted)' }}>{map[t] || t}</span>;
   };
   const fmtLastImport = (iso) => {
     if (!iso) return 'Never';
