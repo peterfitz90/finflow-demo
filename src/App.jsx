@@ -6621,7 +6621,7 @@ async function runChecklistAutoEval(companyId, periodStart, periodEnd, items) {
   if (!condItems.length) return items;
 
   const period = periodStart.slice(0, 7); // 'YYYY-MM'
-  const [payrollRes, vatRes, reconRes, depRes, hasAssetsRes] = await Promise.all([
+  const [payrollRes, vatRes, reconRes, depRunsRes, assetsRes] = await Promise.all([
     supabase.from('journals').select('id', { count: 'exact', head: true })
       .eq('company_id', companyId)
       .in('debit_account', ['6000', '5300'])
@@ -6632,19 +6632,28 @@ async function runChecklistAutoEval(companyId, periodStart, periodEnd, items) {
     supabase.from('bank_transactions').select('id', { count: 'exact', head: true })
       .eq('company_id', companyId).eq('reconciled', true)
       .gte('date', periodStart).lte('date', periodEnd),
-    supabase.from('asset_depreciation_runs').select('id', { count: 'exact', head: true })
+    // asset_depreciation_runs is now scoped per (asset_id, period) — a single row no longer
+    // means "the whole company's depreciation for this period is posted" the way it used to.
+    // Fetch which assets have a run this period, and compare against every asset that's
+    // actually entitled to a charge this period (same eligibility faMonthlyDep/runCatchUp
+    // itself uses), rather than treating "any row exists" as good enough.
+    supabase.from('asset_depreciation_runs').select('asset_id')
       .eq('company_id', companyId).eq('period', period),
-    supabase.from('fixed_assets').select('id', { count: 'exact', head: true })
+    supabase.from('fixed_assets')
+      .select('id, purchase_date, disposal_date, status, method, useful_life_months, rate_percent, residual_value, cost')
       .eq('company_id', companyId).lte('purchase_date', periodEnd),
   ]);
 
-  // depreciation_posted = true when a run exists OR no assets exist (nothing to post)
-  const noAssets = (hasAssetsRes.count ?? 0) === 0;
+  const doneAssetIds = new Set((depRunsRes.data || []).map(r => r.asset_id));
+  const eligibleAssets = (assetsRes.data || []).filter(a =>
+    (a.status === 'active' || (a.disposal_date && a.disposal_date.slice(0, 7) > period))
+    && faMonthlyDep(a, period) > 0.001
+  );
   const condResults = {
     payroll_journals_posted: (payrollRes.count ?? 0) > 0,
     vat3_return_prepared:    (vatRes.count ?? 0) > 0,
     bank_recon_complete:     (reconRes.count ?? 0) > 0,
-    depreciation_posted:     noAssets || (depRes.count ?? 0) > 0,
+    depreciation_posted:     eligibleAssets.length === 0 || eligibleAssets.every(a => doneAssetIds.has(a.id)),
   };
 
   const dbUpdates = [];
@@ -19293,10 +19302,13 @@ function FixedAssets({ companyId, company, selPeriod }) {
       }, assetList[0].purchase_date.slice(0, 7));
 
       const [{ data: existingRuns }, lockedPeriods] = await Promise.all([
-        supabase.from('asset_depreciation_runs').select('period').eq('company_id', companyId),
+        supabase.from('asset_depreciation_runs').select('asset_id, period').eq('company_id', companyId),
         getLockedPeriods(companyId),
       ]);
-      const posted = new Set((existingRuns || []).map(r => r.period));
+      // "Done" is tracked per (asset, period) — not just per period. A period with SOME
+      // assets already caught up (e.g. one asset added earlier than another) must still let
+      // the still-uncaught-up assets post their own charge for that same period.
+      const posted = new Set((existingRuns || []).map(r => `${r.asset_id}:${r.period}`));
 
       const todayYM = new Date().toISOString().slice(0, 7);
       let ym = earliestYM, postedCount = 0, skippedCount = 0;
@@ -19304,26 +19316,29 @@ function FixedAssets({ companyId, company, selPeriod }) {
       let hardError = null;
 
       while (ym <= todayYM) {
-        if (posted.has(ym)) { ym = faNextYM(ym); continue; }
         const [y, m] = ym.split('-').map(Number);
         const periodEnd = new Date(y, m, 0).toISOString().slice(0, 10);
-        if (isDateLocked(periodEnd, lockedPeriods)) { skippedCount++; ym = faNextYM(ym); continue; }
 
-        // Compute charges across active assets
+        // Only assets not already caught up for THIS specific period
         const charges = assetList
           .filter(a => a.status === 'active' || (a.disposal_date && a.disposal_date.slice(0, 7) > ym))
+          .filter(a => !posted.has(`${a.id}:${ym}`))
           .map(a => ({ a, charge: faMonthlyDep(a, ym) }))
           .filter(x => x.charge > 0.001);
 
         if (!charges.length) { ym = faNextYM(ym); continue; }
+        if (isDateLocked(periodEnd, lockedPeriods)) { skippedCount++; ym = faNextYM(ym); continue; }
 
-        const total = charges.reduce((s, x) => s + x.charge, 0);
-        const { error: runErr, data: runRow } = await supabase.from('asset_depreciation_runs')
-          .insert({ company_id: companyId, period: ym, total: Math.round(total * 100) / 100 })
-          .select('id').single();
-        if (runErr) { ym = faNextYM(ym); continue; } // 23505 = already exists
+        // One asset_depreciation_runs row per (asset, period) — the actual "done" marker.
+        const runRows = charges.map(({ a, charge }) => ({
+          company_id: companyId, asset_id: a.id, period: ym, total: Math.round(charge * 100) / 100,
+        }));
+        const { error: runErr, data: insertedRuns } = await supabase.from('asset_depreciation_runs')
+          .insert(runRows).select('id, asset_id');
+        if (runErr) { ym = faNextYM(ym); continue; } // 23505 = a concurrent run already claimed one of these
 
-        // Group by accum_dep_nominal and post one journal row per unique account
+        // Group by accum_dep_nominal and post one journal row per unique account — same as
+        // before, just scoped to whichever assets were actually missing this period.
         const byNom = {};
         charges.forEach(({ a, charge }) => {
           const nom = a.accum_dep_nominal || '1501';
@@ -19345,9 +19360,9 @@ function FixedAssets({ companyId, company, selPeriod }) {
         }
 
         if (postErr) {
-          // Don't leave a claimed-but-nothing-posted run row behind — remove it so this
+          // Don't leave claimed-but-nothing-posted run rows behind — remove them so this
           // period stays open to retry (once unlocked, if that's why it failed).
-          await supabase.from('asset_depreciation_runs').delete().eq('id', runRow.id);
+          await supabase.from('asset_depreciation_runs').delete().in('id', insertedRuns.map(r => r.id));
           if (/period is locked/i.test(postErr.message)) {
             skippedCount++;
             ym = faNextYM(ym);
@@ -19358,7 +19373,9 @@ function FixedAssets({ companyId, company, selPeriod }) {
           break; // unexpected error — stop rather than silently skip to the next period
         }
 
-        if (jIds.length) await supabase.from('asset_depreciation_runs').update({ journal_ids: jIds }).eq('id', runRow.id);
+        if (jIds.length) {
+          await supabase.from('asset_depreciation_runs').update({ journal_ids: jIds }).in('id', insertedRuns.map(r => r.id));
+        }
 
         postedCount++;
         postedLabels.push(monthLabel);
