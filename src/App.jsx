@@ -9688,6 +9688,26 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
   const bsLtLiabTotal   = bsLtLiab.reduce((s, r) => s + Math.abs(r.net), 0);
   const bsTotalAssets   = bsFixedTotal + bsCurrAssTotal;
   const bsNetAssets     = bsTotalAssets - bsCurrLiabTotal - bsLtLiabTotal;
+  // KNOWN GAP — TRACKED, NOT YET BUILT (unreachable until a real Sole Trader company exists;
+  // see the Sole Trader chart-of-accounts work). This section hardcodes "Share Capital" /
+  // "Retained Earnings — brought forward" as literal JSX strings below, keyed off these two
+  // code ranges. A Sole Trader company's equity nominals are 3200 Capital Account / 3300
+  // Drawings (COA_SEED_SOLE_TRADER) — both currently fall inside the open-ended `>= '3100'`
+  // bsDirectRE bucket below and would render under the wrong label, with Capital Account and
+  // Drawings netted together rather than shown as two distinct lines. The balance sheet total
+  // stays arithmetically correct either way (nothing here breaks the balance) — this is a
+  // labeling/breakdown gap, not a correctness bug.
+  // Proposed fix (do both together — neither alone is sufficient):
+  //   1. Split the numeric ranges three ways instead of two: 3000-3099, 3100-3199, and
+  //      3200-3299/3300-3399 as their own buckets (LTD and Sole Trader nominals don't overlap
+  //      by construction, so this is a safe, purely additive split).
+  //   2. Branch the rendered labels on `company?.company_type === 'Sole Trader'` (GLReport
+  //      already receives `company` as a prop — no new prop-threading needed) to show "Capital
+  //      Account" / "Drawings" as two separate lines instead of "Share Capital" / "Retained
+  //      Earnings — brought forward".
+  //   Labels-only (keeping the open-ended bucket) would still net Capital Account and Drawings
+  //   together; range-split-only (keeping today's static labels) would still show the wrong
+  //   text — the fix needs both parts.
   const bsShareCap      = tbRows.filter(r => r.type === 'Equity' && r.code >= '3000' && r.code < '3100').reduce((s, r) => s + r.net, 0);
   // Any equity account at 3100+ (e.g. "Retained Earnings") that's been posted to DIRECTLY —
   // most commonly an Opening Balances entry that states the prior accountant's retained
