@@ -14282,6 +14282,13 @@ function Settings({ company, onUpdate, onNavigate }) {
     coaRefetch();
   };
 
+  const coaToggleAddBack = async (id, current) => {
+    if (!company?.id) return;
+    await supabase.from("chart_of_accounts")
+      .update({ tax_add_back: !current }).eq("id", id);
+    coaRefetch();
+  };
+
   useEffect(() => {
     if (!company?.clerk_org_id) return;
     setMembersLoading(true);
@@ -15153,7 +15160,7 @@ function Settings({ company, onUpdate, onNavigate }) {
         ) : (
           <div style={{ overflowX: "auto" }}>
             <table className="gl-table" style={{ minWidth: 560 }}>
-              <thead><tr><th>Code</th><th>Name</th><th>Type</th><th>Category</th><th>VAT Rate</th><th style={{ textAlign: "center" }}>Active</th><th></th></tr></thead>
+              <thead><tr><th>Code</th><th>Name</th><th>Type</th><th>Category</th><th>VAT Rate</th><th style={{ textAlign: "center" }}>Active</th><th style={{ textAlign: "center" }}>Add back for tax</th><th></th></tr></thead>
               <tbody>
                 {["asset","liability","equity","income","expense"].flatMap(typeKey => {
                   const rows = filteredCoa.filter(a => a.account_type === typeKey);
@@ -15162,7 +15169,7 @@ function Settings({ company, onUpdate, onNavigate }) {
                   const typeColour = { asset:"var(--accent)", liability:"var(--danger)", equity:"var(--info)", income:"var(--accent)", expense:"var(--warn)" }[typeKey];
                   return [
                     <tr key={`hdr-${typeKey}`} style={{ background: "var(--surface2)" }}>
-                      <td colSpan={6} style={{ fontSize: 11, fontWeight: 700, color: typeColour, padding: "5px 12px" }}>
+                      <td colSpan={7} style={{ fontSize: 11, fontWeight: 700, color: typeColour, padding: "5px 12px" }}>
                         <span style={{ display: "inline-block", width: 7, height: 7, borderRadius: "50%", background: typeColour, marginRight: 7, verticalAlign: "middle" }} />{typeLabel}
                       </td>
                     </tr>,
@@ -15201,6 +15208,13 @@ function Settings({ company, onUpdate, onNavigate }) {
                             title={coaIsStatic(a) ? "Run SQL migration to enable" : (a.is_active ? "Deactivate" : "Activate")}
                             style={{ width: 34, height: 18, borderRadius: 9, border: "none", cursor: coaIsStatic(a) ? "not-allowed" : "pointer", background: a.is_active ? "var(--teal)" : "var(--border2)", transition: "background 0.2s", position: "relative", flexShrink: 0, opacity: coaIsStatic(a) ? 0.4 : 1 }}>
                             <span style={{ position: "absolute", top: 2, left: a.is_active ? 18 : 2, width: 14, height: 14, borderRadius: "50%", background: "white", transition: "left 0.2s" }} />
+                          </button>
+                        </td>
+                        <td style={{ textAlign: "center" }}>
+                          <button onClick={() => !coaIsStatic(a) && coaToggleAddBack(a.id, a.tax_add_back)}
+                            title={coaIsStatic(a) ? "Run SQL migration to enable" : (a.tax_add_back ? "Flagged for Form 11 — click to unflag" : "Flag this nominal for your accountant to review when preparing Form 11")}
+                            style={{ width: 34, height: 18, borderRadius: 9, border: "none", cursor: coaIsStatic(a) ? "not-allowed" : "pointer", background: a.tax_add_back ? "var(--teal)" : "var(--border2)", transition: "background 0.2s", position: "relative", flexShrink: 0, opacity: coaIsStatic(a) ? 0.4 : 1 }}>
+                            <span style={{ position: "absolute", top: 2, left: a.tax_add_back ? 18 : 2, width: 14, height: 14, borderRadius: "50%", background: "white", transition: "left 0.2s" }} />
                           </button>
                         </td>
                         <td style={{ paddingRight: 10 }}>
