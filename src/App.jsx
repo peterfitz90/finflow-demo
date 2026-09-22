@@ -4205,10 +4205,9 @@ function validateVAT3({ company, vatPeriod, t1, t2, e1, e2, es1, es2, pa1, retur
   const servTo    = Math.round(es1n), servFrom    = Math.round(es2n);
   if (servTo > 9999999999) errors.push(`ES1 (€${servTo.toLocaleString()}) exceeds schema max €9,999,999,999`);
 
-  // PA1
+  // PA1 — manually entered, same as the EU boxes above
   const pa1c   = Math.round(pa1 * 100) / 100;
   const pa1Int = Math.round(pa1c);
-  warnings.push('postponedAccounting is 0 — engine has no PA-import journal tracking. This is correct for domestic-only trading; verify if you have goods imported under postponed accounting.');
 
   const previewRows = [
     { attr: 'name',                source: 'company.name',                  rawVal: rawName,           xmlVal: xmlName,          note: rawName.length > 30 ? `⚠ truncated ${rawName.length}→30` : '',                              flag: rawName.length > 30 },
@@ -4223,7 +4222,7 @@ function validateVAT3({ company, vatPeriod, t1, t2, e1, e2, es1, es2, pa1, retur
     { attr: 'goodsfrom',           source: 'E2 box (manual entry)',         rawVal: `€${e2n.toFixed(2)}`, xmlVal: String(goodsFrom), note: 'manually entered — not auto-computed from transactions',                               flag: false, isManual: true },
     { attr: 'servicesto',          source: 'ES1 box (manual entry)',        rawVal: `€${es1n.toFixed(2)}`, xmlVal: String(servTo),   note: 'manually entered — not auto-computed from transactions',                               flag: false, isManual: true },
     { attr: 'servicesfrom',        source: 'ES2 box (manual entry)',        rawVal: `€${es2n.toFixed(2)}`, xmlVal: String(servFrom), note: 'manually entered — not auto-computed from transactions',                               flag: false, isManual: true },
-    { attr: 'postponedAccounting', source: 'pa1 (hardcoded 0 — no PA tracking)', rawVal: `€${pa1c.toFixed(2)}`, xmlVal: String(pa1Int), note: '⚠ ENGINE GAP: no PA-import journal tracking — verify manually',                  flag: true, isGap: true },
+    { attr: 'postponedAccounting', source: 'PA1 box (manual entry)',         rawVal: `€${pa1c.toFixed(2)}`, xmlVal: String(pa1Int),   note: 'manually entered — not auto-computed from transactions',                               flag: false, isManual: true },
     { attr: 'formversion',         source: 'fixed constant',                rawVal: '—',               xmlVal: '1',              note: 'always "1" per schema',                                                                      flag: false },
     { attr: 'language',            source: 'fixed constant',                rawVal: '—',               xmlVal: 'E',              note: 'English',                                                                                    flag: false },
     { attr: 'currency',            source: 'fixed constant',                rawVal: '—',               xmlVal: 'E',              note: 'Euro — always E',                                                                            flag: false },
@@ -4292,6 +4291,11 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
   const [e2,  setE2]  = useState('0');
   const [es1, setEs1] = useState('0');
   const [es2, setEs2] = useState('0');
+  // Postponed Accounting (PA1) — manually entered, same reasoning as E1/E2/ES1/ES2: no
+  // journal/vat_code path exists for this (there's no cash leg to tag a code onto — the whole
+  // point of the scheme is that no VAT is paid to Revenue at the point of import).
+  const [paCustomsValue, setPaCustomsValue] = useState('0');
+  const [paVatAmount,    setPaVatAmount]    = useState('0');
   const [drillOpen,    setDrillOpen]    = useState(null);
   const [showExc,      setShowExc]      = useState(false);
   const [showRC,          setShowRC]          = useState(false);
@@ -4340,7 +4344,7 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
   // Load filed-period index on mount (for badges)
   useEffect(() => {
     if (!company?.id) return;
-    supabase.from('vat_returns').select('period_val, status, t1, t2, t3, t4, e1, e2, es1, es2, filed_at')
+    supabase.from('vat_returns').select('period_val, status, t1, t2, t3, t4, e1, e2, es1, es2, pa1, figures, filed_at')
       .eq('company_id', company.id)
       .then(({ data }) => {
         if (!data) return;
@@ -4502,8 +4506,13 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
       setApDetail(apRows);
 
       const fr = filedMap[selVal];
-      if (fr) { setE1(String(fr.e1 ?? 0)); setE2(String(fr.e2 ?? 0)); setEs1(String(fr.es1 ?? 0)); setEs2(String(fr.es2 ?? 0)); }
-      else     { setE1('0'); setE2('0'); setEs1('0'); setEs2('0'); }
+      if (fr) {
+        setE1(String(fr.e1 ?? 0)); setE2(String(fr.e2 ?? 0)); setEs1(String(fr.es1 ?? 0)); setEs2(String(fr.es2 ?? 0));
+        setPaCustomsValue(String(fr.pa1 ?? 0)); setPaVatAmount(String(fr.figures?.paVat ?? 0));
+      } else {
+        setE1('0'); setE2('0'); setEs1('0'); setEs2('0');
+        setPaCustomsValue('0'); setPaVatAmount('0');
+      }
       setLoading(false);
     })();
   }, [company?.id, selVal]); // eslint-disable-line
@@ -4535,14 +4544,17 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
     t2 += vat;
   }
 
-  // PA1: customs value of goods imported under postponed accounting — purchase-side only, never from sales.
-  // No PA-import-coded journals → PA1 = 0 (correct for domestic-only data).
-  const pa1DrillRows = []; // future: import journals with a dedicated PA vat_code
-  const pa1 = 0;
-  // Sales-guard: assert no t1 (sales-side) row can ever reach pa1DrillRows
-  if (pa1DrillRows.some(r => t1DrillRows.find(s => s.id === r.id))) {
-    console.error('[VAT3 PA1-guard] FAIL: sales-side journal in PA1 drill rows — coding error');
-  }
+  // Postponed Accounting — manually entered, not journal/vat_code-derived (see EU fields above
+  // for the same reasoning: there's no cash leg to tag a code onto, since the whole point of the
+  // scheme is that no VAT is paid to Revenue at the point of import). paCustomsValue populates
+  // PA1 directly. paVatAmount is added to BOTH t1 and t2 here, before t3/t4 are derived — the
+  // real self-accounting mechanic (declared as due and reclaimed in the same period), which
+  // nets to zero effect on t3/t4 for a fully-taxable trader and only shows up in t3/t4 if input
+  // VAT recovery is restricted.
+  const pa1 = parseFloat(paCustomsValue) || 0;
+  const paVat = parseFloat(paVatAmount) || 0;
+  t1 += paVat;
+  t2 += paVat;
 
   const t3 = Math.max(0, t1 - t2);
   const t4 = Math.max(0, t2 - t1);
@@ -4652,6 +4664,7 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
         adjustments,
         final: { t1: t1Final, t2: t2Final, t3: t3Final, t4: t4Final },
         e1: Number(e1)||0, e2: Number(e2)||0, es1: Number(es1)||0, es2: Number(es2)||0,
+        paVat: round2(paVat),
       },
       status: 'filed', filed_at: new Date().toISOString(),
     };
@@ -4690,6 +4703,7 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
       adjustments,
       final: { t1: t1Final, t2: t2Final, t3: t3Final, t4: t4Final },
       e1: Number(e1)||0, e2: Number(e2)||0, es1: Number(es1)||0, es2: Number(es2)||0,
+      paVat: round2(paVat),
     };
     const { data, error } = await supabase.rpc('request_vat_filing', {
       p_company_id: company.id,
@@ -5440,15 +5454,17 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
             </div>
           )}
 
-          {/* PA1 — postponed accounting imports only */}
-          <div style={{ marginBottom: 12 }}>
-            <VATBox label="PA1" title="Customs value of goods imported (postponed accounting)" value={pa1} color="var(--text-muted)" drill
-              sub="Import/purchase-side only · €0.00 for domestic-only trading · click to confirm" />
+          {/* Postponed Accounting — manually entered, same reasoning as the EU fields below:
+              no journal/vat_code path exists for this (no cash leg to tag a code onto). VAT
+              Amount is added to both T1 and T2 above — nets to zero effect on T3/T4 for a
+              fully-taxable trader, only shows up if input VAT recovery is restricted. */}
+          <div style={{ marginBottom: 4 }}>
+            <div style={{ fontSize: 11, fontWeight: 600, color: "var(--text-muted)", marginBottom: 8, letterSpacing: "0.04em" }}>POSTPONED ACCOUNTING <span style={{ fontWeight: 400, color: "var(--text-faint)" }}>(enter manually if you have goods imported under postponed accounting — 0 for domestic-only)</span></div>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
+              <EUField label="PA1" title="Customs Value of Goods Imported" value={paCustomsValue} onChange={setPaCustomsValue} />
+              <EUField label="PA VAT" title="Postponed VAT — added to both T1 and T2" value={paVatAmount} onChange={setPaVatAmount} />
+            </div>
           </div>
-          {drillOpen === 'PA1' && (
-            <DrillTable title="PA1 — Postponed Accounting Import Detail" rows={pa1DrillRows} mode="vat" expectedSum={pa1}
-              emptyMsg="No import journals coded for postponed accounting in this period. PA1 = €0.00 is correct for domestic-only trading. Sales-side journals are excluded by design." />
-          )}
 
           {/* EU fields — always shown, default 0 for domestic-only */}
           <div style={{ marginBottom: 4 }}>
@@ -5747,8 +5763,7 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
               {/* Phase 1 gap report footer */}
               <div style={{ marginTop: 16, paddingTop: 12, borderTop: '1px solid var(--border)', fontSize: 11, color: 'var(--text-faint)', lineHeight: 1.7 }}>
                 <strong style={{ color: 'var(--text-muted)' }}>Phase 1 gap report</strong> — fields the engine does NOT auto-compute:
-                {' '}<strong>postponedAccounting</strong> (hardcoded 0; no PA-import journal tracking in engine),
-                {' '}<strong>goodsto / goodsfrom / servicesto / servicesfrom</strong> (manually entered in the EU boxes above — not sourced from transactions),
+                {' '}<strong>postponedAccounting, goodsto / goodsfrom / servicesto / servicesfrom</strong> (manually entered in the Postponed Accounting and EU boxes above — not sourced from transactions; postponed VAT is included in T1/T2 above once entered),
                 {' '}<strong>type</strong> (original/supplementary/amended — no engine concept; user-selected above).
                 Revenue v1.5 schema version to be confirmed against softwaretest.ros.ie before treating output as valid.
               </div>
