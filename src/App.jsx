@@ -2105,8 +2105,8 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
             <>
               <p className="ob-title">Opening balances</p>
               <p className="ob-sub">
-                Enter the opening trial balance — usually your client's closing position from their prior
-                accountant, as at the date you're taking over. This is what makes the Balance Sheet, bank
+                Enter your opening trial balance — your business's financial position as at the date you
+                want Ledgrly to start tracking from. This is what makes the Balance Sheet, bank
                 reconciliation and VAT correct from day one. You can set this "as at" date to a recent
                 month-end and import transactions from there forward — you don't need the full year.
               </p>
