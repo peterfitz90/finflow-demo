@@ -4,3 +4,12 @@ node_modules
 .env.local
 .env*.local
 .env*
+
+# Local tooling/session config -- not app source, varies per environment
+.mcp.json
+
+# Supabase CLI's own local temp/cache state
+supabase/.temp/
+
+# One-off local reference exports, not part of the app
+supabase-db-audit-*.pdf
