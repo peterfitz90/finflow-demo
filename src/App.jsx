@@ -149,6 +149,64 @@ const COA_SEED = [
   { code: "6950", name: "Depreciation",                account_type: "expense",   category: "Overheads",  is_system: true },
 ];
 
+// Sole Trader default chart — identical to COA_SEED except: Directors Loan Account (2400) is
+// excluded (a sole trader and their business aren't legally distinct persons, so there's no one
+// to "loan" money to — that relationship's entire economic substance is just Capital Account
+// movements), and the equity pair is replaced with Capital Account (3200) / Drawings (3300)
+// instead of Share Capital (3000) / Retained Earnings (3100) — new codes, not the same codes
+// relabeled, since GL Reports' Balance Sheet tab has hardcoded "Share Capital"/"Retained
+// Earnings" labels keyed off those exact code ranges regardless of the account's actual name
+// (tracked as a separate, not-yet-built gap — see Stage 3 write-up).
+const COA_SEED_SOLE_TRADER = [
+  { code: "1000", name: "Bank — Current Account",  account_type: "asset",     category: "Current Assets",        is_system: true },
+  { code: "1100", name: "Trade Debtors",            account_type: "asset",     category: "Current Assets",        is_system: true },
+  { code: "1200", name: "Prepayments",              account_type: "asset",     category: "Current Assets",        is_system: true },
+  { code: "1250", name: "Supplier Prepayments",     account_type: "asset",     category: "Current Assets",        is_system: true },
+  { code: "1300", name: "Stripe Clearing",          account_type: "asset",     category: "Current Assets",        is_system: true },
+  { code: "1500", name: "Fixed Assets",                          account_type: "asset",   category: "Fixed Assets", is_system: true },
+  { code: "1501", name: "Accum Dep — Fixed Assets",           account_type: "asset",   category: "Fixed Assets", is_system: true },
+  { code: "1510", name: "Plant & Machinery",                  account_type: "asset",   category: "Fixed Assets", is_system: true },
+  { code: "1511", name: "Accum Dep — Plant & Machinery",      account_type: "asset",   category: "Fixed Assets", is_system: true },
+  { code: "1520", name: "Fixtures & Fittings",                account_type: "asset",   category: "Fixed Assets", is_system: true },
+  { code: "1521", name: "Accum Dep — Fixtures & Fittings",   account_type: "asset",   category: "Fixed Assets", is_system: true },
+  { code: "1530", name: "Computer Equipment",                 account_type: "asset",   category: "Fixed Assets", is_system: true },
+  { code: "1531", name: "Accum Dep — Computer Equipment",    account_type: "asset",   category: "Fixed Assets", is_system: true },
+  { code: "1540", name: "Motor Vehicles",                     account_type: "asset",   category: "Fixed Assets", is_system: true },
+  { code: "1541", name: "Accum Dep — Motor Vehicles",         account_type: "asset",   category: "Fixed Assets", is_system: true },
+  { code: "1600", name: "VAT Receivable",           account_type: "asset",     category: "Current Assets",        is_system: true },
+  { code: "2000", name: "Trade Creditors",          account_type: "liability", category: "Current Liabilities",   is_system: true },
+  { code: "2100", name: "VAT Control",              account_type: "liability", category: "Current Liabilities",   is_system: true },
+  { code: "2200", name: "PAYE & PRSI Payable",      account_type: "liability", category: "Current Liabilities",   is_system: true },
+  { code: "2250", name: "Net Wages Payable",        account_type: "liability", category: "Current Liabilities",   is_system: true },
+  { code: "2260", name: "Pension Payable",          account_type: "liability", category: "Current Liabilities",   is_system: true },
+  { code: "2300", name: "Accruals",                 account_type: "liability", category: "Current Liabilities",   is_system: true },
+  { code: "2350", name: "Customer Advance Payments",account_type: "liability", category: "Current Liabilities",   is_system: true },
+  { code: "2500", name: "Bank Loan",                account_type: "liability", category: "Long-term Liabilities", is_system: true },
+  { code: "3200", name: "Capital Account",          account_type: "equity",    category: "Equity",                is_system: true },
+  { code: "3300", name: "Drawings",                 account_type: "equity",    category: "Equity",                is_system: true },
+  { code: "4000", name: "Sales Revenue",            account_type: "income",    category: "Income",                is_system: true },
+  { code: "4100", name: "Service Income",           account_type: "income",    category: "Income",                is_system: true },
+  { code: "4200", name: "Other Income",             account_type: "income",    category: "Income",                is_system: true },
+  { code: "4300", name: "Interest Received",        account_type: "income",    category: "Income",                is_system: true },
+  { code: "5000", name: "Cost of Sales",            account_type: "expense",   category: "Cost of Sales",         is_system: true },
+  { code: "5100", name: "Materials & Supplies",     account_type: "expense",   category: "Cost of Sales",         is_system: true },
+  { code: "5200", name: "Subcontractor Costs",      account_type: "expense",   category: "Cost of Sales",         is_system: true },
+  { code: "5300", name: "Direct Labour",            account_type: "expense",   category: "Cost of Sales",         is_system: true },
+  { code: "6000", name: "Payroll & PAYE",           account_type: "expense",   category: "Overheads",             is_system: true },
+  { code: "6100", name: "Rent & Rates",             account_type: "expense",   category: "Overheads",             is_system: true },
+  { code: "6200", name: "Motor & Travel",           account_type: "expense",   category: "Overheads",             is_system: true },
+  { code: "6300", name: "Telecoms & IT",            account_type: "expense",   category: "Overheads",             is_system: true },
+  { code: "6400", name: "Professional Fees",        account_type: "expense",   category: "Overheads",             is_system: true },
+  { code: "6500", name: "Bank Charges & Interest",  account_type: "expense",   category: "Overheads",             is_system: true },
+  { code: "6600", name: "Sundry Expenses",          account_type: "expense",   category: "Overheads",             is_system: true },
+  { code: "6750", name: "Settlement Rounding",      account_type: "expense",   category: "Overheads",             is_system: true },
+  { code: "6700", name: "Marketing & Advertising",  account_type: "expense",   category: "Overheads",             is_system: true },
+  { code: "6800", name: "Insurance",                account_type: "expense",   category: "Overheads",             is_system: true },
+  { code: "6900", name: "Repairs & Maintenance",       account_type: "expense",   category: "Overheads",  is_system: true },
+  { code: "6910", name: "Loss on Disposal of Assets", account_type: "expense",   category: "Overheads",  is_system: true },
+  { code: "6950", name: "Depreciation",                account_type: "expense",   category: "Overheads",  is_system: true },
+];
+
 const COA_STATIC_FALLBACK = COA_SEED.map((a, i) => ({
   ...a, id: `static-${i}`, company_id: null, is_active: true, created_at: null, _static: true,
 }));
@@ -187,10 +245,15 @@ function useChartOfAccounts(companyId) {
         } else if (data && data.length > 0) {
           setAccounts(data);
         } else {
-          console.log('[CoA] empty table — seeding', COA_SEED.length, 'system accounts via upsert');
+          // Empty table — first real use for this company. Look up company_type here (not
+          // added to the hook's own params) so all existing call sites are unaffected; this
+          // query only ever runs on this rare first-seed path, never on a normal load.
+          const { data: co } = await db.from("companies").select("company_type").eq("id", companyId).single();
+          const seedSet = co?.company_type === 'Sole Trader' ? COA_SEED_SOLE_TRADER : COA_SEED;
+          console.log('[CoA] empty table — seeding', seedSet.length, `system accounts (${co?.company_type || 'unknown type'}) via upsert`);
           const { data: seeded, error: seedErr } = await db
             .from("chart_of_accounts")
-            .upsert(COA_SEED.map(a => ({ ...a, company_id: companyId })), { onConflict: 'company_id,code' })
+            .upsert(seedSet.map(a => ({ ...a, company_id: companyId })), { onConflict: 'company_id,code' })
             .select();
           console.log('[CoA] seed →', seeded?.length ?? 'null', 'rows | error:', seedErr?.message ?? 'none');
           if (cancelled) return;
