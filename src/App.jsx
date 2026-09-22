@@ -4267,6 +4267,7 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
   const [existingRequest,  setExistingRequest]  = useState(null); // most recent vat_filing_requests row for selVal
   const [requesting,       setRequesting]       = useState(false);
   const [requestError,     setRequestError]     = useState(null);
+  const [liveVatControlBalance, setLiveVatControlBalance] = useState(null); // accountant drift check
 
   const vatPeriod  = vatPeriods.find(p => p.val === selVal) ?? vatPeriods[0];
   const filedReturn = filedMap[selVal] ?? null;
@@ -4291,15 +4292,29 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
     getLockedPeriods(company.id).then(setBizLockedPeriods).catch(() => {});
   }, [company?.id, isBusinessOwner]); // eslint-disable-line
 
-  // business_owner: most recent filing request for the selected period, if any
+  // Most recent filing request for the selected period, if any — read by business_owner (its
+  // own request state) and accountant (the review/drift card below) alike; RLS allows both.
   useEffect(() => {
-    if (!company?.id || !isBusinessOwner || !selVal) { setExistingRequest(null); return; }
+    if (!company?.id || !selVal) { setExistingRequest(null); return; }
     supabase.from('vat_filing_requests')
       .select('status, requested_at, figures, vat_control_balance, vat_control_delta')
       .eq('company_id', company.id).eq('period_val', selVal)
       .order('requested_at', { ascending: false }).limit(1)
       .then(({ data }) => setExistingRequest(data?.[0] ?? null));
   }, [company?.id, isBusinessOwner, selVal]); // eslint-disable-line
+
+  // Accountant only: live VAT-control balance for the drift comparison against a pending
+  // request's snapshot. Same formula as fetchNominalBalanceAsOf (debit-sum minus credit-sum) —
+  // deliberately not the ad hoc, opposite-sign number from the earlier investigation pass.
+  useEffect(() => {
+    if (isBusinessOwner || !company?.id || !vatPeriod?.end || existingRequest?.status !== 'pending') {
+      setLiveVatControlBalance(null);
+      return;
+    }
+    let cancelled = false;
+    fetchNominalBalanceAsOf(company.id, '2100', vatPeriod.end).then(bal => { if (!cancelled) setLiveVatControlBalance(bal); });
+    return () => { cancelled = true; };
+  }, [isBusinessOwner, company?.id, vatPeriod?.end, existingRequest?.status, existingRequest?.requested_at]); // eslint-disable-line
 
   // Load journals + pending bills for selected period; restore EU fields from any filed return
   useEffect(() => {
@@ -4511,6 +4526,20 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
   const hasPendingRequest = existingRequest?.status === 'pending';
   const canRequest = !isBizLocked && hardBlockCount === 0 && !hasPendingRequest;
 
+  // Accountant review — snapshot (at request time) vs live re-fetch, to surface drift from
+  // journals posted after the business_owner's request (e.g. a late bill approval).
+  const reqFinal = existingRequest?.figures?.final ?? null;
+  const liveVatControlDeltaNow = liveVatControlBalance != null ? round2(liveVatControlBalance - (t3Final - t4Final)) : null;
+  const filingDrift = (!isBusinessOwner && hasPendingRequest && reqFinal) ? {
+    t1: round2(reqFinal.t1) !== t1Final,
+    t2: round2(reqFinal.t2) !== t2Final,
+    t3: round2(reqFinal.t3) !== t3Final,
+    t4: round2(reqFinal.t4) !== t4Final,
+    vatControl: liveVatControlBalance != null && existingRequest.vat_control_balance != null
+      && round2(liveVatControlBalance) !== round2(Number(existingRequest.vat_control_balance)),
+  } : null;
+  const hasFilingDrift = !!filingDrift && (filingDrift.t1 || filingDrift.t2 || filingDrift.t3 || filingDrift.t4 || filingDrift.vatControl);
+
   const xmlPreview = showXmlPanel
     ? validateVAT3({ company, vatPeriod, t1, t2, e1, e2, es1, es2, pa1, returnType: xmlReturnType })
     : null;
@@ -4562,6 +4591,11 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
       // or fails the filing itself if the log call errors.
       supabase.rpc('log_vat_refile', { p_company_id: company.id, p_period_val: selVal })
         .then(({ error: logErr }) => { if (logErr) console.warn('[vat] log_vat_refile failed:', logErr.message); });
+      // Best-effort: flip a matching pending filing request to 'filed'. No-op if none exists
+      // (e.g. the accountant filed without a prior Request Filing step) — never blocks filing.
+      supabase.rpc('resolve_vat_filing_request', { p_company_id: company.id, p_period_val: selVal })
+        .then(({ error: resErr }) => { if (resErr) console.warn('[vat] resolve_vat_filing_request failed:', resErr.message); });
+      setExistingRequest(prev => (prev && prev.status === 'pending') ? { ...prev, status: 'filed' } : prev);
     }
     setMarkingFiled(false);
   };
@@ -5405,6 +5439,69 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
                   </table>
                 </div>
               )}
+            </div>
+          )}
+
+          {/* Filing request review — accountant-only. Shows the business_owner's snapshot
+              (at request time) beside a live re-fetch, so a late-posted journal (e.g. a bill
+              approved after the request) is visible as drift before the accountant files. */}
+          {!isBusinessOwner && hasPendingRequest && reqFinal && (
+            <div className="card" style={{ marginBottom: 14, borderLeft: hasFilingDrift ? "4px solid var(--danger)" : "4px solid var(--accent, #4a9eff)" }}>
+              <div className="card-header">
+                <span className="card-title" style={{ color: hasFilingDrift ? "var(--danger)" : undefined }}>
+                  {hasFilingDrift ? "⚠ Filing Requested — figures have changed since request" : "Filing Requested — awaiting review"}
+                </span>
+                <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                  Requested {existingRequest?.requested_at ? new Date(existingRequest.requested_at).toLocaleString('en-IE') : ''}
+                </span>
+              </div>
+              <div style={{ padding: "10px 16px 16px" }}>
+                <table className="gl-table">
+                  <thead>
+                    <tr><th></th><th className="r">At Request</th><th className="r">Live (now)</th></tr>
+                  </thead>
+                  <tbody>
+                    <tr>
+                      <td>T1 — VAT on Sales</td>
+                      <td className="r">{fmtEUR(reqFinal.t1)}</td>
+                      <td className="r" style={{ color: filingDrift?.t1 ? "var(--danger)" : undefined, fontWeight: filingDrift?.t1 ? 700 : undefined }}>{fmtEUR(t1Final)}</td>
+                    </tr>
+                    <tr>
+                      <td>T2 — VAT on Purchases</td>
+                      <td className="r">{fmtEUR(reqFinal.t2)}</td>
+                      <td className="r" style={{ color: filingDrift?.t2 ? "var(--danger)" : undefined, fontWeight: filingDrift?.t2 ? 700 : undefined }}>{fmtEUR(t2Final)}</td>
+                    </tr>
+                    <tr>
+                      <td>T3 — Net Payable</td>
+                      <td className="r">{fmtEUR(reqFinal.t3)}</td>
+                      <td className="r" style={{ color: filingDrift?.t3 ? "var(--danger)" : undefined, fontWeight: filingDrift?.t3 ? 700 : undefined }}>{fmtEUR(t3Final)}</td>
+                    </tr>
+                    <tr>
+                      <td>T4 — Net Repayable</td>
+                      <td className="r">{fmtEUR(reqFinal.t4)}</td>
+                      <td className="r" style={{ color: filingDrift?.t4 ? "var(--danger)" : undefined, fontWeight: filingDrift?.t4 ? 700 : undefined }}>{fmtEUR(t4Final)}</td>
+                    </tr>
+                    <tr>
+                      <td>VAT Control (nominal 2100, debit − credit, as of period end)</td>
+                      <td className="r">{existingRequest.vat_control_balance != null ? fmtEUR(Number(existingRequest.vat_control_balance)) : '—'}</td>
+                      <td className="r" style={{ color: filingDrift?.vatControl ? "var(--danger)" : undefined, fontWeight: filingDrift?.vatControl ? 700 : undefined }}>
+                        {liveVatControlBalance != null ? fmtEUR(liveVatControlBalance) : '…'}
+                      </td>
+                    </tr>
+                    <tr>
+                      <td>VAT Control minus (T3 − T4)</td>
+                      <td className="r">{existingRequest.vat_control_delta != null ? fmtEUR(Number(existingRequest.vat_control_delta)) : '—'}</td>
+                      <td className="r">{liveVatControlDeltaNow != null ? fmtEUR(liveVatControlDeltaNow) : '…'}</td>
+                    </tr>
+                  </tbody>
+                </table>
+                {hasFilingDrift && (
+                  <div style={{ marginTop: 10, fontSize: 11, color: "var(--danger)" }}>
+                    ⚠ One or more figures changed after this request was made — likely a journal posted into the period since
+                    (e.g. a bill approved late). Review the numbers above before filing.
+                  </div>
+                )}
+              </div>
             </div>
           )}
 
