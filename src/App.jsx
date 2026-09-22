@@ -3806,13 +3806,6 @@ function APInvoices({ companyName = "Company", company, onNavigate, isBusinessOw
   }));
   const agedTotal = ageBuckets.reduce((s, b) => s + b.amount, 0);
 
-  const statusPill = (s) => ({
-    paid:     ["var(--teal)",  "rgba(29,107,114,0.1)"],
-    approved: ["var(--text-muted)",  "var(--surface-2)"],
-    pending:  ["var(--gold)",  "rgba(184,134,11,0.1)"],
-    disputed: ["var(--red)",   "rgba(139,32,32,0.1)"],
-  }[s] || ["var(--dim)", "var(--surface2)"]);
-
   const selInv = invoices.find((i) => i.id === selected);
 
   return (
@@ -4031,7 +4024,6 @@ function APInvoices({ companyName = "Company", company, onNavigate, isBusinessOw
             <tbody>
               {invoices.map((inv) => {
                 const d = daysFromToday(inv.due_date);
-                const [sc, sbg] = statusPill(inv.status);
                 return (
                   <tr key={inv.id} style={{ cursor: "pointer", opacity: (inv.status === "paid" || inv.status === "awaiting_bank_match") ? 0.52 : 1 }}
                     onClick={() => setSelected(selected === inv.id ? null : inv.id)}>
@@ -4048,9 +4040,7 @@ function APInvoices({ companyName = "Company", company, onNavigate, isBusinessOw
                           <div className="inv-days-bar"><div className="inv-days-fill" style={{ width: `${Math.min(Math.abs(d) / 90 * 100, 100)}%`, background: daysCol(d) }} /></div>
                           </>}
                     </td>
-                    <td><span className="pill" style={{ color: sc, background: sbg }}>
-                      {inv.status === "awaiting_bank_match" ? "paid — awaiting bank match" : inv.status}
-                    </span></td>
+                    <td><SPill status={inv.status} /></td>
                     <td style={{ fontSize: 11, color: "var(--dim)" }}>{inv.payment_method}</td>
                     <td className="r mono" style={{ fontWeight: 600 }}>{fmt(inv.amount)}</td>
                     <td onClick={(e) => e.stopPropagation()} style={{ paddingRight: 10 }}>
@@ -6249,11 +6239,6 @@ function Contracts({ companyName = "Company", companyId }) {
   const totalValue  = active.reduce((s, c) => s + (c.value || 0), 0);
   const renewingSoon = active.filter(c => { const d = daysFrom(c.renewal_date); return d !== null && d >= 0 && d <= 30; });
 
-  const statusPill = s => ({
-    active:["var(--teal)","rgba(29,107,114,0.1)"], pending:["var(--gold)","rgba(184,134,11,0.1)"],
-    expired:["var(--red)","rgba(220,38,38,0.1)"],  terminated:["var(--dim)","rgba(107,114,128,0.09)"],
-  }[s] || ["var(--muted)","var(--surface2)"]);
-
   const FormRow = ({ c, ef, setEf }) => (
     <>
       <div className="f-row">
@@ -6366,7 +6351,6 @@ function Contracts({ companyName = "Company", companyId }) {
                 const rd = daysFrom(c.renewal_date), ed = daysFrom(c.end_date);
                 const dd = rd !== null ? rd : ed;
                 const dc = dd === null ? "var(--dim)" : dd < 0 ? "var(--red)" : dd <= 30 ? "var(--gold)" : "var(--teal)";
-                const [sc,sbg] = statusPill(c.status);
                 return (
                   <tr key={c.id} style={{cursor:"pointer",opacity:c.status==="terminated"?0.5:1}}
                     onClick={() => setSelected(selected===c.id ? null : c.id)}>
@@ -6381,7 +6365,7 @@ function Contracts({ companyName = "Company", companyId }) {
                         <div className="inv-days-bar"><div className="inv-days-fill" style={{width:`${Math.min(Math.abs(dd)/90*100,100)}%`,background:dc}}/></div></>
                       ) : <span style={{fontSize:11,color:"var(--dim)"}}>—</span>}
                     </td>
-                    <td><span className="pill" style={{color:sc,background:sbg}}>{c.status}</span></td>
+                    <td><SPill status={c.status} /></td>
                     <td className="r mono" style={{fontWeight:600}}>{c.value ? fmt(c.value) : "—"}</td>
                     <td onClick={e=>e.stopPropagation()} style={{paddingRight:10}}>
                       <div style={{display:"flex",gap:5}}>
@@ -6443,18 +6427,36 @@ function Contracts({ companyName = "Company", companyId }) {
 }
 
 function SPill({ status }) {
+  const RED = { bg: "rgba(139,32,32,0.09)", color: "#8b2020" };
+  const GREEN = { bg: "rgba(26,92,53,0.09)", color: "#1a5c35" };
+  const GOLD = { bg: "rgba(184,134,11,0.09)", color: "#b8860b" };
+  const GREY = { bg: "rgba(107,101,96,0.09)", color: "#6b6560" };
+  const NAVY = { bg: "rgba(26,39,68,0.07)", color: "#1a2744" };
+  // Plain-English label for every status value used across the app (Journals, AP Invoices,
+  // Expenses, Contracts) — one shared map so a new status only ever needs translating here.
   const m = {
-    escalated: { bg: "rgba(139,32,32,0.09)", color: "#8b2020" },
-    chased: { bg: "rgba(26,92,53,0.09)", color: "#1a5c35" },
-    pending: { bg: "rgba(26,39,68,0.07)", color: "#1a2744" },
-    "prep-ready": { bg: "rgba(26,92,53,0.09)", color: "#1a5c35" },
-    "action-needed": { bg: "rgba(139,32,32,0.09)", color: "#8b2020" },
-    upcoming: { bg: "rgba(107,101,96,0.09)", color: "#6b6560" },
-    posted: { bg: "rgba(26,92,53,0.09)", color: "#1a5c35" },
-    draft: { bg: "rgba(184,134,11,0.09)", color: "#b8860b" },
+    escalated: { ...RED, label: "Escalated" },
+    chased: { ...GREEN, label: "Chased" },
+    pending: { ...NAVY, label: "Pending" },
+    "prep-ready": { ...GREEN, label: "Prep ready" },
+    "action-needed": { ...RED, label: "Action needed" },
+    upcoming: { ...GREY, label: "Upcoming" },
+    posted: { ...GREEN, label: "Posted" },
+    draft: { ...GOLD, label: "Draft" },
+    disputed: { ...RED, label: "Disputed" },
+    paid: { ...GREEN, label: "Paid" },
+    awaiting_bank_match: { ...GREEN, label: "Paid — awaiting bank match" },
+    approved: { ...GREEN, label: "Approved" },
+    needs_review: { ...GOLD, label: "Needs review" },
+    rejected: { ...RED, label: "Rejected" },
+    submitted: { ...GOLD, label: "Submitted" },
+    active: { ...GREEN, label: "Active" },
+    expired: { ...GREY, label: "Expired" },
+    terminated: { ...RED, label: "Terminated" },
   };
-  const s = m[status] || m.pending;
-  return <span className="pill" style={{ background: s.bg, color: s.color }}>{status.replace("-", " ")}</span>;
+  const fallbackLabel = status ? status.replace(/_/g, " ").replace(/\b\w/g, c => c.toUpperCase()) : "";
+  const s = m[status] || { ...NAVY, label: fallbackLabel };
+  return <span className="pill" style={{ background: s.bg, color: s.color }}>{s.label}</span>;
 }
 
 // Fetches all filed VAT return periods for a company (cheap — at most ~24 rows/year).
@@ -16936,14 +16938,6 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
   const approvedMonth   = displayed.filter(e => ["approved","posted"].includes(e.status) && (e.receipt_date||"").startsWith(thisMonth)).length;
   const rejectedCount   = displayed.filter(e => e.status === "rejected").length;
 
-  const statusPill = s => ({
-    draft:    ["var(--dim)",   "rgba(107,114,128,0.09)"],
-    submitted:["var(--gold)",  "rgba(184,134,11,0.1)"],
-    approved: ["var(--teal)",  "rgba(29,107,114,0.1)"],
-    rejected: ["var(--red)",   "rgba(220,38,38,0.1)"],
-    posted:   ["var(--green)", "rgba(22,163,74,0.1)"],
-  }[s] || ["var(--dim)","var(--surface2)"]);
-
   const acctOptions = coaAccounts.filter(a => a.is_active !== false).length > 0
     ? coaAccounts.filter(a => a.is_active !== false) : GL_ACCOUNTS;
 
@@ -17069,7 +17063,6 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
             </thead>
             <tbody>
               {displayed.map(e => {
-                const [sc,sbg] = statusPill(e.status);
                 return (
                   <tr key={e.id} style={{cursor:"pointer"}} onClick={()=>{setSelected(selected===e.id?null:e.id);if(selected===e.id)setMatchData(null);}}>
                     <td className="mono" style={{fontSize:11}}>{fmtD(e.receipt_date)}</td>
@@ -17078,7 +17071,7 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
                     <td style={{fontSize:12,color:"var(--muted)",maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.description||"—"}</td>
                     <td style={{fontSize:11,color:"var(--dim)",fontFamily:"Source Code Pro,monospace"}}>{e.nominal_account}</td>
                     <td style={{fontSize:11}}>{pmIcon(e.payment_method)} <span style={{color:"var(--dim)",fontSize:10}}>{e.payment_method?.replace(/_/g," ")}</span></td>
-                    <td><span className="pill" style={{color:sc,background:sbg}}>{e.status}</span></td>
+                    <td><SPill status={e.status} /></td>
                     <td className="r mono" style={{fontWeight:600}}>{fmt(e.amount)}</td>
                     <td onClick={ev=>ev.stopPropagation()} style={{paddingRight:8}}>
                       <div style={{display:"flex",gap:4,flexWrap:"nowrap"}}>
