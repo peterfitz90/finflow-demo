@@ -5701,129 +5701,6 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
   );
 }
 
-function VATReport({ company, onClose }) {
-  const vatPeriods = getVATPeriods(company?.vat_period || 'bimonthly');
-  const [loading, setLoading]                   = useState(true);
-  const [journals, setJournals]                 = useState([]);
-  const [loadErr, setLoadErr]                   = useState(null);
-  const [selectedVal, setSelectedVal]           = useState(vatPeriods[0]?.val);
-  const [periodLoading, setPeriodLoading]       = useState(false);
-
-  const vatPeriod = vatPeriods.find(p => p.val === selectedVal) || vatPeriods[0];
-
-  useEffect(() => {
-    if (!company?.id || !vatPeriod) { setLoading(false); return; }
-    (async () => {
-      setLoading(true); setLoadErr(null);
-      const { data, error } = await supabase.from('journals')
-        .select('*').eq('company_id', company.id)
-        .gte('date', vatPeriod.start).lte('date', vatPeriod.end).order('date');
-      if (error) { setLoadErr(error.message); setLoading(false); setPeriodLoading(false); return; }
-      setJournals(data || []);
-      setLoading(false);
-      setPeriodLoading(false);
-    })();
-  }, [company?.id, selectedVal]);
-
-  const handleVatPeriodChange = (val) => { setPeriodLoading(true); setSelectedVal(val); };
-
-  let t1 = 0, t2 = 0, e1 = 0, e2 = 0;
-  journals.forEach(j => {
-    const amt = Number(j.amount);
-    if (j.credit_account === '2100') t1 += amt;
-    if (j.debit_account  === '2100') t2 += amt;
-    if (j.credit_account >= '4000' && j.credit_account < '5000') e1 += amt;
-    if (j.debit_account  >= '4000' && j.debit_account  < '5000') e1 -= amt;
-    if (j.debit_account  >= '5000' && j.debit_account  < '7000') e2 += amt;
-    if (j.credit_account >= '5000' && j.credit_account < '7000') e2 -= amt;
-  });
-  const t3 = t1 - t2;
-
-  const exportDate = fmtIE(new Date().toISOString().slice(0, 10));
-  const slug = vatPeriod.label.replace(/\//g, "-").replace(/ /g, "-");
-
-  const exportCSV = () => downloadCSV(`vat3-${slug}.csv`, [
-    ["Ledgrly — VAT3 Return Summary", company?.name || "Company", vatPeriod.label],
-    ["VAT Period", `${vatPeriod.start} to ${vatPeriod.end}`],
-    ["Due Date", vatPeriod.due],
-    ["Exported", exportDate],
-    [],
-    ["Box", "Description", "Amount (€)"],
-    ["T1", "VAT on Sales (Output VAT)", fmtEUR(t1)],
-    ["T2", "VAT on Purchases (Input VAT)", fmtEUR(t2)],
-    ["T3", "Net VAT Payable (T1 − T2)", fmtEUR(t3)],
-    ["E1", "Total Sales (excl. VAT)", fmtEUR(e1)],
-    ["E2", "Total Purchases (excl. VAT)", fmtEUR(e2)],
-    [],
-    ["Note: This is a summary for review purposes. Please verify against your ROS account before filing."],
-  ]);
-
-  const VATBox = ({ label, title, value, color, sub }) => (
-    <div style={{ background: "var(--white)", border: "1px solid var(--border)", borderRadius: "var(--radius)", padding: "16px 20px", position: "relative", overflow: "hidden", boxShadow: "var(--shadow-sm)" }}>
-      <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: color, borderRadius: "var(--radius) var(--radius) 0 0" }} />
-      <div style={{ fontSize: 10, fontFamily: "'Source Code Pro', monospace", fontWeight: 700, color: "var(--dim)", letterSpacing: "0.08em", marginBottom: 3 }}>{label}</div>
-      <div style={{ fontSize: 11, color: "var(--muted)", marginBottom: 10, lineHeight: 1.4 }}>{title}</div>
-      <div style={{ fontSize: 24, fontWeight: 700, color, lineHeight: 1, fontVariantNumeric: "tabular-nums" }}>{fmtEUR(value)}</div>
-      {sub && <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6 }}>{sub}</div>}
-    </div>
-  );
-
-  return (
-    <div className="card" style={{ marginBottom: 14, borderLeft: "4px solid var(--teal)" }}>
-      <div className="card-header">
-        <div>
-          <span className="card-title">VAT3 Return Summary</span>
-          <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 2, fontFamily: "'Source Code Pro', monospace" }}>
-            Due: {vatPeriod.due}
-          </div>
-        </div>
-        <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
-          <select
-            value={selectedVal}
-            onChange={e => handleVatPeriodChange(e.target.value)}
-            style={{ fontSize: 11, fontFamily: "Source Code Pro, monospace", padding: "3px 7px", borderRadius: 6, border: "1px solid var(--border)", background: "var(--surface)", color: "var(--text)", cursor: "pointer" }}
-          >
-            {vatPeriods.map(p => <option key={p.val} value={p.val}>{p.label}</option>)}
-          </select>
-          {periodLoading && <span style={{ fontSize: 11, color: "var(--dim)", fontFamily: "Source Code Pro, monospace" }}>…</span>}
-          {!loading && <ExportDropdown onCSV={exportCSV} onPrint={() => window.print()} />}
-          <button className="btn btn-s btn-sm" onClick={onClose}>✕ Close</button>
-        </div>
-      </div>
-      <div className="print-only card-body">
-        <div className="print-title">{company?.name || "Company"} — VAT3 Return</div>
-        <div className="print-meta">Period: {vatPeriod.label} · Due: {vatPeriod.due} · Exported: {exportDate}</div>
-      </div>
-      <div className="card-body">
-        {loadErr && <div style={{ marginBottom: 12, fontSize: 12, color: 'var(--danger)', background: 'rgba(220,38,38,0.06)', border: '1px solid rgba(220,38,38,0.2)', borderRadius: 4, padding: '8px 12px' }}>Failed to load journals: {loadErr}</div>}
-        {loading ? (
-          <div style={{ fontSize: 13, color: "var(--dim)", padding: "16px 0" }}>Loading VAT data…</div>
-        ) : (
-          <>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr 1fr", gap: 12, marginBottom: 12 }}>
-              <VATBox label="T1" title="VAT on Sales (Output VAT)" value={t1} color="var(--teal)" />
-              <VATBox label="T2" title="VAT on Purchases (Input VAT)" value={t2} color="var(--gold)" />
-              <VATBox label="T3" title="Net VAT Payable (T1 − T2)" value={t3} color={t3 >= 0 ? "var(--red)" : "var(--green)"} sub={t3 >= 0 ? "Amount due to Revenue" : "Refund due from Revenue"} />
-            </div>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 12, marginBottom: 16 }}>
-              <VATBox label="E1" title="Total Sales (excl. VAT)" value={e1} color="var(--teal)" />
-              <VATBox label="E2" title="Total Purchases (excl. VAT)" value={e2} color="var(--muted)" />
-            </div>
-            {journals.length === 0 && (
-              <div style={{ fontSize: 13, color: "var(--dim)", marginBottom: 12 }}>
-                No journal entries found for {vatPeriod.label}. Post journals to populate VAT figures.
-              </div>
-            )}
-            <div style={{ fontSize: 11, color: "var(--muted)", background: "rgba(184,134,11,0.05)", borderRadius: "var(--radius-sm)", padding: "10px 14px", borderLeft: "3px solid var(--gold)", fontStyle: "italic" }}>
-              ⚠ This is a summary for review purposes only. Please verify all figures against your ROS account before filing.
-            </div>
-          </>
-        )}
-      </div>
-    </div>
-  );
-}
-
 function Compliance({ company, onNavigate }) {
   const [settings, setSettings] = useState({
     vat_period:      company?.vat_period      || 'bimonthly',
@@ -5834,7 +5711,6 @@ function Compliance({ company, onNavigate }) {
   const [editing,  setEditing]  = useState(false);
   const [saving,   setSaving]   = useState(false);
   const [saveErr,  setSaveErr]  = useState(null);
-  const [showVAT,  setShowVAT]  = useState(false);
   const [contractRenewals, setContractRenewals] = useState([]);
 
   useEffect(() => {
@@ -5951,10 +5827,8 @@ function Compliance({ company, onNavigate }) {
           <div style={{ fontSize: 12, color: "var(--muted)" }}>Irish tax and filing deadlines — VAT3 · P30 · CT1 · P35 · CRO</div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
-          <button className="btn btn-p btn-sm" onClick={() => { setShowVAT(v => !v); setEditing(false); }}>
-            {showVAT ? "✕ Close VAT Report" : "⊞ Generate VAT Report"}
-          </button>
-          <button className="btn btn-s" onClick={() => { setEditing(e => !e); setSaveErr(null); setShowVAT(false); }}>⚙ Settings</button>
+          <button className="btn btn-p btn-sm" onClick={() => onNavigate?.('vat-returns')}>⊞ Go to VAT Returns</button>
+          <button className="btn btn-s" onClick={() => { setEditing(e => !e); setSaveErr(null); }}>⚙ Settings</button>
         </div>
       </div>
 
@@ -5994,8 +5868,6 @@ function Compliance({ company, onNavigate }) {
           </div>
         </div>
       )}
-
-      {showVAT && <VATReport company={company} onClose={() => setShowVAT(false)} />}
 
       <div className="card">
         <div className="card-header">
