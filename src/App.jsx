@@ -1623,16 +1623,15 @@ const OB_TYPES = ["Limited Company","Sole Trader","Partnership"];
 // supported" state there rather than being hidden, since the classification itself is still a
 // real, useful thing to record even before that generator exists.
 const FRS_REGIMES = { FRS105: "FRS 105 — Micro-entity", FRS102: "FRS 102 — Small/Medium", FRS101: "FRS 101 — Reduced Disclosure" };
-const OB_STEP_LABELS = ["Company", "Tax", "Accounts", "Checklist", "Bank", "Opening Balances"];
+const OB_STEP_LABELS = ["Company", "Tax", "Accounts", "Bank", "Opening Balances"];
 
 function GettingStartedCard({ company, onOpenStep, onDismiss }) {
   const STEPS = [
     { key: 'company_profile',   num: 1, label: 'Company profile' },
     { key: 'tax_profile',       num: 2, label: 'Tax profile' },
     { key: 'chart_of_accounts', num: 3, label: 'Chart of accounts' },
-    { key: 'checklist',         num: 4, label: 'Month-end checklist' },
-    { key: 'bank_import',       num: 5, label: 'Bank import' },
-    { key: 'opening_balances',  num: 6, label: 'Opening balances' },
+    { key: 'bank_import',       num: 4, label: 'Bank import' },
+    { key: 'opening_balances',  num: 5, label: 'Opening balances' },
   ];
   const done = company?.onboarding_steps || {};
   const doneCount = STEPS.filter(s => done[s.key]).length;
@@ -1668,9 +1667,8 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
   const [wCo, setWCo]                 = useState(company);
   const [saving, setSaving]           = useState(false);
   const [err, setErr]                 = useState(null);
-  const [chkLoading, setChkLoading]   = useState(false);
 
-  // Step 6 — Opening Balances
+  // Step 5 — Opening Balances
   const [obChecking,      setObChecking]      = useState(true);  // checking for an existing OPENING journal
   const [obAlreadyPosted, setObAlreadyPosted] = useState(false);
   const [obJustPosted,    setObJustPosted]    = useState(false);
@@ -1680,7 +1678,7 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
   // "already recorded" instead of showing the entry form pointlessly (or letting a double-post
   // attempt happen only to be rejected deeper in the flow).
   useEffect(() => {
-    if (step !== 6 || !wCo?.id) return;
+    if (step !== 5 || !wCo?.id) return;
     let cancelled = false;
     setObChecking(true);
     supabase.from('journals').select('id').eq('company_id', wCo.id).eq('reference', 'OPENING').limit(1)
@@ -1808,35 +1806,9 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
     } catch (e) { setErr(e.message); }
   };
 
-  const doStep4 = async () => {
-    if (!wCo?.id) return;
-    setChkLoading(true); setErr(null);
-    try {
-      const now = new Date();
-      const periodKey = now.toLocaleDateString('en-IE', { month: 'long', year: 'numeric' });
-      const { count } = await supabase.from('checklists')
-        .select('id', { count: 'exact', head: true })
-        .eq('company_id', wCo.id).eq('period', periodKey);
-      if (!count) {
-        const rows = CHECKLIST_TEMPLATE.flatMap(({ section, items }) =>
-          items.map(item_label => ({
-            company_id: wCo.id, section, item_label, is_auto: false, checked: false, period: periodKey,
-            completion_condition: CONDITION_MAP[item_label] || null,
-          }))
-        );
-        await supabase.from('checklists').insert(rows);
-      }
-      const steps = { ...(wCo.onboarding_steps || {}), checklist: true };
-      const { data, error: stepErr } = await supabase.from('companies').update({ onboarding_steps: steps }).eq('id', wCo.id).select().single();
-      if (stepErr) throw stepErr;
-      advance(5, data);
-    } catch (e) { setErr(e.message); }
-    setChkLoading(false);
-  };
-
-  // Advances from step 5 (Bank) to step 6 (Opening Balances) — no longer completes onboarding;
+  // Advances from step 4 (Bank) to step 5 (Opening Balances) — no longer completes onboarding;
   // that now only happens once the opening-balances decision (post / already-posted / skip) is
-  // resolved in step 6.
+  // resolved in step 5.
   const advanceFromBank = async (bankDone) => {
     if (!wCo?.id || saving) return;
     setSaving(true); setErr(null);
@@ -1845,7 +1817,7 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
       if (bankDone) steps.bank_import = true;
       const { data, error } = await supabase.from('companies').update({ onboarding_steps: steps }).eq('id', wCo.id).select().single();
       if (error) throw error;
-      advance(6, data);
+      advance(5, data);
     } catch (e) { setErr(e.message); }
     setSaving(false);
   };
@@ -1867,9 +1839,8 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
     } catch (e) { setErr(e.message); setSaving(false); }
   };
 
-  const coaCategories = [...new Set(COA_SEED.map(a => a.category))];
   const isNewSignup   = !company;
-  const isWide        = step === 3 || step === 5 || step === 6;
+  const isWide        = step === 4 || step === 5;
 
   const stepBar = (
     <div style={{ display: "flex", gap: 6, justifyContent: "center", marginBottom: 20, alignItems: "center" }}>
@@ -2044,55 +2015,20 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
           {step === 3 && (
             <>
               <p className="ob-title">Default chart of accounts</p>
-              <p className="ob-sub">Ledgrly uses an Irish GAAP chart of accounts. Customise anytime in Settings.</p>
-              <div style={{ maxHeight: 280, overflowY: "auto", border: "1px solid var(--border)", borderRadius: 6, marginBottom: 16 }}>
-                {coaCategories.map(cat => (
-                  <div key={cat}>
-                    <div style={{ padding: "6px 12px", fontSize: 9, fontFamily: "Source Code Pro, monospace", letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--accent)", background: "var(--surface-2)", fontWeight: 600, position: "sticky", top: 0 }}>{cat}</div>
-                    {COA_SEED.filter(a => a.category === cat).map(a => (
-                      <div key={a.code} style={{ display: "flex", alignItems: "center", padding: "5px 12px", borderBottom: "1px solid var(--border)", gap: 10 }}>
-                        <span style={{ fontFamily: "Source Code Pro, monospace", color: "var(--text-faint)", fontSize: 10, width: 38, flexShrink: 0 }}>{a.code}</span>
-                        <span style={{ color: "var(--text)", fontSize: 12, flex: 1 }}>{a.name}</span>
-                        <span style={{ fontSize: 9, color: "var(--text-muted)", textTransform: "capitalize" }}>{a.account_type}</span>
-                      </div>
-                    ))}
-                  </div>
-                ))}
-              </div>
-              <button className="ob-submit" onClick={doStep3}>Use this chart of accounts →</button>
-              <button className="ob-skip" onClick={() => advance(4)}>Customise later →</button>
+              <p className="ob-sub">
+                You'll start with a standard Irish GAAP chart of accounts, ready to use —
+                customise it anytime in Settings → Chart of Accounts.
+              </p>
+              {err && <div style={{ marginBottom: 12, fontSize: 12, color: "var(--red)", background: "rgba(248,113,113,0.08)", border: "1px solid rgba(248,113,113,0.2)", borderRadius: 4, padding: "8px 12px" }}>{err}</div>}
+              <button className="ob-submit" onClick={doStep3}>Continue →</button>
             </>
           )}
 
           {step === 4 && (
             <>
-              <p className="ob-title">Month-end close checklist</p>
-              <p className="ob-sub">Load the default checklist. It auto-completes items like bank reconciliation and VAT returns as you work.</p>
-              <div style={{ maxHeight: 220, overflowY: "auto", background: "var(--surface-2)", border: "1px solid var(--border)", borderRadius: 6, padding: "12px 14px", marginBottom: 18 }}>
-                {CHECKLIST_TEMPLATE.map(({ section, items }) => (
-                  <div key={section} style={{ marginBottom: 10 }}>
-                    <div style={{ fontSize: 9, fontFamily: "Source Code Pro, monospace", letterSpacing: "0.1em", textTransform: "uppercase", color: "var(--accent)", fontWeight: 600, marginBottom: 4 }}>{section}</div>
-                    {items.map(lbl => (
-                      <div key={lbl} style={{ fontSize: 12, color: "var(--text-muted)", padding: "2px 0", display: "flex", gap: 8, alignItems: "center" }}>
-                        <span style={{ color: "var(--text-faint)", fontSize: 10 }}>○</span>{lbl}
-                      </div>
-                    ))}
-                  </div>
-                ))}
-              </div>
-              {err && <div style={{ marginBottom: 12, fontSize: 12, color: "var(--red)", background: "rgba(248,113,113,0.08)", border: "1px solid rgba(248,113,113,0.2)", borderRadius: 4, padding: "8px 12px" }}>{err}</div>}
-              <button className="ob-submit" onClick={doStep4} disabled={chkLoading}>
-                {chkLoading ? "Loading…" : "Load checklist →"}
-              </button>
-              <button className="ob-skip" onClick={() => advance(5)}>Skip for now →</button>
-            </>
-          )}
-
-          {step === 5 && (
-            <>
-              <p className="ob-title">Import bank transactions</p>
-              <p className="ob-sub">Upload a Revolut Business CSV to populate cash flow and kick-start automation. Skip and do this later from Bank Import.</p>
-              {wCo?.id && <BankImport companyId={wCo.id} />}
+              <p className="ob-title">Connect your bank</p>
+              <p className="ob-sub">Connect your bank for automatic transaction feeds, or import a CSV instead — both available below. Skip and do this later from the Bank tab.</p>
+              {wCo?.id && <BankHub companyId={wCo.id} company={wCo} />}
               {err && <div style={{ marginBottom: 12, marginTop: 8, fontSize: 12, color: "var(--red)", background: "rgba(248,113,113,0.08)", border: "1px solid rgba(248,113,113,0.2)", borderRadius: 4, padding: "8px 12px" }}>{err}</div>}
               <button className="ob-submit" onClick={() => advanceFromBank(true)} disabled={saving} style={{ marginTop: 14 }}>
                 {saving ? "Continuing…" : "Continue →"}
@@ -2101,7 +2037,7 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
             </>
           )}
 
-          {step === 6 && (
+          {step === 5 && (
             <>
               <p className="ob-title">Opening balances</p>
               <p className="ob-sub">
@@ -22190,7 +22126,7 @@ export default function App() {
                 />
               ) : (
                 <>
-                  {page === "overview"     && <Overview period={period} selPeriod={selPeriod} setSelPeriod={setSelPeriod} appCurPeriod={appCurPeriod} companyId={company?.id} company={company} onNavigate={setPage} recurringPosted={recurringToast} recurringSkipped={recurringSkipped} onOpenWizard={openWizard} onDismissGetStarted={dismissGettingStarted} />}
+                  {page === "overview"     && <Overview period={period} selPeriod={selPeriod} setSelPeriod={setSelPeriod} appCurPeriod={appCurPeriod} companyId={company?.id} company={company} onNavigate={setPage} recurringPosted={recurringToast} recurringSkipped={recurringSkipped} onOpenWizard={isBusinessOwner ? undefined : openWizard} onDismissGetStarted={dismissGettingStarted} />}
                   {page === "cashflow"     && <CashFlow selPeriod={selPeriod} onNavigate={setPage} companyId={company?.id} company={company} />}
                   {page === "invoices"     && <Invoices companyName={companyName} companyId={company?.id} company={company} onNavigate={setPage} isBusinessOwner={isBusinessOwner} />}
                   {page === "ar-import"   && <BulkARImport companyId={company?.id} />}
