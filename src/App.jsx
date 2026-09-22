@@ -4234,6 +4234,7 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
   const [showRC,          setShowRC]          = useState(false);
   const [pendingBills,    setPendingBills]    = useState([]);
   const [unreconciledBt,  setUnreconciledBt]  = useState([]);
+  const [pendingExpenses, setPendingExpenses] = useState([]); // warning only, not a hard block
   const [draftArInvoices, setDraftArInvoices] = useState([]);
   const [markingFiled, setMarkingFiled] = useState(false);
   const [markError,    setMarkError]    = useState(null);
@@ -4324,17 +4325,20 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
     setShowExc(false);
     setShowRC(false);
     (async () => {
-      const [jRes, apRes, btRes, arRes, arInvRes, apInvRes] = await Promise.all([
+      const [jRes, apRes, btRes, expRes, arRes, arInvRes, apInvRes] = await Promise.all([
         supabase.from('journals')
           .select('id, date, description, reference, debit_account, credit_account, amount, vat_code')
           .eq('company_id', company.id)
           .gte('date', vatPeriod.start)
           .lte('date', vatPeriod.end)
           .order('date'),
+        // Hard block: not yet journalled, so not yet counted in T1-T4. 'pending' is excluded —
+        // those bills are already approved/journalled and correctly counted; only needs_review
+        // means the figures above don't yet reflect this bill.
         supabase.from('ap_invoices')
           .select('id, supplier, invoice_ref, invoice_date, amount, status')
           .eq('company_id', company.id)
-          .in('status', ['pending', 'needs_review'])
+          .eq('status', 'needs_review')
           .gte('invoice_date', vatPeriod.start)
           .lte('invoice_date', vatPeriod.end),
         supabase.from('bank_transactions')
@@ -4343,6 +4347,14 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
           .eq('reconciled', false)
           .gte('date', vatPeriod.start)
           .lte('date', vatPeriod.end),
+        // Warning only, not a hard block — filing can proceed; these just won't be reflected
+        // in this return's figures until approved (which posts the journal).
+        supabase.from('expenses')
+          .select('id, supplier, description, receipt_date, amount, status')
+          .eq('company_id', company.id)
+          .eq('status', 'submitted')
+          .gte('receipt_date', vatPeriod.start)
+          .lte('receipt_date', vatPeriod.end),
         supabase.from('invoices')
           .select('id, invoice_number, client, issue_date')
           .eq('company_id', company.id)
@@ -4371,6 +4383,7 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
       setJournals(jRes.data || []);
       setPendingBills(apRes.data || []);
       setUnreconciledBt(btRes.data || []);
+      setPendingExpenses(expRes.data || []);
       setDraftArInvoices(arRes.data || []);
 
       const r2 = n => Math.round((Number(n) || 0) * 100) / 100;
@@ -5007,17 +5020,31 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
           <div style={{ display: "flex", gap: 16, marginTop: 6, flexWrap: "wrap" }}>
             {unreconciledBt.length > 0 && (
               <span style={{ color: "var(--text-muted)" }}>
-                {unreconciledBt.length} unreconciled bank transaction{unreconciledBt.length !== 1 ? 's' : ''}
+                {unreconciledBt.length} bank transaction{unreconciledBt.length !== 1 ? 's' : ''} still need reviewing before this can be filed
                 {onNavigate && <button className="btn btn-s btn-sm" style={{ fontSize: 10, marginLeft: 6 }} onClick={() => onNavigate('bank-rec')}>Bank Rec →</button>}
               </span>
             )}
             {pendingBills.length > 0 && (
               <span style={{ color: "var(--text-muted)" }}>
-                {pendingBills.length} pending/needs-review AP bill{pendingBills.length !== 1 ? 's' : ''}
+                {pendingBills.length} bill{pendingBills.length !== 1 ? 's' : ''} still need approval before this can be filed
                 {onNavigate && <button className="btn btn-s btn-sm" style={{ fontSize: 10, marginLeft: 6 }} onClick={() => onNavigate('bills')}>Bills →</button>}
               </span>
             )}
           </div>
+        </div>
+      )}
+      {/* Completeness gate — soft-warn (pending expenses). Deliberately NOT part of
+          hardBlockCount — an unreviewed expense isn't yet counted in T1-T4, but unlike bills/
+          bank-rec it doesn't block filing; copy says so explicitly so it isn't mistaken for
+          a blocker. Styled identically to the draft-AR-invoice warning below for the same
+          must-fix-vs-worth-checking visual distinction. */}
+      {!isLocked && !loading && pendingExpenses.length > 0 && (
+        <div style={{ fontSize: 12, background: "rgba(184,134,11,0.06)", border: "1px solid rgba(184,134,11,0.2)", borderLeft: "4px solid var(--warn)", borderRadius: "var(--radius-card)", padding: "10px 14px", marginBottom: 8, color: "var(--text)", display: "flex", alignItems: "center", gap: 8, flexWrap: "wrap" }}>
+          <span style={{ color: "var(--warn)" }}>⚠</span>
+          <span style={{ color: "var(--text-muted)" }}>
+            <strong style={{ color: "var(--text)" }}>{pendingExpenses.length} expense{pendingExpenses.length !== 1 ? 's' : ''} still awaiting approval</strong> — filing can proceed, but {pendingExpenses.length !== 1 ? 'these won\'t' : 'this won\'t'} be reflected in this return's figures.
+          </span>
+          {onNavigate && <button className="btn btn-s btn-sm" style={{ fontSize: 10 }} onClick={() => onNavigate('expenses')}>Expenses →</button>}
         </div>
       )}
       {/* Completeness gate — soft-warn (draft AR invoices) */}
