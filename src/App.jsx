@@ -17967,13 +17967,13 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
     const col = c >= 80 ? 'var(--accent)' : c >= 60 ? 'var(--warn)' : 'var(--text-muted)';
     const bg  = c >= 80 ? 'var(--accent-dim)' : c >= 60 ? 'var(--warn-dim)' : 'var(--surface-2)';
     const brd = c >= 80 ? 'rgba(52,211,153,0.3)' : c >= 60 ? 'rgba(251,191,36,0.3)' : 'var(--border)';
-    return <span style={{ background: bg, border: `1px solid ${brd}`, borderRadius: 'var(--radius-pill)', padding: '1px 8px', fontSize: 10, color: col, fontWeight: 700 }}>{Math.round(c)}%</span>;
+    return <span style={{ background: bg, border: `1px solid ${brd}`, borderRadius: 'var(--radius-pill)', padding: '1px 8px', fontSize: 10, color: col, fontWeight: 700, whiteSpace: 'nowrap' }}>{Math.round(c)}% match confidence</span>;
   };
   const typeTag = (t) => {
-    const map = { invoice: 'AR', ap_invoice: 'AP', journal: 'JNL' };
+    const map = { invoice: 'Sales Invoice', ap_invoice: 'Supplier Invoice', journal: 'Journal Entry' };
     const col = { invoice: 'var(--accent)', ap_invoice: 'var(--danger)', journal: 'var(--info)' };
     const bg  = { invoice: 'var(--accent-dim)', ap_invoice: 'var(--danger-dim)', journal: 'rgba(96,165,250,0.12)' };
-    return <span style={{ background: bg[t] || 'var(--surface-2)', border: `1px solid ${col[t] || 'var(--border)'}40`, borderRadius: 3, padding: '1px 6px', fontSize: 9, fontWeight: 700, letterSpacing: '0.06em', color: col[t] || 'var(--text-muted)' }}>{map[t] || t}</span>;
+    return <span style={{ background: bg[t] || 'var(--surface-2)', border: `1px solid ${col[t] || 'var(--border)'}40`, borderRadius: 3, padding: '1px 6px', fontSize: 9, fontWeight: 700, letterSpacing: '0.02em', whiteSpace: 'nowrap', color: col[t] || 'var(--text-muted)' }}>{map[t] || t}</span>;
   };
   const fmtLastImport = (iso) => {
     if (!iso) return 'Never';
