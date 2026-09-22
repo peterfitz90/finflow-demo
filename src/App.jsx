@@ -15690,6 +15690,361 @@ function FinancialStatements({ company, companyName }) {
   );
 }
 
+// ─── FORM 11 WORKING PAPER ────────────────────────────────────────────────────
+// Sole Trader only. Assists the accountant preparing the Form 11 self-assessment return —
+// it does NOT compute taxable profit or replace their judgment (rental, dividends, PAYE
+// income, pension relief, personal reliefs, basis-period rules all stay entirely with them).
+function Form11({ company, companyName }) {
+  const [loading,   setLoading]   = useState(false);
+  const [generated, setGenerated] = useState(false);
+  const [journals,  setJournals]  = useState([]);
+  const [assets,    setAssets]    = useState([]);
+  const [flaggedRows, setFlaggedRows] = useState([]);
+  const [stockValue, setStockValue] = useState("");
+
+  // Per-company chart of accounts drives type resolution (NOT the static GL_ACCOUNTS
+  // fallback, which has no entry for the sole-trader-only 3200/3300 codes and would
+  // misclassify them as debit-normal by default) — same resolveAccountMeta pattern
+  // GLReport already uses for exactly this reason.
+  const { accounts: coaAccounts } = useChartOfAccounts(company?.id);
+  const resolveType = (code) => {
+    const coaA = coaAccounts.find(a => a.code === code);
+    if (coaA) return coaA.account_type.charAt(0).toUpperCase() + coaA.account_type.slice(1);
+    return GL_ACCOUNTS.find(a => a.code === code)?.type || '';
+  };
+
+  const yeMonth = company?.year_end_month || 12;
+  const yearEndOptions = (() => {
+    const now = new Date();
+    const thisYE = new Date(now.getFullYear(), yeMonth, 0);
+    const startYear = thisYE <= now ? now.getFullYear() : now.getFullYear() - 1;
+    return Array.from({ length: 3 }, (_, i) => {
+      const y = startYear - i;
+      const d = new Date(y, yeMonth, 0);
+      return {
+        val: d.toISOString().slice(0, 10),
+        label: d.toLocaleDateString("en-IE", { day: "numeric", month: "long", year: "numeric" }),
+      };
+    });
+  })();
+  const [yearEnd, setYearEnd] = useState(yearEndOptions[0]?.val || "");
+
+  // Fiscal year start for the SELECTED yearEnd — identical formula to FinancialStatements'
+  // fyStart (verified this session, incl. the leap-year Feb boundary edge case).
+  const [yeSelYear] = yearEnd ? yearEnd.split('-').map(Number) : [null];
+  const yearStartMonth = (yeMonth % 12) + 1;
+  const fyStartYear = yeSelYear != null ? (yeMonth >= yearStartMonth ? yeSelYear : yeSelYear - 1) : null;
+  const fyStart = fyStartYear != null ? `${fyStartYear}-${String(yearStartMonth).padStart(2, '0')}-01` : null;
+
+  const generate = async () => {
+    if (!company?.id) return;
+    setLoading(true);
+    const [jRes, faRes, flagRes] = await Promise.all([
+      supabase.from('journals').select('*').eq('company_id', company.id).lte('date', yearEnd).order('date'),
+      supabase.from('fixed_assets').select('*').eq('company_id', company.id).order('purchase_date'),
+      supabase.from('chart_of_accounts').select('code, name, account_type').eq('company_id', company.id).eq('tax_add_back', true).order('code'),
+    ]);
+    setJournals(jRes.data || []);
+    setAssets(faRes.data || []);
+    setFlaggedRows(flagRes.data || []);
+    setGenerated(true);
+    setLoading(false);
+  };
+
+  // ── Balance sheet — cumulative from inception (same architecture as FinancialStatements) ──
+  const rawD = {}, rawC = {};
+  journals.forEach(j => {
+    const a = Number(j.amount);
+    rawD[j.debit_account]  = (rawD[j.debit_account]  || 0) + a;
+    rawC[j.credit_account] = (rawC[j.credit_account] || 0) + a;
+  });
+  const allCodes = [...new Set([...Object.keys(rawD), ...Object.keys(rawC)])];
+  const acctBal = code => {
+    const d = rawD[code] || 0, c = rawC[code] || 0;
+    const t = resolveType(code);
+    return (t === 'Liability' || t === 'Equity' || t === 'Income') ? c - d : d - c;
+  };
+  const sumRng = (f, t) => allCodes.filter(c => c >= f && c <= t).reduce((s, c) => s + acctBal(c), 0);
+
+  // Narrower, single-line extracts — Form 11's "Extracts from Accounts" wants Debtors,
+  // Creditors, and Bank on their own lines, not FinancialStatements' aggregated bands.
+  const fixedAssetsNBV = sumRng("1500", "1599");
+  const debtors        = sumRng("1100", "1100");
+  const cashAtBank      = sumRng("1000", "1099");
+  const creditors       = sumRng("2000", "2000");
+  const capitalAccount  = sumRng("3200", "3200");
+  const drawings        = sumRng("3300", "3300");
+  const stock           = parseFloat(stockValue) || 0; // no GL nominal exists for stock — manual entry, same as dirRemun on Financial Statements
+  const totalAssets     = fixedAssetsNBV + stock + debtors + cashAtBank;
+  const netAssets       = totalAssets - creditors;
+
+  // ── P&L — fiscal-year-bound (same fix applied to FinancialStatements this session) ──
+  const pnlJournals = fyStart ? journals.filter(j => j.date >= fyStart) : [];
+  const pnlRawD = {}, pnlRawC = {};
+  pnlJournals.forEach(j => {
+    const a = Number(j.amount);
+    pnlRawD[j.debit_account]  = (pnlRawD[j.debit_account]  || 0) + a;
+    pnlRawC[j.credit_account] = (pnlRawC[j.credit_account] || 0) + a;
+  });
+  const pnlCodes = [...new Set([...Object.keys(pnlRawD), ...Object.keys(pnlRawC)])];
+  const pnlAcctBal = code => {
+    const d = pnlRawD[code] || 0, c = pnlRawC[code] || 0;
+    const t = resolveType(code);
+    return (t === 'Liability' || t === 'Equity' || t === 'Income') ? c - d : d - c;
+  };
+  const pnlSumRng = (f, t) => pnlCodes.filter(c => c >= f && c <= t).reduce((s, c) => s + pnlAcctBal(c), 0);
+
+  const turnover    = pnlSumRng("4000", "4999");
+  const cos         = pnlSumRng("5000", "5999");
+  const grossProfit = turnover - cos;
+  const adminExp    = pnlSumRng("6000", "6999");
+  const netProfit    = grossProfit - adminExp;
+
+  // ── Capital allowances — surfaces the EXISTING faWearAndTear/wtByYear engine (App.jsx,
+  // already built for FixedAssets' own W&T tab, already verified against current Revenue
+  // guidance — 12.5% straight-line over 8 years, €24,000 motor-vehicle qualifying-cost cap).
+  // Not reimplemented here — same function, same numbers, just rendered on this page too. ──
+  const wtByYear = {};
+  assets.forEach(a => {
+    faWearAndTear(a).forEach(r => {
+      if (!wtByYear[r.year]) wtByYear[r.year] = 0;
+      wtByYear[r.year] += r.annual;
+    });
+  });
+  const relevantYear = yeSelYear;
+  const relevantYearAllowance = relevantYear != null ? (wtByYear[relevantYear] || 0) : 0;
+
+  // ── Flagged nominals (tax_add_back) — fiscal-year total per nominal, using the same
+  // period-bound journal set as the P&L above. A schedule for the accountant to review,
+  // NOT an automatic adjustment to net profit — no taxable-profit figure is computed here. ──
+  const flaggedSchedule = flaggedRows.map(row => ({
+    code: row.code,
+    name: row.name,
+    total: pnlSumRng(row.code, row.code),
+  })).filter(r => Math.abs(r.total) >= 0.005);
+
+  const fa = n => {
+    if (n === null || n === undefined) return "";
+    if (Math.round(Math.abs(n)) === 0) return "—";
+    const v = Math.round(Math.abs(n));
+    const s = "€" + v.toLocaleString("en-IE");
+    return n < 0 ? `(${s})` : s;
+  };
+
+  const yeDate = yearEnd ? new Date(yearEnd + "T00:00:00") : null;
+  const yeFmt  = yeDate ? yeDate.toLocaleDateString("en-IE", { day: "numeric", month: "long", year: "numeric" }) : "";
+
+  const exportCSV = () => downloadCSV(`form11-working-paper-${yeSelYear}.csv`, [
+    ["Form 11 Working Paper", companyName, `Period ended ${yeFmt}`],
+    ["This is a working paper only — does not compute taxable profit or replace the accountant's own judgment."],
+    [],
+    ["EXTRACTS FROM ACCOUNTS"],
+    ["Sales / Turnover", "", fa(turnover)],
+    ["Cost of Sales", "", fa(cos)],
+    ["Gross Profit", "", fa(grossProfit)],
+    ["Administrative Expenses", "", fa(adminExp)],
+    ["Net Profit per Accounts", "", fa(netProfit)],
+    [],
+    ["BALANCE SHEET EXTRACT AS AT", yeFmt],
+    ["Fixed Assets (NBV)", "", fa(fixedAssetsNBV)],
+    ["Stock (manually entered)", "", fa(stock)],
+    ["Debtors", "", fa(debtors)],
+    ["Bank", "", fa(cashAtBank)],
+    ["Total Assets", "", fa(totalAssets)],
+    ["Creditors", "", fa(creditors)],
+    ["Net Assets", "", fa(netAssets)],
+    [],
+    ["Capital Account", "", fa(capitalAccount)],
+    ["Drawings (cumulative from inception)", "", fa(drawings)],
+    [],
+    ["CAPITAL ALLOWANCES — Irish Revenue Wear & Tear (12.5% SL over 8 years)"],
+    ...Object.keys(wtByYear).sort().map(yr => [`Year ${yr}`, "", fa(wtByYear[yr])]),
+    [],
+    ["FLAGGED NOMINALS — for accountant review (not an automatic adjustment)"],
+    ...flaggedSchedule.map(r => [`${r.code} ${r.name}`, "", fa(r.total)]),
+  ].filter(r => r.length));
+
+  // ── Classification gate — Form 11 only applies to sole traders. Checked before the setup
+  // screen so this page can't be reached in a wrong state even via direct navigation. ──
+  const isSoleTrader = company?.company_type === 'Sole Trader';
+  if (!isSoleTrader) return (
+    <div className="fade-up">
+      <div className="card" style={{ maxWidth: 560, margin: "32px auto" }}>
+        <div className="card-header">
+          <span className="card-title">Form 11</span>
+        </div>
+        <div className="card-body" style={{ textAlign: "center", padding: "36px 28px" }}>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 16, fontWeight: 700, marginBottom: 10 }}>{companyName}</div>
+          <div style={{ fontSize: 13, color: "var(--muted)", lineHeight: 1.7 }}>
+            The Form 11 working paper applies to sole traders. {companyName} is classified as
+            <strong style={{ color: "var(--text)" }}> {company?.company_type || 'not yet classified'}</strong> — this page isn't applicable for that company type.
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+
+  // ── Setup screen ──
+  if (!generated) return (
+    <div className="fade-up">
+      <div className="card" style={{ maxWidth: 560, margin: "32px auto" }}>
+        <div className="card-header">
+          <span className="card-title">Form 11 Working Paper</span>
+        </div>
+        <div className="card-body">
+          <div style={{ marginBottom: 20 }}>
+            <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, fontWeight: 700, marginBottom: 4 }}>{companyName}</div>
+            <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.6 }}>
+              P&amp;L / balance sheet extracts, capital allowances, and flagged nominals to assist preparing the Form 11 return. Does not compute taxable profit.
+            </div>
+          </div>
+          <div className="f-group" style={{ marginBottom: 14 }}>
+            <label className="f-label">Period End</label>
+            <select className="f-input" value={yearEnd} onChange={e => setYearEnd(e.target.value)}>
+              {yearEndOptions.map(o => <option key={o.val} value={o.val}>{o.label}</option>)}
+            </select>
+          </div>
+          <div className="f-group" style={{ marginBottom: 22 }}>
+            <label className="f-label">Closing Stock (€) — no GL nominal exists for this; enter from the client's own records</label>
+            <input className="f-input" type="number" min="0" value={stockValue} onChange={e => setStockValue(e.target.value)} placeholder="0" />
+          </div>
+          <button className="btn btn-p" onClick={generate} disabled={loading || !yearEnd} style={{ width: "100%", fontSize: 14, padding: "12px 20px" }}>
+            {loading ? "Loading…" : "Generate Working Paper"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+
+  // ── Generated working paper ──
+  return (
+    <div className="fade-up">
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+        <div>
+          <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 16, fontWeight: 700, color: "var(--text)" }}>
+            {companyName} — Form 11 Working Paper
+          </div>
+          <div style={{ fontSize: 11, color: "var(--muted)", fontFamily: "'Source Code Pro',monospace", marginTop: 2 }}>
+            Period ended {yeFmt} · {journals.length} journal entries loaded
+          </div>
+        </div>
+        <div style={{ display: "flex", gap: 8 }}>
+          <ExportDropdown onCSV={exportCSV} onPrint={() => window.print()} />
+          <button className="btn btn-s btn-sm" onClick={() => setGenerated(false)}>← Settings</button>
+        </div>
+      </div>
+
+      <div style={{ fontSize: 11, color: "var(--muted)", background: "rgba(184,134,11,0.05)", borderRadius: "var(--radius-sm)", padding: "10px 14px", borderLeft: "3px solid var(--gold)", lineHeight: 1.6, marginBottom: 14 }}>
+        ⚠ Working paper only — assists preparing the Form 11 return. Does not compute taxable profit; rental income, dividends, PAYE income, pension relief, personal reliefs, and basis-period rules all remain the accountant's own determination.
+      </div>
+
+      {/* Extracts from Accounts — P&L */}
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div className="card-header"><span className="card-title">Extracts from Accounts — Profit &amp; Loss</span></div>
+        <div className="card-body" style={{ fontSize: 13 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0" }}><span>Sales / Turnover</span><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{fa(turnover)}</span></div>
+          <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0" }}><span>Cost of Sales</span><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{fa(cos)}</span></div>
+          <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontWeight: 600, borderTop: "1px solid var(--border)" }}><span>Gross Profit</span><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{fa(grossProfit)}</span></div>
+          <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0" }}><span>Administrative Expenses</span><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{fa(adminExp)}</span></div>
+          <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontWeight: 700, borderTop: "2px solid var(--text)" }}><span>Net Profit per Accounts</span><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{fa(netProfit)}</span></div>
+        </div>
+      </div>
+
+      {/* Extracts from Accounts — Balance Sheet */}
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div className="card-header"><span className="card-title">Extracts from Accounts — Balance Sheet</span></div>
+        <div className="card-body" style={{ fontSize: 13 }}>
+          <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0" }}><span>Fixed Assets (net book value)</span><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{fa(fixedAssetsNBV)}</span></div>
+          <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0" }}><span>Stock <sup style={{ fontSize: 9 }}>manual</sup></span><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{fa(stock)}</span></div>
+          <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0" }}><span>Debtors</span><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{fa(debtors)}</span></div>
+          <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0" }}><span>Bank</span><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{fa(cashAtBank)}</span></div>
+          <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontWeight: 600, borderTop: "1px solid var(--border)" }}><span>Total Assets</span><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{fa(totalAssets)}</span></div>
+          <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0" }}><span>Creditors</span><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{fa(creditors)}</span></div>
+          <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0", fontWeight: 700, borderTop: "2px solid var(--text)" }}><span>Net Assets</span><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{fa(netAssets)}</span></div>
+          <div style={{ marginTop: 14, paddingTop: 10, borderTop: "1px solid var(--border)" }}>
+            <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0" }}><span>Capital Account <sup style={{ fontSize: 9 }}>cumulative closing balance</sup></span><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{fa(capitalAccount)}</span></div>
+            <div style={{ display: "flex", justifyContent: "space-between", padding: "4px 0" }}><span>Drawings <sup style={{ fontSize: 9 }}>cumulative since inception, not just this year</sup></span><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{fa(drawings)}</span></div>
+          </div>
+        </div>
+      </div>
+
+      {/* Capital allowances */}
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div className="card-header">
+          <span className="card-title">Capital Allowances — Wear &amp; Tear</span>
+          <span style={{ fontSize: 11, color: "var(--muted)" }}>12.5% straight-line over 8 years · motor vehicles capped at €24,000 qualifying cost</span>
+        </div>
+        <div className="card-body">
+          {assets.length === 0 ? (
+            <div style={{ fontSize: 12, color: "var(--text-faint)", textAlign: "center", padding: 20 }}>No fixed assets on the register for this company.</div>
+          ) : (
+            <>
+              {relevantYear != null && (
+                <div style={{ fontSize: 13, marginBottom: 10 }}>
+                  <strong>{relevantYear} allowance: </strong>
+                  <span style={{ fontFamily: "'Source Code Pro',monospace" }}>{fa(relevantYearAllowance)}</span>
+                </div>
+              )}
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                <thead>
+                  <tr>{['Year', ...Object.keys(wtByYear).length ? ['Total Allowance'] : []].map(h => (
+                    <th key={h} style={{ padding: "5px 8px", textAlign: "left", fontSize: 9, fontWeight: 600, color: "var(--text-faint)", textTransform: "uppercase" }}>{h}</th>
+                  ))}</tr>
+                </thead>
+                <tbody>
+                  {Object.keys(wtByYear).sort().map(yr => (
+                    <tr key={yr} style={{ borderBottom: "1px solid var(--border)", fontWeight: String(relevantYear) === yr ? 700 : 400 }}>
+                      <td style={{ padding: "6px 8px" }}>{yr}</td>
+                      <td style={{ padding: "6px 8px", fontFamily: "'Source Code Pro',monospace" }}>{fa(wtByYear[yr])}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              <div style={{ fontSize: 11, color: "var(--text-faint)", marginTop: 8 }}>Full asset-by-asset detail is on the Fixed Assets page's Wear &amp; Tear tab.</div>
+            </>
+          )}
+        </div>
+      </div>
+
+      {/* Flagged nominals */}
+      <div className="card" style={{ marginBottom: 14 }}>
+        <div className="card-header">
+          <span className="card-title">Flagged Nominals</span>
+          <span style={{ fontSize: 11, color: "var(--muted)" }}>For review — not an automatic adjustment to net profit</span>
+        </div>
+        <div className="card-body">
+          {flaggedSchedule.length === 0 ? (
+            <div style={{ fontSize: 12, color: "var(--text-faint)", textAlign: "center", padding: 20 }}>
+              No nominals flagged for review. Flag a nominal in the chart of accounts if it habitually needs an add-back (e.g. client entertainment).
+            </div>
+          ) : (
+            <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+              <thead>
+                <tr>
+                  <th style={{ padding: "5px 8px", textAlign: "left", fontSize: 9, fontWeight: 600, color: "var(--text-faint)", textTransform: "uppercase" }}>Nominal</th>
+                  <th style={{ padding: "5px 8px", textAlign: "right", fontSize: 9, fontWeight: 600, color: "var(--text-faint)", textTransform: "uppercase" }}>Period Total</th>
+                </tr>
+              </thead>
+              <tbody>
+                {flaggedSchedule.map(r => (
+                  <tr key={r.code} style={{ borderBottom: "1px solid var(--border)" }}>
+                    <td style={{ padding: "6px 8px" }}>{r.code} · {r.name}</td>
+                    <td style={{ padding: "6px 8px", textAlign: "right", fontFamily: "'Source Code Pro',monospace" }}>{fa(r.total)}</td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+        </div>
+      </div>
+
+      <div style={{ fontSize: 11, color: "var(--muted)", background: "rgba(184,134,11,0.05)", borderRadius: "var(--radius-sm)", padding: "12px 16px", borderLeft: "3px solid var(--gold)", lineHeight: 1.7, marginBottom: 14 }}>
+        ⚠ This working paper should be reviewed by a qualified accountant before use in preparing the Form 11 return.
+      </div>
+    </div>
+  );
+}
+
 // ─── ADD COMPANY MODAL ────────────────────────────────────────────────────────
 function AddCompanyModal({ user, onSuccess, onClose }) {
   const BLANK = () => ({
@@ -20844,6 +21199,11 @@ const NAV = [
   { section: "REPORTS", items: [
     { id: "gl",             icon: "⊞", label: "GL Reports" },
     { id: "fin-statements", icon: "§",  label: "Fin. Statements", feature: "fin_statements", accountantOnly: true },
+    // Sole Trader only -- hidden entirely for every other company_type (all real companies
+    // today), rather than shown-then-"not applicable" the way fin-statements handles Limited
+    // Company mismatch. Condition must match Form11's own internal gate exactly (company_type
+    // === 'Sole Trader') -- see the companyTypeOnly filter applied at both render sites below.
+    { id: "form11",         icon: "§",  label: "Form 11",         feature: "form_11",       accountantOnly: true, companyTypeOnly: "Sole Trader" },
   ]},
   { section: "ACCOUNTING", items: [
     // Raw manual journal entry — UI-hide only for business_owner. Unlike vat_returns etc.
@@ -20931,7 +21291,8 @@ function GlobalSearchPalette({ open, onClose, companyId, company, isBusinessOwne
     if (isBusinessOwner && group.items.every(item => item.accountantOnly)) return false;
     return true;
   }).flatMap(group => group.items)
-    .filter(item => !(isBusinessOwner && item.accountantOnly) && !item.action);
+    .filter(item => !(isBusinessOwner && item.accountantOnly) && !item.action
+      && (!item.companyTypeOnly || company?.company_type === item.companyTypeOnly));
 
   const q = query.trim().toLowerCase();
   const filteredPages = (q ? navPages.filter(i => i.label.toLowerCase().includes(q)) : navPages).slice(0, 5);
@@ -21571,6 +21932,7 @@ export default function App() {
     compliance:        ["Compliance",            "ROS · CRO · Revenue deadlines"],
     "vat-returns":     ["VAT Returns",           "VAT3 draft · T1/T2 computation · filing"],
     "fin-statements":  ["Financial Statements",  "FRS 105 · Micro-entity accounts · CRO filing"],
+    form11:            ["Form 11",               "Sole trader working paper · extracts · capital allowances"],
     settings:          ["Settings",              "Company settings · tax · compliance"],
     "fixed-assets":    ["Fixed Assets",          "Asset register · depreciation · wear & tear"],
   };
@@ -21682,7 +22044,8 @@ export default function App() {
                       <span className="nav-chevron">{isOpen ? "▾" : "▸"}</span>
                     </button>
                     <div className="nav-section-items" style={{ maxHeight: isOpen ? "400px" : "0" }}>
-                      {group.items.filter(item => !(isBusinessOwner && item.accountantOnly)).map(item => {
+                      {group.items.filter(item => !(isBusinessOwner && item.accountantOnly)
+                        && (!item.companyTypeOnly || company?.company_type === item.companyTypeOnly)).map(item => {
                         const locked = !!(item.feature && !can(company, item.feature));
                         const isActive = !locked && (item.action === 'practice'
                           ? showPractice
@@ -21811,6 +22174,7 @@ export default function App() {
                   {page === "compliance"      && <Compliance company={company} onNavigate={setPage} />}
                   {page === "vat-returns"    && <VATReturns company={company} onNavigate={setPage} isBusinessOwner={isBusinessOwner} />}
                   {page === "fin-statements" && <FinancialStatements company={company} companyName={companyName} />}
+                  {page === "form11"        && <Form11 company={company} companyName={companyName} />}
                   {page === "payroll-import"    && <BrightPayImporter companyId={company?.id} />}
                   {page === "opening-balances" && <OpeningBalances companyId={company?.id} />}
                   {page === "fixed-assets"   && <FixedAssets companyId={company?.id} company={company} onNavigate={setPage} selPeriod={selPeriod} />}
