@@ -16610,6 +16610,7 @@ function PracticeDashboard({ companies, onSelectCompany, onAddCompany }) {
 function Expenses({ companyName = "Company", isAdmin = false, companyId, isActive }) {
   const { user } = useUser();
   const { accounts: coaAccounts, refetch: coaRefetch }   = useChartOfAccounts(companyId);
+  const { rules: txRules }           = useTransactionRules(companyId);
   const [expenses, setExpenses]     = useState([]);
   const [loading, setLoading]       = useState(true);
   const [view, setView]             = useState("mine");
@@ -16617,6 +16618,11 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
   const [extracting, setExtracting] = useState(false);
   const [receiptUrl, setReceiptUrl] = useState(null);
   const [saveError, setSaveError]   = useState(null);
+  // Stage 2 — category suggestion. nominalTouched stops auto-suggestion from overwriting a
+  // choice the submitter already made deliberately; suggestedLabel drives the transient
+  // "Suggested: X" hint so it's clear why the dropdown changed on its own.
+  const [nominalTouched, setNominalTouched] = useState(false);
+  const [suggestedLabel, setSuggestedLabel] = useState(null);
   const [selected, setSelected]     = useState(null);
   const [matchData, setMatchData]   = useState(null); // { expenseId, rows }
   const [approvingId, setApprovingId] = useState(null);
@@ -16660,6 +16666,28 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
       }
       return u;
     });
+    // A manual nominal-account change is a deliberate choice — stop auto-suggesting over it,
+    // and drop the "Suggested: X" hint since it no longer describes the current value.
+    if (f === "nominal_account") { setNominalTouched(true); setSuggestedLabel(null); }
+  };
+
+  // Stage 2 — suggests a nominal account from vendor/description text, reusing the same
+  // pattern-matching engine BankImport already uses for bank transactions (applyRules +
+  // useTransactionRules). Expenses are always money out regardless of the stored amount's
+  // sign, so -Math.abs(amount) is passed to make applyRules' direction filter ('out' vs 'in')
+  // treat every expense correctly, without touching applyRules itself. Never overwrites a
+  // choice the submitter already made deliberately (nominalTouched), and leaves today's
+  // Sundry default in place when nothing matches — no new required field or step either way.
+  const applySuggestion = (supplierVal, descriptionVal, amountVal) => {
+    if (nominalTouched) return;
+    const matchText = `${supplierVal || ""} ${descriptionVal || ""}`.trim();
+    if (!matchText) return;
+    const match = applyRules(matchText, -Math.abs(parseFloat(amountVal) || 0), txRules);
+    if (!match) return;
+    const acct = coaAccounts.find(a => a.code === match.nominal_code) || GL_ACCOUNTS.find(a => a.code === match.nominal_code);
+    if (!acct) return;
+    setForm(p => ({ ...p, nominal_account: match.nominal_code, nominal_name: acct.name, category: acct.category || acct.type || "" }));
+    setSuggestedLabel(acct.name);
   };
 
   useEffect(() => {
@@ -16709,6 +16737,7 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
         description:  d.description  || p.description,
         receipt_text: JSON.stringify(d),
       }));
+      applySuggestion(d.supplier || form.supplier, d.description || form.description, d.total_amount || form.amount);
     } catch (e) { console.error("[expenses] extract error:", e); }
     setExtracting(false);
   };
@@ -16730,6 +16759,7 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
     if (error) { setSaveError(`Save failed: ${error.message}`); return; }
     setExpenses(p => [ins, ...p]);
     setForm(emptyForm()); setReceiptUrl(null); setShowForm(false);
+    setNominalTouched(false); setSuggestedLabel(null);
   };
 
   const approve = async exp => {
@@ -16770,6 +16800,18 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
     if (!companyId) return;
     await supabase.from("expenses").update({ status: "rejected" }).eq("id", exp.id);
     setExpenses(p => p.map(e => e.id === exp.id ? { ...e, status: "rejected" } : e));
+  };
+
+  // Corrects an expense's nominal account while it's still status: 'submitted' — persists
+  // immediately (no draft/save step), so by the time approve() reads exp.nominal_account it's
+  // already right. No change needed there: it just reads whatever this last wrote.
+  const updateNominal = async (exp, code) => {
+    const acct = acctOptions.find(a => a.code === code);
+    if (!acct) return;
+    const { error } = await supabase.from("expenses")
+      .update({ nominal_account: code, nominal_name: acct.name }).eq("id", exp.id);
+    if (error) { setSaveError(`Couldn't update nominal account: ${error.message}`); return; }
+    setExpenses(p => p.map(e => e.id === exp.id ? { ...e, nominal_account: code, nominal_name: acct.name } : e));
   };
 
   const findMatches = async exp => {
@@ -16835,7 +16877,7 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
           <button className="btn btn-s" onClick={()=>fileInputRef.current?.click()} disabled={extracting}>
             {extracting ? "Extracting…" : "📷 Upload Receipt"}
           </button>
-          <button className="btn btn-p" onClick={()=>{ setShowForm(v=>!v); setSaveError(null); if(!showForm){setForm(emptyForm());setReceiptUrl(null);} }}>
+          <button className="btn btn-p" onClick={()=>{ setShowForm(v=>!v); setSaveError(null); if(!showForm){setForm(emptyForm());setReceiptUrl(null);setNominalTouched(false);setSuggestedLabel(null);} }}>
             {showForm ? "Cancel" : "+ Add Expense"}
           </button>
         </div>
@@ -16858,8 +16900,8 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
               )}
               <div style={{flex:1}}>
                 <div className="f-row">
-                  <div className="f-group"><label className="f-label">Supplier</label><input className="f-input" value={form.supplier} onChange={ff("supplier")} placeholder="Supplier name" /></div>
-                  <div className="f-group"><label className="f-label">Description</label><input className="f-input" value={form.description} onChange={ff("description")} placeholder="What was purchased" /></div>
+                  <div className="f-group"><label className="f-label">Supplier</label><input className="f-input" value={form.supplier} onChange={ff("supplier")} onBlur={() => applySuggestion(form.supplier, form.description, form.amount)} placeholder="Supplier name" /></div>
+                  <div className="f-group"><label className="f-label">Description</label><input className="f-input" value={form.description} onChange={ff("description")} onBlur={() => applySuggestion(form.supplier, form.description, form.amount)} placeholder="What was purchased" /></div>
                   <div className="f-group"><label className="f-label">Receipt Date</label><input className="f-input" type="date" value={form.receipt_date} onChange={ff("receipt_date")} /></div>
                 </div>
                 <div className="f-row">
@@ -16875,6 +16917,7 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
                 <select className="f-input" value={form.nominal_account} onChange={ff("nominal_account")}>
                   {acctOptions.map(a => <option key={a.code} value={a.code}>{a.code} — {a.name}</option>)}
                 </select>
+                {suggestedLabel && <div style={{fontSize:10,color:"var(--teal)",marginTop:3}}>Suggested: {suggestedLabel}</div>}
               </div>
               <div className="f-group">
                 <label className="f-label">Payment Method</label>
@@ -16929,7 +16972,13 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
                     {view==="all"&&<td style={{fontSize:11,color:"var(--muted)"}}>{e.submitted_by_name}</td>}
                     <td style={{fontWeight:500}}>{e.supplier}</td>
                     <td style={{fontSize:12,color:"var(--muted)",maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.description||"—"}</td>
-                    <td style={{fontSize:11,color:"var(--dim)",fontFamily:"Source Code Pro,monospace"}}>{e.nominal_account}</td>
+                    <td style={{fontSize:11,color:"var(--dim)",fontFamily:"Source Code Pro,monospace"}} onClick={ev=>ev.stopPropagation()}>
+                      {e.status === "submitted" && (isAdmin || e.submitted_by_clerk_id === user?.id) ? (
+                        <select className="f-input" style={{fontSize:11,padding:"2px 6px",fontFamily:"inherit"}} value={e.nominal_account} onChange={ev => updateNominal(e, ev.target.value)}>
+                          {acctOptions.map(a => <option key={a.code} value={a.code}>{a.code} — {a.name}</option>)}
+                        </select>
+                      ) : e.nominal_account}
+                    </td>
                     <td style={{fontSize:11}}>{pmIcon(e.payment_method)} <span style={{color:"var(--dim)",fontSize:10}}>{e.payment_method?.replace(/_/g," ")}</span></td>
                     <td><SPill status={e.status} /></td>
                     <td className="r mono" style={{fontWeight:600}}>{fmt(e.amount)}</td>
