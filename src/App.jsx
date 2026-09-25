@@ -1174,6 +1174,10 @@ const CSS = `
   .co-menu-item.active { color: white; font-weight: 600; }
   .co-menu-item.practice { color: var(--gold2); border-bottom: 1px solid rgba(255,255,255,0.08); font-family: 'Source Code Pro', monospace; font-size: 11px; letter-spacing: 0.04em; }
   .co-menu-item.practice:hover { background: rgba(212,160,23,0.08); }
+  .co-menu-list { max-height: 50vh; overflow-y: auto; }
+  .co-menu-search { display: block; width: 100%; box-sizing: border-box; padding: 8px 13px; background: rgba(255,255,255,0.04); border: none; border-bottom: 1px solid rgba(255,255,255,0.08); font-size: 12px; font-family: 'Inter', system-ui, sans-serif; color: rgba(255,255,255,0.9); outline: none; }
+  .co-menu-search::placeholder { color: rgba(255,255,255,0.35); }
+  .co-menu-empty { padding: 9px 13px; font-size: 12px; color: rgba(255,255,255,0.35); font-style: italic; }
   /* ── PRACTICE DASHBOARD ── */
   .prac-table-wrap { overflow-x: auto; }
   .prac-table { width: 100%; border-collapse: collapse; }
@@ -16267,44 +16271,71 @@ function UpgradeCard({ feature, onClose, inline = false }) {
 }
 
 // ─── COMPANY SWITCHER ─────────────────────────────────────────────────────────
-function CompanySwitcher({ companies, company, onSwitch, onPractice, onAddCompany }) {
+function CompanySwitcher({ companies, company, onSwitch, onPractice, onAddCompany, canPractice }) {
   const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
   const ref = useRef(null);
+  const searchRef = useRef(null);
   useEffect(() => {
-    const h = e => { if (ref.current && !ref.current.contains(e.target)) setOpen(false); };
+    const h = e => { if (ref.current && !ref.current.contains(e.target)) { setOpen(false); setQuery(""); } };
     document.addEventListener("mousedown", h);
     return () => document.removeEventListener("mousedown", h);
   }, []);
 
+  // Type-ahead over the already-loaded company list — same .toLowerCase().includes() pattern as
+  // Chart of Accounts / Journals / Global Search. Only shown at 6+ companies; below that the
+  // whole list fits at a glance and a search box is just clutter.
+  const showSearch = companies.length >= 6;
+  const q = query.trim().toLowerCase();
+  const filtered = q ? companies.filter(c => (c.name || "").toLowerCase().includes(q)) : companies;
+  useEffect(() => { if (open && showSearch) searchRef.current?.focus(); }, [open, showSearch]);
+
+  const close = () => { setOpen(false); setQuery(""); };
+  const pick = c => { onSwitch(c); close(); };
+  const onSearchKey = e => {
+    if (e.key === "Enter" && filtered.length) { e.preventDefault(); pick(filtered[0]); }
+    else if (e.key === "Escape") { e.preventDefault(); close(); }
+  };
+
   return (
     <div className="co-switcher" ref={ref}>
-      <button className="co-switcher-btn" onClick={() => setOpen(v => !v)}>
+      <button className="co-switcher-btn" onClick={() => open ? close() : setOpen(true)}>
         <div className="co-dot" />
         <span className="co-name">{company?.name || "Your Company"}</span>
         <span className="co-caret">▾</span>
       </button>
       {open && (
         <div className="co-menu">
-          {companies.length >= 3 && (
-            <button className="co-menu-item practice" onClick={() => { onPractice(); setOpen(false); }}>
+          {/* Same gate as the nav's PRACTICE section — previously only companies.length >= 3,
+              which let a business_owner (or a non-Practice plan) reach the dashboard from here. */}
+          {canPractice && companies.length >= 3 && (
+            <button className="co-menu-item practice" onClick={() => { onPractice(); close(); }}>
               ⊞ Practice Dashboard
             </button>
           )}
-          {companies.map(c => (
-            <button
-              key={c.id}
-              className={`co-menu-item ${c.id === company?.id ? "active" : ""}`}
-              onClick={() => { onSwitch(c); setOpen(false); }}
-              style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}
-            >
-              <span>{c.id === company?.id ? "✓ " : "  "}{c.name}</span>
-              <span style={{ fontSize: 9, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: isPending(c) ? 'var(--warn)' : 'var(--text-faint)', opacity: 0.8, flexShrink: 0 }}>
-                {planLabel(c)}
-              </span>
-            </button>
-          ))}
+          {showSearch && (
+            <input ref={searchRef} className="co-menu-search" value={query}
+              onChange={e => setQuery(e.target.value)} onKeyDown={onSearchKey}
+              placeholder={`Search ${companies.length} companies…`} />
+          )}
+          <div className="co-menu-list">
+            {filtered.map(c => (
+              <button
+                key={c.id}
+                className={`co-menu-item ${c.id === company?.id ? "active" : ""}`}
+                onClick={() => pick(c)}
+                style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 8 }}
+              >
+                <span>{c.id === company?.id ? "✓ " : "  "}{c.name}</span>
+                <span style={{ fontSize: 9, fontWeight: 600, letterSpacing: '0.06em', textTransform: 'uppercase', color: isPending(c) ? 'var(--warn)' : 'var(--text-faint)', opacity: 0.8, flexShrink: 0 }}>
+                  {planLabel(c)}
+                </span>
+              </button>
+            ))}
+            {filtered.length === 0 && <div className="co-menu-empty">No matching companies</div>}
+          </div>
           <button className="co-menu-item" style={{ borderTop: "1px solid rgba(255,255,255,0.08)", color: "var(--accent)", fontSize: 11, fontFamily: "'Source Code Pro', monospace", letterSpacing: "0.04em" }}
-            onClick={() => { onAddCompany(); setOpen(false); }}>
+            onClick={() => { onAddCompany(); close(); }}>
             ⊕ Add company
           </button>
         </div>
@@ -16318,6 +16349,7 @@ function PracticeDashboard({ companies, onSelectCompany, onAddCompany }) {
   const [data,    setData]    = useState({});
   const [sortKey, setSortKey] = useState('status');
   const [sortDir, setSortDir] = useState('asc');
+  const [search,  setSearch]  = useState('');
 
   useEffect(() => {
     if (!companies.length) return;
@@ -16461,14 +16493,24 @@ function PracticeDashboard({ companies, onSelectCompany, onAddCompany }) {
     return sortDir === 'asc' ? cmp : -cmp;
   });
 
+  // Display-only filter, applied after sorting — `companies` itself is never narrowed, so the
+  // per-company data effect above (keyed on companies.length) doesn't refetch on each keystroke.
+  const q = search.trim().toLowerCase();
+  const visible = q
+    ? sorted.filter(c => (c.name || '').toLowerCase().includes(q) || (c.cro_number || '').toLowerCase().includes(q))
+    : sorted;
+
   const thCls = key => `prac-th${sortKey === key ? ` sort-${sortDir}` : ''}`;
 
-  const exportPractice = () => downloadCSV(`practice-dashboard-${new Date().toISOString().slice(0, 10)}.csv`, [
+  // Exports what's on screen — filtered rows when a search is active, flagged in both the
+  // filename and a header row so a partial export is never mistaken for the full client list.
+  const exportPractice = () => downloadCSV(`practice-dashboard-${new Date().toISOString().slice(0, 10)}${q ? '-filtered' : ''}.csv`, [
     ["Ledgrly — Practice Dashboard"],
     ["Exported", fmtIE(new Date().toISOString().slice(0, 10))],
+    ...(q ? [["Filtered", `"${search.trim()}" — ${visible.length} of ${companies.length} workspaces`]] : []),
     [],
     ["Client", "Status", "Reason", "Next VAT Due", "AR Owed", "AR Overdue", "Last Import", "Cash"],
-    ...sorted.map(c => {
+    ...visible.map(c => {
       const d = data[c.id];
       const st = getClientStatus(c, d);
       const nextVat = getNextVATDue(c);
@@ -16489,10 +16531,17 @@ function PracticeDashboard({ companies, onSelectCompany, onAddCompany }) {
         <div>
           <div style={{ fontSize: 17, fontWeight: 700, color: 'var(--text)', marginBottom: 2 }}>Practice Dashboard</div>
           <div style={{ fontSize: 12, color: 'var(--muted)' }}>
-            {companies.length} {companies.length === 1 ? 'workspace' : 'workspaces'} — sorted by status. Click a row to open.
+            {q
+              ? `${visible.length} of ${companies.length} workspaces`
+              : `${companies.length} ${companies.length === 1 ? 'workspace' : 'workspaces'}`} — sorted by status. Click a row to open.
           </div>
         </div>
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', justifyContent: 'flex-end' }}>
+          {companies.length > 0 && (
+            <input className="f-input" style={{ width: 200, fontSize: 12, padding: "4px 9px" }}
+              placeholder="Search client or CRO…" value={search} onChange={e => setSearch(e.target.value)}
+              onKeyDown={e => { if (e.key === 'Escape') setSearch(''); }} />
+          )}
           {companies.length > 0 && <ExportDropdown onCSV={exportPractice} onPrint={() => window.print()} />}
           <button className="btn btn-p btn-sm" onClick={onAddCompany}>⊕ Add company</button>
         </div>
@@ -16512,7 +16561,12 @@ function PracticeDashboard({ companies, onSelectCompany, onAddCompany }) {
             </tr>
           </thead>
           <tbody>
-            {sorted.map(c => {
+            {q && visible.length === 0 && (
+              <tr><td className="prac-td" colSpan={6} style={{ textAlign: 'center', color: 'var(--muted)', padding: '24px 12px' }}>
+                No clients match "{search.trim()}"
+              </td></tr>
+            )}
+            {visible.map(c => {
               const d       = data[c.id];
               const st      = getClientStatus(c, d);
               const nextVat = getNextVATDue(c);
@@ -16584,7 +16638,10 @@ function PracticeDashboard({ companies, onSelectCompany, onAddCompany }) {
 
       {/* ── Mobile compact strips ── */}
       <div className="prac-compact">
-        {sorted.map(c => {
+        {q && visible.length === 0 && (
+          <div style={{ padding: '16px 0', fontSize: 12, color: 'var(--muted)', textAlign: 'center' }}>No clients match "{search.trim()}"</div>
+        )}
+        {visible.map(c => {
           const st = getClientStatus(c, data[c.id]);
           return (
             <div key={c.id} className="prac-compact-row" onClick={() => onSelectCompany(c)}>
@@ -22029,6 +22086,7 @@ export default function App() {
                 onSwitch={c => { setCompany(c); setShowPractice(false); setPage("overview"); }}
                 onPractice={() => { setShowPractice(true); }}
                 onAddCompany={() => setShowAddCompany(true)}
+                canPractice={can(company, 'practice_dashboard') && !isBusinessOwner}
               />
               <button className="sidebar-footer-btn" onClick={() => setPage("settings")}>
                 <span style={{fontSize:13}}>⚙</span> Settings
