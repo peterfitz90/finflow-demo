@@ -5,15 +5,20 @@
 // can be skipped/duplicated across page boundaries. Stops on an empty page rather than a short
 // one, so it stays correct even if the server cap is ever set below PAGE_SIZE. Returns
 // { data, error } like a single supabase-js call.
+//
+// `max` (optional) is a deliberate UI cap — stop once that many rows are in hand, the way a
+// .limit(max) was *meant* to behave before the server silently clamped it to 1,000.
 const PAGE_SIZE = 1000;
 
-export async function fetchAllRows(build) {
+export async function fetchAllRows(build, { max = Infinity } = {}) {
   const all = [];
-  for (let from = 0; ; ) {
-    const { data, error } = await build().range(from, from + PAGE_SIZE - 1);
+  for (let from = 0; all.length < max; ) {
+    const size = Math.min(PAGE_SIZE, max - all.length);
+    const { data, error } = await build().range(from, from + size - 1);
     if (error) return { data: null, error };
-    if (!data || !data.length) return { data: all, error: null };
+    if (!data || !data.length) break;
     all.push(...data);
     from += data.length;
   }
+  return { data: all, error: null };
 }

@@ -2224,7 +2224,8 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
       setLoading(true);
       const db = supabase;
       const [txRes, invRes] = await Promise.all([
-        db.from('bank_transactions').select('*').eq('company_id', companyId).order('date', { ascending: true }),
+        // All-history — paged past the 1,000-row response cap (id as the unique tiebreaker).
+        fetchAllRows(() => db.from('bank_transactions').select('*').eq('company_id', companyId).order('date', { ascending: true }).order('id')),
         db.from('invoices').select('*').eq('company_id', companyId)
           .in('status', ['pending', 'chased']).order('due_date', { ascending: true }),
       ]);
@@ -6747,15 +6748,17 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
   // All-time automation stats (not period-scoped)
   useEffect(() => {
     if (!companyId) return;
-    supabase.from('bank_transactions')
-      .select('nominal_account')
-      .eq('company_id', companyId)
-      .then(({ data }) => {
-        if (!data) return;
-        const total   = data.length;
-        const review  = data.filter(r => !r.nominal_account || r.nominal_account === '6600').length;
-        setAutomationStats({ total, processed: total - review, review });
-      });
+    // Exact head counts rather than fetching every row and taking .length — that silently
+    // topped out at 1,000 (the API's response cap) and cost a full-table read just to count.
+    Promise.all([
+      supabase.from('bank_transactions').select('id', { count: 'exact', head: true }).eq('company_id', companyId),
+      supabase.from('bank_transactions').select('id', { count: 'exact', head: true }).eq('company_id', companyId)
+        .or('nominal_account.is.null,nominal_account.eq.6600'),
+    ]).then(([t, r]) => {
+      if (t.error || r.error) return;
+      const total = t.count ?? 0, review = r.count ?? 0;
+      setAutomationStats({ total, processed: total - review, review });
+    });
   }, [companyId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   useEffect(() => {
@@ -9340,8 +9343,9 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
     (async () => {
       setLoading(true);
       const db = supabase;
-      const { data, error } = await db.from('journals').select('*')
-        .eq('company_id', companyId).gte('date', rangeStart).lte('date', periodEnd).order('date');
+      // YTD by default (up to a full fiscal year) — paged past the 1,000-row response cap.
+      const { data, error } = await fetchAllRows(() => db.from('journals').select('*')
+        .eq('company_id', companyId).gte('date', rangeStart).lte('date', periodEnd).order('date').order('id'));
       if (!error && data) setJournals(data);
       setLoading(false);
     })();
@@ -9367,8 +9371,8 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
   useEffect(() => {
     if (!companyId || !showCmp || !cmpRangeStart) { setCmpJournals([]); return; }
     (async () => {
-      const { data } = await supabase.from('journals').select('*')
-        .eq('company_id', companyId).gte('date', cmpRangeStart).lte('date', cmpPeriodEnd).order('date');
+      const { data } = await fetchAllRows(() => supabase.from('journals').select('*')
+        .eq('company_id', companyId).gte('date', cmpRangeStart).lte('date', cmpPeriodEnd).order('date').order('id'));
       setCmpJournals(data || []);
     })();
   }, [companyId, cmpMode, cmpRangeStart]); // eslint-disable-line
@@ -9406,10 +9410,10 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
     setTrendLoading(true);
     (async () => {
       // One query for the whole fiscal year, not twelve — bucketing happens in memory below.
-      const { data } = await supabase.from('journals').select('*')
+      const { data } = await fetchAllRows(() => supabase.from('journals').select('*')
         .eq('company_id', companyId)
         .gte('date', trendMonths[0].start).lte('date', trendMonths[11].end)
-        .order('date');
+        .order('date').order('id'));
       setTrendJournals(data || []);
       setTrendLoading(false);
     })();
@@ -10333,8 +10337,9 @@ function FullGLReport({ companyId, companyName, company, coaAccounts }) {
   const loadJournals = () => {
     if (!companyId) { setLoading(false); return; }
     setLoading(true);
-    supabase.from('journals').select('*')
-      .eq('company_id', companyId).gte('date', rangeStart).lte('date', periodEnd).order('date')
+    // Listing + CSV export + totals/balanced check — must be complete, so paged past the cap.
+    fetchAllRows(() => supabase.from('journals').select('*')
+      .eq('company_id', companyId).gte('date', rangeStart).lte('date', periodEnd).order('date').order('id'))
       .then(({ data, error }) => {
         if (!error && data) setJournals(data);
         setLoading(false);
@@ -13771,7 +13776,7 @@ function Chat({ page, companyName, period, selPeriod, companyId, company, onClos
             db.from('invoices').select('amount,client,invoice_ref').eq('company_id', companyId).lt('due_date', today).neq('status', 'paid'),
             db.from('invoices').select('amount,due_date,client').eq('company_id', companyId).gte('due_date', today).lte('due_date', in30).in('status', ['pending','chased']),
             db.from('journals').select('debit_account,credit_account,amount,date,description,reference').eq('company_id', companyId).gte('date', periodStart).lte('date', periodEnd).order('date'),
-            db.from('journals').select('debit_account,credit_account,amount,date').eq('company_id', companyId).gte('date', trail12Start).lte('date', periodEnd),
+            fetchAllRows(() => db.from('journals').select('debit_account,credit_account,amount,date').eq('company_id', companyId).gte('date', trail12Start).lte('date', periodEnd).order('date').order('id')),
           ]);
 
           const currentBal = btLatest.data?.[0] ? Number(btLatest.data[0].balance) : null;
@@ -17189,9 +17194,10 @@ function recScoreCandidate(bt, cand, btBankNominal, bankNominalSet) {
 }
 
 async function runMatchingEngine(companyId) {
-  const { data: txns, error: txnErr } = await supabase
+  // Paged — the engine must see every unreconciled transaction, not the first 1,000.
+  const { data: txns, error: txnErr } = await fetchAllRows(() => supabase
     .from('bank_transactions').select('id,date,description,amount,bank_account_id')
-    .eq('company_id', companyId).eq('reconciled', false).order('date', { ascending: false });
+    .eq('company_id', companyId).eq('reconciled', false).order('date', { ascending: false }).order('id'));
   if (txnErr) throw new Error(`Transactions: ${txnErr.message}`);
   if (!txns?.length) return 0;
 
@@ -17202,8 +17208,9 @@ async function runMatchingEngine(companyId) {
   const nominalByAccountId = Object.fromEntries((bankAccounts || []).map(a => [a.id, a.nominal_code]));
   const bankNominalSet     = new Set((bankAccounts || []).map(a => a.nominal_code).filter(Boolean));
 
-  const { data: existing } = await supabase
-    .from('bank_matches').select('bank_transaction_id,matched_id,status').eq('company_id', companyId);
+  // Every existing pair — a truncated set re-suggests rejected pairs and re-matches confirmed txns.
+  const { data: existing } = await fetchAllRows(() => supabase
+    .from('bank_matches').select('bank_transaction_id,matched_id,status').eq('company_id', companyId).order('id'));
 
   const confirmedBts   = new Set((existing || []).filter(m => m.status === 'confirmed').map(m => m.bank_transaction_id));
   const rejectedPairs  = new Set((existing || []).filter(m => m.status === 'rejected').map(m => `${m.bank_transaction_id}:${m.matched_id}`));
@@ -17692,10 +17699,11 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
         { count: autoConfCount },
         { count: totalConfCount },
       ] = await Promise.all([
-        supabase.from('bank_transactions').select('*').eq('company_id', companyId).eq('reconciled', false).order('date', { ascending: false }).limit(UNRECONCILED_CAP),
+        // .limit(UNRECONCILED_CAP) alone was silently clamped to 1,000 by the API — page up to the cap.
+        fetchAllRows(() => supabase.from('bank_transactions').select('*').eq('company_id', companyId).eq('reconciled', false).order('date', { ascending: false }).order('id'), { max: UNRECONCILED_CAP }),
         supabase.from('bank_transactions').select('*', { count: 'exact', head: true }).eq('company_id', companyId).eq('reconciled', false),
         supabase.from('bank_transactions').select('created_at').eq('company_id', companyId).order('created_at', { ascending: false }).limit(1),
-        supabase.from('bank_matches').select('*').eq('company_id', companyId).eq('status', 'suggested').order('created_at', { ascending: false }),
+        fetchAllRows(() => supabase.from('bank_matches').select('*').eq('company_id', companyId).eq('status', 'suggested').order('created_at', { ascending: false }).order('id')),
         supabase.from('bank_matches').select('*', { count: 'exact', head: true }).eq('company_id', companyId).eq('status', 'confirmed'),
         supabase.from('bank_matches').select('*', { count: 'exact', head: true }).eq('company_id', companyId).eq('status', 'confirmed').eq('matched_by', 'auto').gte('confirmed_at', monthStart.toISOString()),
         supabase.from('bank_matches').select('*', { count: 'exact', head: true }).eq('company_id', companyId).eq('status', 'confirmed').gte('confirmed_at', monthStart.toISOString()),
