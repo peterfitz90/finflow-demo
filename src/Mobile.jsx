@@ -6,6 +6,7 @@ import { approveApBill, confirmBankTxn } from './shared/approvals.js';
 import { InboxZeroCelebration } from './shared/InboxZeroCelebration.jsx';
 import { recScoreCandidate } from './shared/recScore.js';
 import { computeDeadlines } from './shared/computeDeadlines.js';
+import { fetchAllRows } from './shared/fetchAllRows.js';
 import { useHealthy } from './shared/useHealthy.js';
 import { AutomationHero, HealthPulseDot } from './shared/AutomationHero.jsx';
 import {
@@ -375,7 +376,8 @@ function CashTab({ companyId }) {
     const lmStart = new Date(now.getFullYear(), now.getMonth()-1, 1).toISOString().slice(0,10);
     const lmEnd   = new Date(now.getFullYear(), now.getMonth(), 0).toISOString().slice(0,10);
     const [btAll, btLm, recent] = await Promise.all([
-      supabase.from('bank_transactions').select('amount').eq('company_id', companyId),
+      // All-time sum → cash figure; paged past the 1,000-row response cap (id-ordered).
+      fetchAllRows(() => supabase.from('bank_transactions').select('amount').eq('company_id', companyId).order('id')),
       supabase.from('bank_transactions').select('amount').eq('company_id', companyId).gte('date', lmStart).lte('date', lmEnd),
       supabase.from('bank_transactions').select('date,description,amount').eq('company_id', companyId).order('date',{ascending:false}).limit(20),
     ]);

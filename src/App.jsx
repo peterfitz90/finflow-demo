@@ -10,6 +10,7 @@ import { useHealthy } from './shared/useHealthy.js';
 import { AutomationHero, HealthPulseDot } from './shared/AutomationHero.jsx';
 import { confirmBankTxn, approveApBill, markApBillPaid } from './shared/approvals.js';
 import { computeDeadlines } from './shared/computeDeadlines.js';
+import { fetchAllRows } from './shared/fetchAllRows.js';
 import {
   INV_VAT_RATES, INV_VAT_LABELS,
   calcLineAmounts, calcInvTotals, vatCodeForRate,
@@ -2134,25 +2135,6 @@ async function fetchNominalBalanceAsOf(companyId, nominalCodeOrCodes, asOfDate) 
   });
   if (error) throw new Error(error.message);
   return Number(data ?? 0);
-}
-
-// PostgREST silently caps every response at 1,000 rows (HTTP 206, no error) and clamps any
-// .range()/.limit() above that too — so a query that can match more rows must page through.
-// `build` returns a FRESH query builder each call (one can't be re-ranged once awaited), and
-// must carry a total order ending in a unique column (e.g. .order('date').order('id')) or rows
-// can be skipped/duplicated across page boundaries. Stops on an empty page rather than a short
-// one, so it stays correct even if the server cap is ever set below PAGE_SIZE. Returns
-// { data, error } like a single supabase-js call.
-const FETCH_ALL_PAGE_SIZE = 1000;
-async function fetchAllRows(build) {
-  const all = [];
-  for (let from = 0; ; ) {
-    const { data, error } = await build().range(from, from + FETCH_ALL_PAGE_SIZE - 1);
-    if (error) return { data: null, error };
-    if (!data || !data.length) return { data: all, error: null };
-    all.push(...data);
-    from += data.length;
-  }
 }
 
 // Item 2 — a company's active bank_accounts nominal codes, so balance lookups can sum across
@@ -8462,8 +8444,10 @@ function RevenueFeed({ companyId, company }) {
         .eq('company_id', companyId).neq('status', 'disconnected').order('created_at'),
       supabase.from('revenue_review_items')
         .select('*').eq('company_id', companyId).order('created_at', { ascending: false }),
-      supabase.from('journals').select('debit_account,credit_account,amount')
-        .eq('company_id', companyId).or('debit_account.eq.1300,credit_account.eq.1300'),
+      // All-time Stripe clearing (1300) balance — one journal per charge/payout, so this outgrows
+      // the 1,000-row response cap for any active Stripe user. Paged, id-ordered.
+      fetchAllRows(() => supabase.from('journals').select('debit_account,credit_account,amount')
+        .eq('company_id', companyId).or('debit_account.eq.1300,credit_account.eq.1300').order('id')),
     ]);
     setConnections(cr.data || []);
     setItems(ir.data || []);
@@ -12480,10 +12464,13 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
     try {
       const cid = getCid();
       const db = supabase;
-      const { data: existing, error } = await db.from("bank_transactions")
+      // Every existing transaction — this is the duplicate check (importedIds below), so it must
+      // be complete: past 1,000 rows a single request is silently truncated and already-imported
+      // statement lines would re-post as duplicates. Paged via fetchAllRows, id-ordered.
+      const { data: existing, error } = await fetchAllRows(() => db.from("bank_transactions")
         .select("revolut_id, description, nominal_account, import_batch_id")
-        .eq("company_id", cid);
-      if (error) console.error("[BankImport] Supabase error:", error.message);
+        .eq("company_id", cid).order("id"));
+      if (error) throw error;
       if (existing) {
         // Group by batch to detect any that were reversed (0 remaining rows)
         const batchCounts = {};
@@ -12508,7 +12495,16 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
         });
       }
       console.log("[BankImport] importedIds:", importedIds.size, "pastCats:", Object.keys(pastCats).length, "learnedPayees:", Object.keys(learnedPayees).length);
-    } catch (err) { console.error("[BankImport] Supabase lookup error:", err); }
+    } catch (err) {
+      // The duplicate check is the only thing stopping a re-imported statement from posting
+      // twice — if it couldn't run, nothing here can be trusted as "new". Clear the pre-rendered,
+      // all-selected table rather than fall through with an empty importedIds (which marks every
+      // row as new). Same stance as api/yapily/ingest.js's dedup abort.
+      console.error("[BankImport] Supabase lookup error:", err);
+      setRows([]); setSelected(new Set());
+      setAlert({ type: "err", msg: `Couldn't check this file against already-imported transactions, so the import was stopped to avoid posting duplicates. Please try again. (${err?.message || err})` });
+      return;
+    }
 
     // STEP 3: Apply exact matches immediately; keyword fallback for everything else — render now
     const withStatus = parsed.map(r => ({ ...r, imported: importedIds.has(r.revolut_id) }));
@@ -15208,8 +15204,10 @@ function FinancialStatements({ company, companyName }) {
   const generate = async () => {
     if (!company?.id) return;
     setLoading(true);
-    const { data } = await supabase.from('journals')
-      .select('*').eq('company_id', company.id).lte('date', yearEnd).order('date');
+    // Inception-to-date (opening position + the year) — paged past the 1,000-row response cap,
+    // id as the unique tiebreaker. Statutory figures: a truncated fetch here mis-states the accounts.
+    const { data } = await fetchAllRows(() => supabase.from('journals')
+      .select('*').eq('company_id', company.id).lte('date', yearEnd).order('date').order('id'));
     setJournals(data || []);
     setGenerated(true);
     setLoading(false);
@@ -15663,7 +15661,8 @@ function Form11({ company, companyName }) {
     if (!company?.id) return;
     setLoading(true);
     const [jRes, faRes, flagRes] = await Promise.all([
-      supabase.from('journals').select('*').eq('company_id', company.id).lte('date', yearEnd).order('date'),
+      // Inception-to-date — paged past the 1,000-row response cap (same as FinancialStatements).
+      fetchAllRows(() => supabase.from('journals').select('*').eq('company_id', company.id).lte('date', yearEnd).order('date').order('id')),
       supabase.from('fixed_assets').select('*').eq('company_id', company.id).order('purchase_date'),
       supabase.from('chart_of_accounts').select('code, name, account_type').eq('company_id', company.id).eq('tax_add_back', true).order('code'),
     ]);
@@ -21580,14 +21579,27 @@ export default function App() {
             }
 
             // Attempt idempotent insert of run row first
-            const { error: runErr, data: runData } = await supabase
+            let { error: runErr, data: runData } = await supabase
               .from('recurring_journal_runs')
               .insert({ recurring_journal_id: tpl.id, period, status: 'posted' })
               .select('id').single();
 
-            if (runErr) { // 23505 = unique violation → already posted or already skipped
-              if (m === 12) { y++; m = 1; } else { m++; }
-              continue;
+            if (runErr) { // 23505 = unique violation → already posted, or recorded as skipped
+              // A 'skipped_locked' row only means the period WAS locked when last checked — it's
+              // unlocked now (the isDateLocked check above passed), e.g. its VAT return was
+              // reopened. Claim that row for posting instead of treating the month as done
+              // forever. Conditional on status, so the update is an atomic claim: if two sessions
+              // race, only one gets the row back, and a genuinely 'posted' row is never touched.
+              const { data: claimed } = await supabase
+                .from('recurring_journal_runs')
+                .update({ status: 'posted', posted_at: new Date().toISOString() })
+                .eq('recurring_journal_id', tpl.id).eq('period', period).eq('status', 'skipped_locked')
+                .select('id').maybeSingle();
+              if (!claimed) {
+                if (m === 12) { y++; m = 1; } else { m++; }
+                continue;
+              }
+              runData = claimed;
             }
 
             // Render description template tokens
