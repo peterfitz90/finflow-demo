@@ -11,6 +11,7 @@ import { AutomationHero, HealthPulseDot } from './shared/AutomationHero.jsx';
 import { confirmBankTxn, approveApBill, markApBillPaid } from './shared/approvals.js';
 import { computeDeadlines } from './shared/computeDeadlines.js';
 import { fetchAllRows } from './shared/fetchAllRows.js';
+import { findContentDuplicates, postImportBatch } from './shared/importDedup.js';
 import { localDateStr, monthEnd, monthStart } from './shared/dates.js';
 import {
   INV_VAT_RATES, INV_VAT_LABELS,
@@ -12463,6 +12464,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
 
     // STEP 2: Fetch all existing transactions — build exact and fuzzy learned maps
     let importedIds = new Set();
+    let existingRows = [];  // every bank transaction already in the ledger (for the content check)
     let pastCats = {};      // exact description → nominal_code
     let learnedPayees = {}; // cleanPayee(description) → nominal_code (for fuzzy lookup)
     try {
@@ -12472,9 +12474,10 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
       // be complete: past 1,000 rows a single request is silently truncated and already-imported
       // statement lines would re-post as duplicates. Paged via fetchAllRows, id-ordered.
       const { data: existing, error } = await fetchAllRows(() => db.from("bank_transactions")
-        .select("revolut_id, description, nominal_account, import_batch_id")
+        .select("revolut_id, description, nominal_account, import_batch_id, date, amount, bank_account_id")
         .eq("company_id", cid).order("id"));
       if (error) throw error;
+      existingRows = existing || [];
       if (existing) {
         // Group by batch to detect any that were reversed (0 remaining rows)
         const batchCounts = {};
@@ -12510,8 +12513,30 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
       return;
     }
 
+    // STEP 2b (AIB only): content-based duplicate check. AIB CSVs carry no transaction id, so
+    // revolut_id is a synthetic aibHash salted with the row's position in the file — the same
+    // transaction in two overlapping statement files gets two different ids and sails past
+    // importedIds. Same date + amount + account + similar description (the live feed's Tier-2
+    // logic, shared via src/shared/importDedup.js) catches it; one-to-one, so two genuine
+    // identical same-day charges only skip as many as are already in the ledger.
+    const contentDupIds = new Set();
+    if (fmt === "aib" && existingRows.length) {
+      const parsedIds = new Set(parsed.map(r => r.revolut_id));
+      const candidates = parsed.filter(r => !importedIds.has(r.revolut_id));
+      // Existing rows this file already matched by id are spoken for — keep them out of the pool.
+      const pool = existingRows.filter(r => !parsedIds.has(r.revolut_id));
+      // The target account may not be chosen yet at file-load time; with a single active
+      // account it's unambiguous, otherwise an unknown account matches any.
+      const acct = selectedBankAccountId ?? (bankAccounts.length === 1 ? bankAccounts[0].id : null);
+      const matches = findContentDuplicates(candidates, pool, {
+        accountOfIncoming: () => acct, unknownMatchesAny: true,
+      });
+      candidates.forEach((r, i) => { if (matches[i]) contentDupIds.add(r.revolut_id); });
+      if (contentDupIds.size) console.log("[BankImport] content-matched duplicates (overlapping statement):", contentDupIds.size);
+    }
+
     // STEP 3: Apply exact matches immediately; keyword fallback for everything else — render now
-    const withStatus = parsed.map(r => ({ ...r, imported: importedIds.has(r.revolut_id) }));
+    const withStatus = parsed.map(r => ({ ...r, imported: importedIds.has(r.revolut_id) || contentDupIds.has(r.revolut_id) }));
     const newTxns = withStatus.filter(r => !r.imported);
     const fuzzyMatched = new Set();
     const needFuzzy = [];
@@ -12529,6 +12554,9 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
     setNominals(updNom);
     setConfidence(updConf);
     setSelected(new Set(newTxns.map(r => r.revolut_id)));
+    if (contentDupIds.size) {
+      setAlert({ type: "ok", msg: `${contentDupIds.size} transaction${contentDupIds.size !== 1 ? "s" : ""} in this file ${contentDupIds.size !== 1 ? "match ones" : "matches one"} already in the ledger (same date, amount and description — likely an overlapping statement) and ${contentDupIds.size !== 1 ? "are" : "is"} marked as already imported.` });
+    }
     console.log("[BankImport] newTxns:", newTxns.length, "imported:", importedIds.size, "exact matched:", fuzzyMatched.size, "needFuzzy:", needFuzzy.length);
 
     // STEP 3b: Async batched fuzzy match against learned payees — yields to browser, 3s timeout
@@ -12837,8 +12865,6 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
           vat_code: vatCode,
         };
       });
-      const { data: insertedJournals, error: jErr } = await db.from("journals").insert(journals).select('id, reference');
-      if (jErr) throw new Error(jErr.message);
       const now = new Date().toISOString();
       const btRows = toPost.map(r => ({
         company_id: cid, revolut_id: r.revolut_id, date: r.date,
@@ -12848,8 +12874,17 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
         bank_format: bankFormat, import_batch_id: batchId,
         reconciled: true, reconciled_at: now,
       }));
-      const { data: insertedBts, error: btErr } = await db.from("bank_transactions").insert(btRows).select('id, revolut_id');
-      if (btErr) throw new Error(btErr.message);
+      // Bank transactions first, journals second (shared with the live feed): the unique
+      // (company_id, revolut_id) constraint rejects an already-imported row BEFORE any journal
+      // exists for it; a failed journal insert rolls this batch's bank transactions back.
+      // journals[] and btRows[] are both built from toPost in order, so they pair by index.
+      const { insertedBts, insertedJournals, skippedDuplicates, error: postErr, rollbackError } =
+        await postImportBatch(db, cid, btRows.map((bt, i) => ({ bt, journal: journals[i] })));
+      if (postErr) {
+        captureError(postErr, { company_id: cid, operation: 'bank-import-post', rollback_failed: !!rollbackError });
+        throw new Error(`Import failed, nothing was posted: ${postErr.message}` +
+          (rollbackError ? ` (rolling back its bank transactions also failed: ${rollbackError.message} — check Import History)` : ''));
+      }
       if (insertedJournals?.length && insertedBts?.length) {
         const allByRef = {};
         for (const bt of insertedBts) { if (!allByRef[bt.revolut_id]) allByRef[bt.revolut_id] = []; allByRef[bt.revolut_id].push(bt.id); }
@@ -12877,7 +12912,9 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
       setSelected(new Set());
       sessionStorage.removeItem('ledgrly_import_session');
       sessionStorage.removeItem('ledgrly_import_nominals');
-      setAlert({ type: "ok", msg: `${toPost.length} transaction${toPost.length !== 1 ? "s" : ""} posted to the ledger.` });
+      const postedN = insertedBts.length;
+      setAlert({ type: "ok", msg: `${postedN} transaction${postedN !== 1 ? "s" : ""} posted to the ledger.` +
+        (skippedDuplicates ? ` ${skippedDuplicates} already in the ledger ${skippedDuplicates !== 1 ? "were" : "was"} skipped.` : "") });
       loadHistory();
     } catch (e) {
       setAlert({ type: "err", msg: e.message });

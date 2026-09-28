@@ -18,6 +18,8 @@
 import { createClient } from '@supabase/supabase-js';
 import { withSentry, captureError } from '../_sentry.js';
 import { decryptToken } from '../_token-crypto.js';
+import { findContentDuplicates, postImportBatch } from '../../src/shared/importDedup.js';
+import { fetchAllRows } from '../../src/shared/fetchAllRows.js';
 
 // ── Yapily auth ───────────────────────────────────────────────────────────────
 function yapilyBasicAuth() {
@@ -58,31 +60,10 @@ function extractCurrency(tx, accountCurrency) {
 // The feed's dedup key (Yapily tx.id) and CSV imports' dedup key (a synthetic hash — see
 // parseAIBCSV/aibHash in App.jsx) live in completely different namespaces, so an id-only
 // check can never catch the same real transaction arriving from both a prior CSV import and
-// the live feed. This normalizes descriptions well enough to compare across those two very
-// differently-formatted sources (AIB's feed transactionInformation is the same underlying
-// text as CSV's Description1/2/3, per buildDescription's comment above, but not byte-identical).
-function normDescForMatch(raw) {
-  return (raw || '')
-    .toLowerCase()
-    .replace(/[^a-z0-9 ]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
-}
-
-function descriptionsLikelyMatch(a, b) {
-  const na = normDescForMatch(a);
-  const nb = normDescForMatch(b);
-  if (!na || !nb) return false;
-  if (na === nb || na.includes(nb) || nb.includes(na)) return true;
-  // Token-overlap fallback — catches reordered/partially-truncated descriptions from
-  // differently-formatted sources without requiring a near-exact string match.
-  const wa = new Set(na.split(' ').filter(w => w.length > 2));
-  const wb = new Set(nb.split(' ').filter(w => w.length > 2));
-  if (!wa.size || !wb.size) return false;
-  let common = 0;
-  for (const w of wa) if (wb.has(w)) common++;
-  return common / Math.min(wa.size, wb.size) >= 0.5;
-}
+// the live feed. The description matching (normDescForMatch / descriptionsLikelyMatch) and
+// the date+amount+account pairing now live in src/shared/importDedup.js, shared with the CSV
+// import (AIB's feed transactionInformation is the same underlying text as CSV's
+// Description1/2/3, per buildDescription's comment below, but not byte-identical).
 
 function buildDescription(tx) {
   // transactionInformation can be a string or an array (e.g. AIB returns 3 elements).
@@ -471,31 +452,27 @@ export default withSentry(async function handler(req, res) {
   const uniqueDates = [...new Set(afterIdDedup.map(r => r.date))];
   let crossSourceDupes = [];
   if (uniqueDates.length) {
-    const { data: sameDateExisting, error: sameDateErr } = await db
+    // Paged — a large first sync spanning many dates could otherwise pass the API's silent
+    // 1,000-row cap and leave this check blind to the rows past it.
+    const { data: sameDateExisting, error: sameDateErr } = await fetchAllRows(() => db
       .from('bank_transactions')
       .select('date, amount, description, revolut_id, bank_format, bank_account_id')
       .eq('company_id', company_id)
-      .in('date', uniqueDates);
+      .in('date', uniqueDates)
+      .order('id'));
 
     if (sameDateErr) {
       captureError(sameDateErr, { company_id, operation: 'yapily-ingest-dedup-tier2' });
       return res.status(500).json({ error: 'Dedup check failed — ingest aborted to avoid risking duplicate transactions: ' + sameDateErr.message });
     }
 
-    const byDateAmountAccount = new Map(); // "date|amount|account_id" → existing rows
-    for (const row of (sameDateExisting ?? [])) {
-      const key = `${row.date}|${Number(row.amount).toFixed(2)}|${row.bank_account_id ?? 'unmapped'}`;
-      if (!byDateAmountAccount.has(key)) byDateAmountAccount.set(key, []);
-      byDateAmountAccount.get(key).push(row);
-    }
-
+    // Strict per-account key, as before (an unmapped row only matches other unmapped rows).
+    const matches = findContentDuplicates(afterIdDedup, sameDateExisting ?? [], {
+      accountOfIncoming: r => bankAccountIdFor(r) ?? null,
+      accountOfExisting: row => row.bank_account_id ?? null,
+    });
     crossSourceDupes = afterIdDedup
-      .map(r => {
-        const key = `${r.date}|${Number(r.amount).toFixed(2)}|${bankAccountIdFor(r) ?? 'unmapped'}`;
-        const candidates = byDateAmountAccount.get(key) ?? [];
-        const match = candidates.find(c => descriptionsLikelyMatch(c.description, r.description));
-        return match ? { ...r, matched_revolut_id: match.revolut_id, matched_bank_format: match.bank_format } : null;
-      })
+      .map((r, i) => matches[i] ? { ...r, matched_revolut_id: matches[i].revolut_id, matched_bank_format: matches[i].bank_format } : null)
       .filter(Boolean);
   }
   const crossSourceIds = new Set(crossSourceDupes.map(d => d.extId));
@@ -784,19 +761,20 @@ export default withSentry(async function handler(req, res) {
     };
   });
 
-  const { data: insertedJournals, error: jErr } = await db
-    .from('journals').insert(journals).select('id, reference');
-  if (jErr) {
-    captureError(jErr, { company_id, operation: 'yapily-ingest-journals' });
-    return res.status(500).json({ error: 'Journal insert failed: ' + jErr.message });
+  // Bank transactions first, journals second (postImportBatch): the unique
+  // (company_id, revolut_id) constraint rejects any already-imported row BEFORE a journal
+  // exists for it, and a failed journal insert rolls the batch's bank transactions back.
+  const journalByRef = new Map(journals.map(j => [j.reference, j]));
+  const pairs = btRows.map(bt => ({ bt, journal: journalByRef.get(bt.revolut_id) ?? null }));
+  const {
+    insertedBts, insertedJournals, skippedDuplicates: dbDupSkipped, error: postErr, rollbackError,
+  } = await postImportBatch(db, company_id, pairs);
+  if (postErr) {
+    captureError(postErr, { company_id, operation: 'yapily-ingest-post', rollback_failed: !!rollbackError });
+    return res.status(500).json({ error: 'Import failed, nothing was posted: ' + postErr.message
+      + (rollbackError ? ` (and rolling back its bank transactions also failed: ${rollbackError.message})` : '') });
   }
-
-  const { data: insertedBts, error: btErr } = await db
-    .from('bank_transactions').insert(btRows).select('id, revolut_id');
-  if (btErr) {
-    captureError(btErr, { company_id, operation: 'yapily-ingest-bank-txns' });
-    return res.status(500).json({ error: 'Bank transaction insert failed: ' + btErr.message });
-  }
+  if (dbDupSkipped) console.log(`[yapily/ingest] ${dbDupSkipped} row(s) already in the ledger — skipped at the database constraint`);
 
   // bank_matches — non-fatal (mirrors CSV import behaviour)
   if (insertedJournals?.length && insertedBts?.length) {
@@ -882,13 +860,13 @@ export default withSentry(async function handler(req, res) {
     console.log(`[yapily/ingest] saved ${rulesSaved} rule(s) from user corrections`);
   }
 
-  console.log(`[yapily/ingest] done — imported ${toProcess.length}, skipped ${dupCount} dupes, ${foreignSkipped.length} foreign, ${pendingSkipped} pending`);
+  console.log(`[yapily/ingest] done — imported ${insertedBts.length}, skipped ${dupCount + dbDupSkipped} dupes, ${foreignSkipped.length} foreign, ${pendingSkipped} pending`);
 
   return res.status(200).json({
     dry_run:              false,
-    imported:             toProcess.length,
+    imported:             insertedBts.length,
     limited_out:          limitedOut,       // how many were held back by the limit
-    skipped:              dupCount,
+    skipped:              dupCount + dbDupSkipped,
     cross_source_skipped: crossSourceDupCount,
     cross_source_details: crossSourceDupes,
     pending_skipped:      pendingSkipped,
