@@ -2120,22 +2120,39 @@ const BANK_NOMINAL_CODE = '1000';
 // more than one real bank account can get its combined cash balance in one call instead of
 // every caller hardcoding a single nominal. A transfer between two of the summed accounts nets
 // to zero in the combined total, which is correct — total cash doesn't move.
+//
+// Summed server-side by the nominal_balance_as_of RPC (supabase/add_nominal_balance_rpc.sql),
+// not by fetching raw journal rows: PostgREST silently caps every response at 1,000 rows, so a
+// client-side sum truncated without error once a company's matching journals passed that (the
+// largest company sat at 992). Same debit-normal semantics; returns exact cents rather than the
+// float-accumulated sum the old reduce produced.
 async function fetchNominalBalanceAsOf(companyId, nominalCodeOrCodes, asOfDate) {
   const codes = Array.isArray(nominalCodeOrCodes) ? nominalCodeOrCodes : [nominalCodeOrCodes];
   if (!codes.length) return 0;
-  const codeSet = new Set(codes);
-  const { data, error } = await supabase.from('journals')
-    .select('debit_account, credit_account, amount')
-    .eq('company_id', companyId)
-    .or(codes.map(c => `debit_account.eq.${c},credit_account.eq.${c}`).join(','))
-    .lte('date', asOfDate);
+  const { data, error } = await supabase.rpc('nominal_balance_as_of', {
+    p_company_id: companyId, p_codes: codes, p_as_of: asOfDate,
+  });
   if (error) throw new Error(error.message);
-  return (data || []).reduce((bal, j) => {
-    const amt = Number(j.amount);
-    if (codeSet.has(j.debit_account))  bal += amt; // debit-normal (asset)
-    if (codeSet.has(j.credit_account)) bal -= amt;
-    return bal;
-  }, 0);
+  return Number(data ?? 0);
+}
+
+// PostgREST silently caps every response at 1,000 rows (HTTP 206, no error) and clamps any
+// .range()/.limit() above that too — so a query that can match more rows must page through.
+// `build` returns a FRESH query builder each call (one can't be re-ranged once awaited), and
+// must carry a total order ending in a unique column (e.g. .order('date').order('id')) or rows
+// can be skipped/duplicated across page boundaries. Stops on an empty page rather than a short
+// one, so it stays correct even if the server cap is ever set below PAGE_SIZE. Returns
+// { data, error } like a single supabase-js call.
+const FETCH_ALL_PAGE_SIZE = 1000;
+async function fetchAllRows(build) {
+  const all = [];
+  for (let from = 0; ; ) {
+    const { data, error } = await build().range(from, from + FETCH_ALL_PAGE_SIZE - 1);
+    if (error) return { data: null, error };
+    if (!data || !data.length) return { data: all, error: null };
+    all.push(...data);
+    from += data.length;
+  }
 }
 
 // Item 2 — a company's active bank_accounts nominal codes, so balance lookups can sum across
@@ -9356,8 +9373,10 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
   useEffect(() => {
     if (!companyId) return;
     (async () => {
-      const { data, error } = await supabase.from('journals').select('*')
-        .eq('company_id', companyId).lte('date', periodEnd).order('date');
+      // Inception-to-date, so it outgrows the 1,000-row response cap first — paged, with id as
+      // the unique tiebreaker fetchAllRows needs (date alone isn't unique).
+      const { data, error } = await fetchAllRows(() => supabase.from('journals').select('*')
+        .eq('company_id', companyId).lte('date', periodEnd).order('date').order('id'));
       if (!error && data) setBsJournals(data);
     })();
   }, [companyId, selPeriod]); // eslint-disable-line
@@ -12219,12 +12238,13 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
         return;
       }
 
-      // Step 2: fetch all bank_transactions — range(0,9999) overrides the default 1000-row cap
+      // Step 2: fetch all bank_transactions — paged via fetchAllRows. (The .range(0, 9999) this
+      // replaced did NOT override the 1,000-row cap; the server clamps it, silently.)
       const selectCols = `import_batch_id, bank_format, amount, ${tsCol}`;
-      const { data, error } = await db.from("bank_transactions")
+      const { data, error } = await fetchAllRows(() => db.from("bank_transactions")
         .select(selectCols)
         .eq("company_id", cid)
-        .range(0, 9999);
+        .order("id"));
 
       console.log("[loadHistory] query cols:", selectCols);
       console.log("[loadHistory] query error:", error?.message || "none");
@@ -12236,11 +12256,11 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
       }
 
       // Step 2b: also fetch journals — catches batches partially reversed or missing from bank_transactions
-      const { data: jData } = await db.from("journals")
+      const { data: jData } = await fetchAllRows(() => db.from("journals")
         .select("import_batch_id, created_at")
         .eq("company_id", cid)
         .not("import_batch_id", "is", null)
-        .range(0, 9999);
+        .order("id"));
       console.log("[loadHistory] journal rows:", jData?.length ?? 0);
 
       if (error) { setHistoryLoading(false); return; }
