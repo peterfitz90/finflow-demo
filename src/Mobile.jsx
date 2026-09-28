@@ -7,6 +7,7 @@ import { InboxZeroCelebration } from './shared/InboxZeroCelebration.jsx';
 import { recScoreCandidate } from './shared/recScore.js';
 import { computeDeadlines } from './shared/computeDeadlines.js';
 import { fetchAllRows } from './shared/fetchAllRows.js';
+import { monthEnd, monthStart } from './shared/dates.js';
 import { useHealthy } from './shared/useHealthy.js';
 import { AutomationHero, HealthPulseDot } from './shared/AutomationHero.jsx';
 import {
@@ -373,8 +374,8 @@ function CashTab({ companyId }) {
   const load = useCallback(async () => {
     if (!companyId) return;
     const now    = new Date();
-    const lmStart = new Date(now.getFullYear(), now.getMonth()-1, 1).toISOString().slice(0,10);
-    const lmEnd   = new Date(now.getFullYear(), now.getMonth(), 0).toISOString().slice(0,10);
+    const lmStart = monthStart(now.getFullYear(), now.getMonth()); // previous month (1-based m = getMonth())
+    const lmEnd   = monthEnd(now.getFullYear(), now.getMonth());
     const [btAll, btLm, recent] = await Promise.all([
       // All-time sum → cash figure; paged past the 1,000-row response cap (id-ordered).
       fetchAllRows(() => supabase.from('bank_transactions').select('amount').eq('company_id', companyId).order('id')),

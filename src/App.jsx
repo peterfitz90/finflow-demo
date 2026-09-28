@@ -11,6 +11,7 @@ import { AutomationHero, HealthPulseDot } from './shared/AutomationHero.jsx';
 import { confirmBankTxn, approveApBill, markApBillPaid } from './shared/approvals.js';
 import { computeDeadlines } from './shared/computeDeadlines.js';
 import { fetchAllRows } from './shared/fetchAllRows.js';
+import { localDateStr, monthEnd, monthStart } from './shared/dates.js';
 import {
   INV_VAT_RATES, INV_VAT_LABELS,
   calcLineAmounts, calcInvTotals, vatCodeForRate,
@@ -2193,7 +2194,6 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
   const [cmpCurrentBalance, setCmpCurrentBalance] = useState(null);
   const [cmpBalance, setCmpBalance] = useState(null);
   const [cmpDates, setCmpDates] = useState(null); // { current, cmp }
-  const localDateStr = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
 
   useEffect(() => {
     if (!companyId || cmpMode === 'none') { setCmpCurrentBalance(null); setCmpBalance(null); setCmpDates(null); return; }
@@ -2244,10 +2244,10 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
     let dayBeforePeriodStart;
     if (ytdMode) {
       const [ySy, ySm] = ytdStart.split('-').map(Number);
-      dayBeforePeriodStart = new Date(ySy, ySm - 1, 0).toISOString().slice(0, 10);
+      dayBeforePeriodStart = monthEnd(ySy, ySm - 1);
     } else {
       const [oy, om] = selPeriod.split('-').map(Number);
-      dayBeforePeriodStart = new Date(oy, om - 1, 0).toISOString().slice(0, 10);
+      dayBeforePeriodStart = monthEnd(oy, om - 1);
     }
     let cancelled = false;
     setOpeningBalLoaded(false);
@@ -2319,7 +2319,7 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
     const lastTxnDate = txns[txns.length - 1].date; // txns ordered ascending
     const [ly, lm] = lastTxnDate.split('-').map(Number);
     const fbStart = `${ly}-${String(lm).padStart(2, '0')}-01`;
-    const fbEnd   = new Date(ly, lm, 0).toISOString().slice(0, 10);
+    const fbEnd   = monthEnd(ly, lm);
     const fbTxns  = txns.filter(t => t.date >= fbStart && t.date <= fbEnd);
     const fbNet   = fbTxns.reduce((s, t) => s + Number(t.amount), 0);
     const fbDays  = new Date(ly, lm, 0).getDate();
@@ -4213,8 +4213,8 @@ function getVATPeriods(vatPeriodType, rosEfiler = false) {
       periods.push({
         val:   `m-${y}-${m}`,
         label: `${MONTH_NAMES_LONG[m]} ${y}`,
-        start: new Date(y, m, 1).toISOString().slice(0, 10),
-        end:   new Date(y, m + 1, 0).toISOString().slice(0, 10),
+        start: monthStart(y, m + 1),
+        end:   monthEnd(y, m + 1),
         due:   new Date(y, m + 1, dueDay).toLocaleDateString("en-IE", { day: "numeric", month: "short", year: "numeric" }),
       });
     }
@@ -4228,8 +4228,8 @@ function getVATPeriods(vatPeriodType, rosEfiler = false) {
       periods.push({
         val:   `b-${y}-${pair}`,
         label: `${MONTH_NAMES_SHORT[sm]}/${MONTH_NAMES_SHORT[em]} ${y}`,
-        start: new Date(y, sm, 1).toISOString().slice(0, 10),
-        end:   new Date(y, em + 1, 0).toISOString().slice(0, 10),
+        start: monthStart(y, sm + 1),
+        end:   monthEnd(y, em + 1),
         due:   new Date(dy, dm % 12, dueDay).toLocaleDateString("en-IE", { day: "numeric", month: "short", year: "numeric" }),
       });
     }
@@ -6610,7 +6610,7 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
   const isHistorical = selPeriod !== curPeriod;
   const [selYear, selMo] = selPeriod.split('-').map(Number);
   const periodStart    = `${selPeriod}-01`;
-  const periodEnd      = new Date(selYear, selMo, 0).toISOString().slice(0, 10);
+  const periodEnd      = monthEnd(selYear, selMo);
   const chkPeriodKey   = new Date(selYear, selMo - 1, 1).toLocaleDateString("en-IE", { month: "long", year: "numeric" });
   const selPeriodLabel = chkPeriodKey;
 
@@ -6639,7 +6639,6 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
   const [cmpDates, setCmpDates] = useState(null);
   useEffect(() => {
     if (!companyId || cmpMode === 'none') { setCmpCurrentBalance(null); setCmpBalance(null); setCmpDates(null); return; }
-    const localDateStr = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
     const curEndDate = new Date(selYear, selMo, 0); // last day of the selected month, same as `periodEnd` above
     const cmpDateStr = cmpMode === 'prev_year'
       ? localDateStr(new Date(curEndDate.getFullYear() - 1, curEndDate.getMonth(), curEndDate.getDate()))
@@ -7847,7 +7846,7 @@ function Checklist({ period, selPeriod, companyId, company }) {
         if (selPeriod && rows.length) {
           const [y, m] = selPeriod.split('-').map(Number);
           const pStart = `${selPeriod}-01`;
-          const pEnd   = new Date(y, m, 0).toISOString().slice(0, 10);
+          const pEnd   = monthEnd(y, m);
           const evaluated = await runChecklistAutoEval(cid, pStart, pEnd, rows);
           setItems(evaluated);
         } else {
@@ -8735,13 +8734,13 @@ function SuggestedJournals({ period, companyId, company }) {
 
   const [py, pm] = period.split('-').map(Number);
   const periodStart = `${period}-01`;
-  const periodEnd   = new Date(py, pm, 0).toISOString().slice(0, 10);
+  const periodEnd   = monthEnd(py, pm);
   const lbStart = (() => {
     let y = py, m = pm - 3;
     while (m <= 0) { m += 12; y--; }
     return `${y}-${String(m).padStart(2, '0')}-01`;
   })();
-  const lbEnd = new Date(py, pm - 1, 0).toISOString().slice(0, 10); // day before period
+  const lbEnd = monthEnd(py, pm - 1); // day before period
 
   // Load existing suggestions for this period
   useEffect(() => {
@@ -9307,7 +9306,7 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
   const [py, pm] = selPeriod.split('-').map(Number);
   const ytdStartYear  = pm >= yearStartMonth ? py : py - 1;
   const ytdStart      = `${ytdStartYear}-${String(yearStartMonth).padStart(2, '0')}-01`;
-  const periodEnd     = new Date(py, pm, 0).toISOString().slice(0, 10);
+  const periodEnd     = monthEnd(py, pm);
 
   const rangeStart    = ytdMode ? ytdStart : `${selPeriod}-01`;
   const reportLabel   = ytdMode ? `YTD to ${periodLabel}` : `${periodLabel} only`;
@@ -9324,14 +9323,14 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
       const start = ytdMode
         ? `${ytdStartYear - 1}-${String(yearStartMonth).padStart(2, '0')}-01`
         : `${py - 1}-${String(pm).padStart(2, '0')}-01`;
-      const end = new Date(py - 1, pm, 0).toISOString().slice(0, 10);
+      const end = monthEnd(py - 1, pm);
       const label = ytdMode ? `YTD ${py - 1}` : new Date(py - 1, pm - 1, 1).toLocaleDateString("en-IE", { month: "short", year: "numeric" });
       return [start, end, label];
     }
     let cpm = pm - 1, cpy = py;
     if (cpm <= 0) { cpm = 12; cpy--; }
     const start = `${cpy}-${String(cpm).padStart(2, '0')}-01`;
-    const end   = new Date(cpy, cpm, 0).toISOString().slice(0, 10);
+    const end   = monthEnd(cpy, cpm);
     return [start, end, new Date(cpy, cpm - 1, 1).toLocaleDateString("en-IE", { month: "short", year: "numeric" })];
   })();
   const showCmp = cmpMode !== "none";
@@ -10324,7 +10323,7 @@ function FullGLReport({ companyId, companyName, company, coaAccounts }) {
   const ytdStartYear  = curMonth >= yearStartMonth ? curYear : curYear - 1;
   const ytdStart      = `${ytdStartYear}-${String(yearStartMonth).padStart(2, '0')}-01`;
   const monthStart    = `${curYear}-${String(curMonth).padStart(2, '0')}-01`;
-  const periodEnd     = new Date(curYear, curMonth, 0).toISOString().slice(0, 10);
+  const periodEnd     = monthEnd(curYear, curMonth);
   const rangeStart    = mode === "ytd" ? ytdStart : monthStart;
 
   const periodLabel = mode === "ytd"
@@ -11320,7 +11319,7 @@ function Journals({ period, selPeriod, companyName, companyId: propCompanyId, re
         const db = supabase;
         const [y, m] = selPeriod.split('-').map(Number);
         const start = `${selPeriod}-01`;
-        const end = new Date(y, m, 0).toISOString().slice(0, 10);
+        const end = monthEnd(y, m);
         const { data: rows, error: rowsErr } = await db
           .from("journals")
           .select("*")
@@ -13759,7 +13758,7 @@ function Chat({ page, companyName, period, selPeriod, companyId, company, onClos
           const sp = selPeriod || (() => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}`; })();
           const [pYear, pMonth] = sp.split('-').map(Number);
           const periodStart = `${sp}-01`;
-          const periodEnd   = new Date(pYear, pMonth, 0).toISOString().slice(0, 10);
+          const periodEnd   = monthEnd(pYear, pMonth);
 
           // Trailing 12 months range for monthly summary
           const trail12Start = (() => {
@@ -17556,12 +17555,11 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
   // Explicit date-range control the worksheet's row list and running-balance seed are sourced
   // from, defaulting off the global selPeriod month the same way Cash Flow/Overview do (end =
   // today if selPeriod is the current in-progress month, else month-end).
-  const wsLocalDateStr = (d) => `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   const defaultWindowForPeriod = (period) => {
     const [py, pm] = period.split('-').map(Number);
     const now = new Date();
     const curPeriod = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
-    const end = period === curPeriod ? wsLocalDateStr(now) : wsLocalDateStr(new Date(py, pm, 0));
+    const end = period === curPeriod ? localDateStr(now) : monthEnd(py, pm);
     return { start: `${period}-01`, end };
   };
   const [windowStart, setWindowStart] = useState(() => defaultWindowForPeriod(selPeriod).start);
@@ -17592,7 +17590,7 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
     // opens — so it always agrees with the ledger instead of relying on someone re-typing it.
     const dayBefore = new Date(windowStart);
     dayBefore.setDate(dayBefore.getDate() - 1);
-    const startingBalance = await fetchNominalBalanceAsOf(companyId, selectedAccount.nominal_code, wsLocalDateStr(dayBefore));
+    const startingBalance = await fetchNominalBalanceAsOf(companyId, selectedAccount.nominal_code, localDateStr(dayBefore));
 
     const { data: txns } = await supabase.from('bank_transactions').select('*')
       .eq('company_id', companyId).eq('bank_account_id', selectedAccountId)
@@ -19325,7 +19323,7 @@ function FixedAssets({ companyId, company, selPeriod }) {
 
       while (ym <= todayYM) {
         const [y, m] = ym.split('-').map(Number);
-        const periodEnd = new Date(y, m, 0).toISOString().slice(0, 10);
+        const periodEnd = monthEnd(y, m);
 
         // Only assets not already caught up for THIS specific period
         const charges = assetList
