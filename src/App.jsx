@@ -7069,10 +7069,16 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
   const saveLayout = (next) => {
     setLayout(next);
     if (!user?.id) return;
+    // .then() is what actually SENDS the request — a supabase-js query builder is lazy and
+    // does nothing until awaited/then'd. This line used to stop at .upsert(...), so no layout
+    // ever reached the server (on top of user_id lacking the unique constraint onConflict
+    // needs — both fixed; see supabase/add_user_report_views.sql).
     supabase.from('user_dashboard_layouts').upsert(
       { user_id: user.id, layout: next, updated_at: new Date().toISOString() },
       { onConflict: 'user_id' }
-    );
+    ).then(({ error }) => {
+      if (error) captureError(error, { operation: 'dashboard-layout-save' });
+    });
   };
 
   const onTileDragStart = (e, id) => { e.dataTransfer.effectAllowed = 'move'; setDragId(id); };
