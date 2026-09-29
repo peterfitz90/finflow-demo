@@ -13,7 +13,7 @@ import { computeDeadlines } from './shared/computeDeadlines.js';
 import { isAccountantFor, portfolioTotals, crossClientDeadlines } from './shared/practicePortfolio.js';
 import { fetchAllRows } from './shared/fetchAllRows.js';
 import { findContentDuplicates, postImportBatch } from './shared/importDedup.js';
-import { localDateStr, monthEnd, monthStart } from './shared/dates.js';
+import { localDateStr, monthEnd, monthStart, todayStr, thisMonthStr, addDaysStr } from './shared/dates.js';
 import { useSavedViews, ViewsMenu } from './shared/SavedViews.jsx';
 import {
   INV_VAT_RATES, INV_VAT_LABELS,
@@ -2289,7 +2289,7 @@ function CashFlow({ selPeriod, setSelPeriod, onNavigate, companyId, company }) {
   // Part 2.3 — ytdMode widens the start to the fiscal year's start; end is unaffected.
   const periodStart    = ytdMode ? ytdStart : `${selPeriod}-01`;
   const periodEndDate  = isCurrentPeriod ? now : new Date(py, pm, 0);
-  const periodEndStr   = periodEndDate.toISOString().slice(0, 10);
+  const periodEndStr   = localDateStr(periodEndDate);
   // Day count: kept as the OLD exact, ISO-conversion-free read when ytdMode is off (byte-
   // identical to before this change). For ytdMode, a generic `new Date(periodEndStr) -
   // new Date(periodStart)` subtraction turned out to be timezone-fragile — periodEndDate is
@@ -2384,7 +2384,7 @@ function CashFlow({ selPeriod, setSelPeriod, onNavigate, companyId, company }) {
   }, [txns]);
 
   // AP: invoices due in the 30 days after the period end
-  const ap30End = new Date(periodEndDate.getTime() + 30 * 86400000).toISOString().slice(0, 10);
+  const ap30End = addDaysStr(periodEndStr, 30);
   const upcomingAP = allInvoices.filter(inv => inv.due_date > periodEndStr && inv.due_date <= ap30End);
 
   const cfLoading = loading || !openingBalLoaded;
@@ -2538,7 +2538,7 @@ function CashFlow({ selPeriod, setSelPeriod, onNavigate, companyId, company }) {
                   <ExportDropdown
                     onCSV={() => downloadCSV(`cash-flow-${ytdMode ? `ytd-to-${selPeriod}` : selPeriod}.csv`, [
                       ["Ledgrly — Cash Flow", periodStart, "to", periodEndStr],
-                      ["Exported", fmtIE(new Date().toISOString().slice(0, 10))],
+                      ["Exported", fmtIE(todayStr())],
                       [],
                       ["Date", "Description", "Nominal", "Amount (€)", "Balance (€)"],
                       ...periodTxnsWithBalance.map(t => [t.date, t.description || "", t.nominal_account || "", fmtEUR(t.amount), fmtEUR(t.runningBalance)]),
@@ -2608,7 +2608,7 @@ function CashFlow({ selPeriod, setSelPeriod, onNavigate, companyId, company }) {
                       <td className="r mono" style={{ color: "var(--muted)" }}>{r.count}×</td>
                       <td className="r mono" style={{ fontWeight: 600, color: "var(--red)" }}>{fmtBal(-r.medAmt)}</td>
                       <td style={{ fontSize: 11, color: "var(--dim)" }}>{r.freq}</td>
-                      <td style={{ fontSize: 11, fontFamily: "Source Code Pro, monospace", color: r.nextDate && r.nextDate <= new Date().toISOString().slice(0, 10) ? "var(--red)" : "var(--muted)" }}>
+                      <td style={{ fontSize: 11, fontFamily: "Source Code Pro, monospace", color: r.nextDate && r.nextDate <= todayStr() ? "var(--red)" : "var(--muted)" }}>
                         {r.nextDate ? fmtDate(r.nextDate) : "—"}
                       </td>
                     </tr>
@@ -2758,7 +2758,7 @@ function Invoices({ companyName, companyId: propCid, company, onNavigate, isBusi
   const baseCurrency = company?.base_currency || 'EUR';
   const fmtC = v => new Intl.NumberFormat('en-IE', { style: 'currency', currency: baseCurrency }).format(Number(v) || 0);
   const fmtN = v => Number(v || 0).toFixed(2);
-  const todayStr = new Date().toISOString().slice(0, 10);
+  const todayStr = todayStr();
 
   // ── Data ──────────────────────────────────────────────────────────────────
   const [allDocs,     setAllDocs]     = useState([]);
@@ -3585,7 +3585,7 @@ function APInvoices({ companyName = "Company", company, onNavigate, isBusinessOw
 
   const emptyForm = () => ({
     supplier: "", invoice_ref: "", amount: "",
-    invoice_date: today.toISOString().slice(0, 10),
+    invoice_date: localDateStr(today),
     due_date: "", status: "pending", payment_method: "bank transfer", notes: "",
     nominal_code: "6600", vat_code: "STD23",
   });
@@ -3787,7 +3787,7 @@ function APInvoices({ companyName = "Company", company, onNavigate, isBusinessOw
     <div className="fade-up">
       <div className="print-only card-body">
         <div className="print-title">{companyName} — Accounts Payable</div>
-        <div className="print-meta">Exported {fmtIE(today.toISOString().slice(0,10))}</div>
+        <div className="print-meta">Exported {fmtIE(localDateStr(today))}</div>
       </div>
 
       {/* ── AP Mailbox address banner ── */}
@@ -3903,8 +3903,8 @@ function APInvoices({ companyName = "Company", company, onNavigate, isBusinessOw
 
       <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, marginBottom: 10 }}>
         {invoices.length > 0 && (
-          <ExportDropdown onCSV={() => downloadCSV(`ap-invoices-${fmtIE(today.toISOString().slice(0,10)).replace(/\//g,"-")}.csv`, [
-            ["Ledgrly — Accounts Payable", companyName, `Exported ${fmtIE(today.toISOString().slice(0,10))}`],
+          <ExportDropdown onCSV={() => downloadCSV(`ap-invoices-${fmtIE(localDateStr(today)).replace(/\//g,"-")}.csv`, [
+            ["Ledgrly — Accounts Payable", companyName, `Exported ${fmtIE(localDateStr(today))}`],
             [],
             ["AP Ref","Supplier","Invoice Ref","Amount (€)","Invoice Date","Due Date","Status","Payment Method","Notes"],
             ...invoices.map((i) => [i.id, i.supplier, i.invoice_ref, fmtEUR(i.amount), fmtIE(i.invoice_date), fmtIE(i.due_date), i.status, i.payment_method, i.notes || ""]),
@@ -5760,7 +5760,7 @@ function Compliance({ company, onNavigate }) {
 
   useEffect(() => {
     if (!company?.id) return;
-    const in90 = new Date(Date.now() + 90 * 86400000).toISOString().slice(0, 10);
+    const in90 = addDaysStr(todayStr(), 90);
     supabase
       .from("contracts")
       .select("id,title,counterparty,contract_type,renewal_date,notice_period_days,auto_renews")
@@ -6013,7 +6013,7 @@ function Contracts({ companyName = "Company", companyId }) {
 
   const emptyForm = () => ({
     title:"", counterparty:"", contract_type:"supplier", value:"",
-    start_date: today.toISOString().slice(0,10), end_date:"",
+    start_date: localDateStr(today), end_date:"",
     renewal_date:"", notice_period_days:"30", status:"active", auto_renews:false, notes:"",
   });
   const [form, setForm] = useState(emptyForm());
@@ -6084,7 +6084,7 @@ function Contracts({ companyName = "Company", companyId }) {
   };
 
   const exportCSV = () => {
-    downloadCSV(`contracts-${fmtIE(today.toISOString().slice(0,10)).replace(/\//g,"-")}.csv`, [
+    downloadCSV(`contracts-${fmtIE(localDateStr(today)).replace(/\//g,"-")}.csv`, [
       ["Title","Counterparty","Type","Value","Start","End","Renewal","Notice Days","Status","Auto-renews","Notes"],
       ...contracts.map(c => [c.title, c.counterparty, c.contract_type, c.value ?? "", fmtIE(c.start_date), fmtIE(c.end_date), fmtIE(c.renewal_date), c.notice_period_days ?? "", c.status, c.auto_renews ? "Yes" : "No", c.notes || ""]),
     ]);
@@ -6122,7 +6122,7 @@ function Contracts({ companyName = "Company", companyId }) {
     <div className="fade-up">
       <div className="print-only card-body">
         <div className="print-title">{companyName} — Contracts</div>
-        <div className="print-meta">Exported {fmtIE(today.toISOString().slice(0,10))}</div>
+        <div className="print-meta">Exported {fmtIE(localDateStr(today))}</div>
       </div>
       {saveError && <div style={{marginBottom:12,fontSize:12,color:"var(--danger)",background:"rgba(220,38,38,0.06)",border:"1px solid rgba(220,38,38,0.2)",borderRadius:4,padding:"8px 12px"}} onClick={()=>setSaveError(null)}>{saveError} ✕</div>}
       {/* KPIs */}
@@ -6678,8 +6678,8 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
     if (!companyId) { setLoading(false); return; }
     (async () => {
       setLoading(true);
-      const today = new Date().toISOString().slice(0, 10);
-      const dayBeforeChartStart = new Date(new Date(chartRangeStart).getTime() - 86400000).toISOString().slice(0, 10);
+      const today = todayStr();
+      const dayBeforeChartStart = addDaysStr(chartRangeStart, -1);
 
       const [periodEndBal, openingForPeriod, btRecent, overdueRes, expRes, chkRes, jnlRes] = await Promise.all([
         // Bank nominal balance as at the end of the selected period — inception-unbounded, same
@@ -6797,12 +6797,12 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
   useEffect(() => {
     if (!companyId) return;
     const now    = new Date();
-    const todayS = now.toISOString().slice(0, 10);
+    const todayS = localDateStr(now);
     const start  = isHistorical
       ? periodStart
-      : new Date(Date.now() - 89 * 86400000).toISOString().slice(0, 10);
+      : addDaysStr(todayStr(), -89);
     const end    = isHistorical ? periodEnd : todayS;
-    const dayBeforeStart = new Date(new Date(start).getTime() - 86400000).toISOString().slice(0, 10);
+    const dayBeforeStart = addDaysStr(start, -1);
     (async () => {
       const [{ data }, openingBal] = await Promise.all([
         supabase.from('bank_transactions')
@@ -6829,9 +6829,9 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
   // (which items are open), not a balance.
   useEffect(() => {
     if (!companyId) return;
-    const today  = new Date().toISOString().slice(0, 10);
-    const d30ago = new Date(Date.now() - 30 * 86400000).toISOString().slice(0, 10);
-    const d30fwd = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+    const today  = todayStr();
+    const d30ago = addDaysStr(todayStr(), -30);
+    const d30fwd = addDaysStr(todayStr(), 30);
     Promise.all([
       fetchNominalBalanceAsOf(companyId, activeBankNominals, d30ago).catch(() => null),
       fetchNominalBalanceAsOf(companyId, '1100', today).catch(() => 0), // Debtors — asset, debit-normal
@@ -6969,7 +6969,7 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
   // For historical periods show deadlines that fell in that month; otherwise next 3 upcoming
   const next3 = isHistorical
     ? deadlines.filter(d => {
-        const ds = d.due.toISOString().slice(0, 10);
+        const ds = localDateStr(d.due);
         return ds >= periodStart && ds <= periodEnd;
       })
     : deadlines.filter(d => daysDiff(d.due) >= -14).slice(0, 3);
@@ -7018,7 +7018,7 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
     });
   });
   // VAT3 draft ready: period ended but not yet filed
-  const todayStr = today.toISOString().slice(0, 10);
+  const todayStr = localDateStr(today);
   getVATPeriods(cs.vat_period || 'bimonthly', company?.ros_efiler || false)
     .filter(p => p.end < todayStr && !vatFiledSet.has(p.val))
     .slice(0, 1)
@@ -9634,7 +9634,7 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
   const bsRetainedBfwd  = priorPeriodsNP + bsDirectRE;
   const bsTotalCapital  = bsShareCap + bsRetainedBfwd + np;
 
-  const exportDate = fmtIE(new Date().toISOString().slice(0, 10));
+  const exportDate = fmtIE(todayStr());
 
   const exportTB = () => downloadCSV(`trial-balance-${slug}.csv`, [
     ["Ledgrly — Trial Balance", companyName, reportLabel],
@@ -10146,7 +10146,7 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
 
       {tab === "aged_ap" && (() => {
         const today = new Date();
-        const todayStr = today.toISOString().slice(0, 10);
+        const todayStr = localDateStr(today);
         const outstanding = apInvoices.filter(inv =>
           inv.status !== 'paid' && inv.status !== 'rejected' && inv.status !== 'needs_review'
         );
@@ -10271,7 +10271,7 @@ function GLExtract({ period, glLines, bsGlLines = [], glAccounts, accountTypeMap
   const totCr = lines.reduce((s, l) => s + l.credit, 0);
   const closingBal = totDr - totCr;
 
-  const exportDate = fmtIE(new Date().toISOString().slice(0, 10));
+  const exportDate = fmtIE(todayStr());
   const exportGL = () => downloadCSV(`gl-extract-${account?.code || "all"}-${period.replace(" ", "-")}.csv`, [
     ["Ledgrly — General Ledger Extract", companyName, period],
     ["Account", account ? `${account.code} — ${account.name}` : ""],
@@ -10412,7 +10412,7 @@ function FullGLReport({ companyId, companyName, company, coaAccounts }) {
   const totalCr  = rows.reduce((s, r) => s + r.credit, 0);
   const balanced = Math.abs(totalDr - totalCr) < 0.005;
 
-  const exportDate = fmtIE(new Date().toISOString().slice(0, 10));
+  const exportDate = fmtIE(todayStr());
 
   const exportCSV = () => {
     const csvRows = [
@@ -10560,7 +10560,7 @@ function FullGLReport({ companyId, companyName, company, coaAccounts }) {
 // original journal is never modified. See computeReclassLegs()/hasRealVatCode() above for
 // the accounting derivation, and the period-lock / VAT-filed gating this enforces.
 function GLReclassModal({ companyId, company, coaAccounts, journal, side, onClose, onDone }) {
-  const today   = new Date().toISOString().slice(0, 10);
+  const today   = todayStr();
   const oldCode = side === 'debit' ? journal.debit_account : journal.credit_account;
   const oldName = (coaAccounts?.find(a => a.code === oldCode)?.name) || GL_ACCOUNTS.find(a => a.code === oldCode)?.name || oldCode;
 
@@ -10871,7 +10871,7 @@ function GLReclassModal({ companyId, company, coaAccounts, journal, side, onClos
 const EMPTY_REC_FORM = () => ({
   name: '', debit_account: '', credit_account: '', amount: '',
   vat_code: '', description_template: '', day_of_month: '28',
-  start_date: new Date().toISOString().slice(0, 10), end_date: '',
+  start_date: todayStr(), end_date: '',
   journal_type: 'standard', active: true,
 });
 
@@ -11300,7 +11300,7 @@ function Journals({ period, selPeriod, companyName, companyId: propCompanyId, re
   // the user actually expanded.
   useEffect(() => { setExpanded(null); }, [searchQ, accountFilter]);
 
-  const emptyForm = () => ({ date: new Date().toISOString().slice(0, 10), description: "", debit_account: "", credit_account: "", amount: "", reference: "" });
+  const emptyForm = () => ({ date: todayStr(), description: "", debit_account: "", credit_account: "", amount: "", reference: "" });
   const [form, setForm] = useState(emptyForm());
 
   const toDisplayJournal = (j) => ({
@@ -11426,7 +11426,7 @@ function Journals({ period, selPeriod, companyName, companyId: propCompanyId, re
   };
 
   const exportCSV = () => downloadCSV(`journals-${selPeriod}.csv`, [
-    ["Ledgrly — Journal Postings", companyName, `${periodLabel} · Exported ${fmtIE(new Date().toISOString().slice(0,10))}`],
+    ["Ledgrly — Journal Postings", companyName, `${periodLabel} · Exported ${fmtIE(todayStr())}`],
     [],
     ["Date", "Reference", "Description", "Debit Account", "Debit Account Name", "Credit Account", "Credit Account Name", "Amount (€)"],
     ...filteredJournals.map(j => [
@@ -11440,7 +11440,7 @@ function Journals({ period, selPeriod, companyName, companyId: propCompanyId, re
     <div className="fade-up">
       <div className="print-only card-body">
         <div className="print-title">{companyName} — Journal Postings</div>
-        <div className="print-meta">Period: {periodLabel} · Exported: {fmtIE(new Date().toISOString().slice(0,10))}</div>
+        <div className="print-meta">Period: {periodLabel} · Exported: {fmtIE(todayStr())}</div>
       </div>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
         <div>
@@ -13548,9 +13548,9 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
             {toast && <span className="bi-toast">✓ {toast}</span>}
             <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
               <button className="btn btn-s btn-sm" onClick={() => downloadCSV(
-                `bank-import-${fmtIE(new Date().toISOString().slice(0,10)).replace(/\//g,"-")}.csv`,
+                `bank-import-${fmtIE(todayStr()).replace(/\//g,"-")}.csv`,
                 [
-                  ["Ledgrly — Bank Import", `Exported ${fmtIE(new Date().toISOString().slice(0,10))}`],
+                  ["Ledgrly — Bank Import", `Exported ${fmtIE(todayStr())}`],
                   [],
                   ["Date", "Description", "Reference", "Amount (€)", "Balance (€)", "Nominal Account", "VAT Code"],
                   ...rows.map(r => {
@@ -13827,8 +13827,8 @@ function Chat({ page, companyName, period, selPeriod, companyId, company, onClos
       try {
         if (companyId) {
           const db = supabase;
-          const today  = new Date().toISOString().slice(0, 10);
-          const in30   = new Date(Date.now() + 30 * 86400000).toISOString().slice(0, 10);
+          const today  = todayStr();
+          const in30   = addDaysStr(todayStr(), 30);
 
           // Derive period bounds from YYYY-MM selPeriod
           const sp = selPeriod || (() => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}`; })();
@@ -15262,7 +15262,7 @@ function FinancialStatements({ company, companyName }) {
       const y = startYear - i;
       const d = new Date(y, yeMonth, 0);
       return {
-        val: d.toISOString().slice(0, 10),
+        val: localDateStr(d),
         label: d.toLocaleDateString("en-IE", { day: "numeric", month: "long", year: "numeric" }),
       };
     });
@@ -15362,7 +15362,7 @@ function FinancialStatements({ company, companyName }) {
   const yeDate  = new Date(yearEnd + "T00:00:00");
   const yeFmt   = yeDate.toLocaleDateString("en-IE", { day: "numeric", month: "long", year: "numeric" });
   const yeYear  = yeDate.getFullYear();
-  const expDate = fmtIE(new Date().toISOString().slice(0, 10));
+  const expDate = fmtIE(todayStr());
 
   // Format as statutory amount: negatives bracketed, zero as dash
   const fa = n => {
@@ -15720,7 +15720,7 @@ function Form11({ company, companyName }) {
       const y = startYear - i;
       const d = new Date(y, yeMonth, 0);
       return {
-        val: d.toISOString().slice(0, 10),
+        val: localDateStr(d),
         label: d.toLocaleDateString("en-IE", { day: "numeric", month: "long", year: "numeric" }),
       };
     });
@@ -16451,7 +16451,7 @@ function PracticeDashboard({ companies, onSelectCompany, onAddCompany }) {
     if (!companies.length) return;
     companies.forEach(async c => {
       try {
-        const today = new Date().toISOString().slice(0, 10);
+        const today = todayStr();
         // Item 3 — real balance via fetchNominalBalanceAsOf across the company's active bank
         // accounts, replacing the raw bank_transactions.balance read (which returns null for
         // every real company today, since the most recent transaction is almost always
@@ -16604,9 +16604,9 @@ function PracticeDashboard({ companies, onSelectCompany, onAddCompany }) {
 
   // Exports what's on screen — filtered rows when a search is active, flagged in both the
   // filename and a header row so a partial export is never mistaken for the full client list.
-  const exportPractice = () => downloadCSV(`practice-dashboard-${new Date().toISOString().slice(0, 10)}${q ? '-filtered' : ''}.csv`, [
+  const exportPractice = () => downloadCSV(`practice-dashboard-${todayStr()}${q ? '-filtered' : ''}.csv`, [
     ["Ledgrly — Practice Dashboard"],
-    ["Exported", fmtIE(new Date().toISOString().slice(0, 10))],
+    ["Exported", fmtIE(todayStr())],
     ...(q ? [["Filtered", `"${search.trim()}" — ${visible.length} of ${companies.length} workspaces`]] : []),
     [],
     ["Client", "Status", "Reason", "Next VAT Due", "AR Owed", "AR Overdue", "Last Import", "Cash"],
@@ -16857,12 +16857,12 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
   const defaultBankNominal = bankAccounts[0]?.nominal_code || '1000';
 
   const today = new Date();
-  const thisMonth = today.toISOString().slice(0, 7);
+  const thisMonth = localDateStr(today).slice(0, 7);
   const fmtD = d => d ? new Date(d).toLocaleDateString("en-IE", { day: "2-digit", month: "short", year: "numeric" }) : "—";
   const pmIcon = pm => ({ company_card:"💳", personal_card:"👤", cash:"💵", bank_transfer:"🏦" }[pm] || "💳");
 
   const emptyForm = () => ({
-    receipt_date: today.toISOString().slice(0,10), supplier:"", description:"",
+    receipt_date: localDateStr(today), supplier:"", description:"",
     amount:"", vat_amount:"0", net_amount:"",
     nominal_account:"6600", nominal_name:"Sundry Expenses", category:"Overheads",
     payment_method:"company_card", notes:"", receipt_text:"",
@@ -17039,13 +17039,13 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
     const d1 = new Date(d); d1.setDate(d1.getDate() + 3);
     const { data } = await supabase.from("bank_transactions")
       .select("revolut_id,date,description,amount").eq("company_id", companyId)
-      .gte("date", d0.toISOString().slice(0,10)).lte("date", d1.toISOString().slice(0,10)).order("date");
+      .gte("date", addDaysStr(exp.receipt_date, -3)).lte("date", addDaysStr(exp.receipt_date, 3)).order("date");
     const candidates = (data || []).filter(r => Math.abs(Math.abs(Number(r.amount)) - exp.amount) < 0.02);
     setMatchData({ expenseId: exp.id, rows: candidates });
   };
 
   const exportCSV = () => downloadCSV(
-    `expenses-${fmtIE(today.toISOString().slice(0,10)).replace(/\//g,"-")}.csv`, [
+    `expenses-${fmtIE(localDateStr(today)).replace(/\//g,"-")}.csv`, [
       ["Date","Submitted By","Supplier","Description","Amount","VAT","Net","Nominal","Payment Method","Status","Notes"],
       ...expenses.map(e => [fmtIE(e.receipt_date), e.submitted_by_name, e.supplier, e.description, e.amount, e.vat_amount, e.net_amount, `${e.nominal_account} ${e.nominal_name}`, e.payment_method?.replace(/_/g," "), e.status, e.notes||""]),
     ]
@@ -17064,7 +17064,7 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
     <div className="fade-up">
       <div className="print-only card-body">
         <div className="print-title">{companyName} — Expenses</div>
-        <div className="print-meta">Exported {fmtIE(today.toISOString().slice(0,10))}</div>
+        <div className="print-meta">Exported {fmtIE(localDateStr(today))}</div>
       </div>
       {/* KPIs */}
       <div className="kpi-grid">
@@ -19462,7 +19462,7 @@ function FixedAssets({ companyId, company, selPeriod }) {
       // the still-uncaught-up assets post their own charge for that same period.
       const posted = new Set((existingRuns || []).map(r => `${r.asset_id}:${r.period}`));
 
-      const todayYM = new Date().toISOString().slice(0, 7);
+      const todayYM = thisMonthStr();
       let ym = earliestYM, postedCount = 0, skippedCount = 0;
       const postedLabels = [];
       let hardError = null;
@@ -19553,7 +19553,7 @@ function FixedAssets({ companyId, company, selPeriod }) {
   }, [assets]); // eslint-disable-line
 
   // ── Computed summaries ─────────────────────────────────────────────────────
-  const periodYM = selPeriod || new Date().toISOString().slice(0, 7);
+  const periodYM = selPeriod || thisMonthStr();
   const thisYear = String(new Date().getFullYear());
   const ytdStart = `${thisYear}-01`;
 
@@ -19574,7 +19574,7 @@ function FixedAssets({ companyId, company, selPeriod }) {
     const def = FA_CATEGORY_DEFAULTS.plant_machinery;
     setAssetForm({
       name: '', description: '', category: 'plant_machinery',
-      cost: '', purchase_date: new Date().toISOString().slice(0, 10),
+      cost: '', purchase_date: todayStr(),
       method: 'straight_line', useful_life_months: '60', rate_percent: '25',
       residual_value: '0',
       asset_nominal: def.asset_nominal, accum_dep_nominal: def.accum_dep_nominal,
@@ -19658,7 +19658,7 @@ function FixedAssets({ companyId, company, selPeriod }) {
   // ── Disposal ───────────────────────────────────────────────────────────────
   const openDisposal = (a) => {
     setDisposalAsset(a);
-    setDisposalForm({ date: new Date().toISOString().slice(0, 10), proceeds: '0', proceeds_nominal: defaultBankNominal });
+    setDisposalForm({ date: todayStr(), proceeds: '0', proceeds_nominal: defaultBankNominal });
     setDisposalErr(null);
     setShowDisposal(true);
   };
@@ -20126,9 +20126,7 @@ function YapilyBankFeeds({ companyId, company, isActive, isBusinessOwner = false
       .order('date', { ascending: false }).limit(1).maybeSingle()
       .then(({ data }) => {
         if (cancelled || !data?.date) return;
-        const next = new Date(data.date);
-        next.setDate(next.getDate() + 1);
-        setImportFromDefault(next.toISOString().slice(0, 10));
+        setImportFromDefault(addDaysStr(data.date, 1));
       });
     return () => { cancelled = true; };
   }, [companyId]);
@@ -21179,7 +21177,7 @@ function BankBalances({ companyId, onDrillToGL }) {
       const { data } = await supabase.from('bank_accounts')
         .select('id, display_name, currency, nominal_code, feed_balance, feed_balance_synced_at')
         .eq('company_id', companyId).eq('is_active', true).order('display_name');
-      const today = new Date().toISOString().slice(0, 10);
+      const today = todayStr();
       const rows = await Promise.all((data || []).map(async (a) => ({
         ...a,
         ledgerBalance: a.nominal_code ? await fetchNominalBalanceAsOf(companyId, a.nominal_code, today) : null,
@@ -21686,7 +21684,7 @@ export default function App() {
         if (!templates?.length) return;
 
         const today = new Date();
-        const todayStr = today.toISOString().slice(0, 10);
+        const todayStr = localDateStr(today);
         let posted = 0, lockedSkips = 0;
         const monthLabels = new Set();
         let hardError = null;

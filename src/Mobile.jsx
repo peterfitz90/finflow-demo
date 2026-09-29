@@ -7,7 +7,7 @@ import { InboxZeroCelebration } from './shared/InboxZeroCelebration.jsx';
 import { recScoreCandidate } from './shared/recScore.js';
 import { computeDeadlines } from './shared/computeDeadlines.js';
 import { fetchAllRows } from './shared/fetchAllRows.js';
-import { monthEnd, monthStart } from './shared/dates.js';
+import { monthEnd, monthStart, todayStr } from './shared/dates.js';
 import { useHealthy } from './shared/useHealthy.js';
 import { AutomationHero, HealthPulseDot } from './shared/AutomationHero.jsx';
 import {
@@ -241,7 +241,7 @@ function HomeTab({ companyId, company, setTab }) {
 
   const load = useCallback(async () => {
     if (!companyId) return;
-    const today = new Date().toISOString().slice(0,10);
+    const today = todayStr();
     const [inv, exp, recent, overdueList] = await Promise.all([
       supabase.from('invoices').select('id').eq('company_id', companyId).lt('due_date', today).neq('status','paid'),
       supabase.from('expenses').select('id').eq('company_id', companyId).eq('status','submitted'),
@@ -456,7 +456,7 @@ function ReceiptCapture({ companyId, user }) {
   const [receiptUrl, setReceiptUrl] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted]   = useState(false);
-  const [form, setForm] = useState({ supplier:'', receipt_date: new Date().toISOString().slice(0,10), amount:'', vat_amount:'0', nominal_account:'6600', payment_method:'company_card', notes:'' });
+  const [form, setForm] = useState({ supplier:'', receipt_date: todayStr(), amount:'', vat_amount:'0', nominal_account:'6600', payment_method:'company_card', notes:'' });
   const fileRef = useRef(null);
   const ff = f => e => setForm(p => ({ ...p, [f]: e.target.value }));
 
@@ -503,7 +503,7 @@ function ReceiptCapture({ companyId, user }) {
       payment_method: form.payment_method, status: 'submitted', notes: form.notes,
     });
     setReceiptUrl(null);
-    setForm({ supplier:'', receipt_date: new Date().toISOString().slice(0,10), amount:'', vat_amount:'0', nominal_account:'6600', payment_method:'company_card', notes:'' });
+    setForm({ supplier:'', receipt_date: todayStr(), amount:'', vat_amount:'0', nominal_account:'6600', payment_method:'company_card', notes:'' });
     setSubmitted(true); setSubmitting(false);
   };
 
@@ -965,7 +965,7 @@ function QuickInvoiceTab({ companyId, company }) {
     if (!canFinalise || !companyId) return;
     setSaving(true); setErr(null);
     try {
-      const todayStr = new Date().toISOString().slice(0, 10);
+      const todayStr = todayStr();
       const currency = company?.base_currency || 'EUR';
       const inv = {
         type: 'invoice',

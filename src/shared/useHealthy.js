@@ -1,3 +1,4 @@
+import { localDateStr } from './dates.js';
 import { useState, useEffect } from 'react';
 import { supabase } from '../supabase.js';
 import { computeDeadlines } from './computeDeadlines.js';
@@ -27,7 +28,7 @@ export function useHealthy(companyId) {
     if (!companyId) { setState({ healthy: null, loading: false }); return; }
 
     const today = new Date(); today.setHours(0,0,0,0);
-    const todayStr = today.toISOString().slice(0, 10);
+    const todayStr = localDateStr(today);
     const diff = d => Math.floor((d - today) / 86400000);
 
     Promise.all([

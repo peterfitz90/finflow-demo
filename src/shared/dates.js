@@ -19,3 +19,16 @@ export const localDateStr = d => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${
 const utcStr = d => `${d.getUTCFullYear()}-${pad(d.getUTCMonth() + 1)}-${pad(d.getUTCDate())}`;
 export const monthEnd   = (y, m) => utcStr(new Date(Date.UTC(y, m, 0)));     // last day of month m
 export const monthStart = (y, m) => utcStr(new Date(Date.UTC(y, m - 1, 1))); // 1st of month m
+
+// "Today" / "this month" on the user's own calendar. `new Date().toISOString().slice(0, 10)` is
+// the UTC date — between 00:00 and 01:00 in Irish summer time (all evening east of UTC) it's
+// yesterday, and on the 1st of a month in that window it's last month.
+export const todayStr     = () => localDateStr(new Date());
+export const thisMonthStr = () => todayStr().slice(0, 7);
+
+// 'YYYY-MM-DD' ± n days, as a string. Done in UTC so it never shifts across a clock change
+// (local-time setDate + toISOString can land on the previous day around DST).
+export const addDaysStr = (ymd, n) => {
+  const [y, m, d] = String(ymd).slice(0, 10).split('-').map(Number);
+  return utcStr(new Date(Date.UTC(y, m - 1, d + n)));
+};

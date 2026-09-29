@@ -1,3 +1,4 @@
+import { todayStr } from './dates.js';
 /**
  * Shared approval functions — used by both mobile and web.
  * Each function is a thin wrapper over a single Postgres RPC that executes
@@ -55,7 +56,7 @@ export async function markApBillPaid(companyId, billId, paidAmt, date, bankAccou
     p_company_id: companyId,
     p_bill_id:    billId,
     p_paid_amt:   paidAmt,
-    p_date:       date ?? new Date().toISOString().slice(0, 10),
+    p_date:       date ?? todayStr(),
     p_bank_account_nominal: bankAccountNominal ?? null,
   });
   if (error) throw new Error(error.message);

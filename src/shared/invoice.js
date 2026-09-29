@@ -1,3 +1,4 @@
+import { todayStr, addDaysStr } from './dates.js';
 // AR invoice engine — shared between web (InvoicesTab) and mobile.
 // Logic is verbatim from App.jsx; only the closure state (cid, customers) has been
 // converted to explicit parameters.
@@ -87,7 +88,7 @@ export async function createInvoiceDraft(supabase, companyId, inv, lines, custom
 
   // Legacy columns (pre-AR-core) that are NOT NULL with no default.
   // invoice_date mirrors issue_date; amount mirrors total (0 for empty drafts).
-  const invoice_date = inv.issue_date || new Date().toISOString().slice(0, 10);
+  const invoice_date = inv.issue_date || todayStr();
   const amount       = totals.total;
 
   let invId = inv.id;
@@ -137,14 +138,20 @@ export async function finaliseInvoice(supabase, companyId, inv, lines, customers
   await upsertInvoiceLines(supabase, inv.id, lines);
   const jids = await postJournals(supabase, companyId, { ...inv, invoice_number: numStr, ...totals }, lines, customers);
   const terms = Number(inv.payment_terms ?? settings?.payment_terms ?? 30);
-  const issueD = new Date(inv.issue_date + 'T00:00:00');
-  issueD.setDate(issueD.getDate() + terms);
+  // Due date = issue date + terms, as a string (was local midnight + toISOString — one day early in summer).
+  //
+  // KNOWN, DELIBERATELY UNCORRECTED DATA: invoices issued before this fix (2026-09-29) during
+  // Irish summer time carry a due_date_calc ONE DAY EARLY. At the time of the fix that was all
+  // 8 invoices with a due_date_calc — Heros Gym INV-009, -010, -011, -013, -014, -016, -018
+  // (all void) and INV-017 (sent; stored 2026-07-28, true due 2026-07-29). They were left as-is
+  // by decision, not oversight — INV-017's PDF already went to the customer showing 28 Jul.
+  // Don't "fix" these in a data migration without checking with the practice first.
   const { error: updErr } = await supabase.from('invoices').update({
     invoice_ref: numStr, invoice_number: numStr, status: 'sent', ...totals,
     client: finalCust.name,
     amount: totals.total,
-    invoice_date: inv.issue_date || new Date().toISOString().slice(0, 10),
-    due_date_calc: !isCN ? issueD.toISOString().slice(0, 10) : null,
+    invoice_date: inv.issue_date || todayStr(),
+    due_date_calc: !isCN ? addDaysStr(inv.issue_date, terms) : null,
     payment_terms: terms, journal_ids: jids, updated_at: new Date().toISOString(),
   }).eq('id', inv.id);
   if (updErr) throw new Error(updErr.message);
