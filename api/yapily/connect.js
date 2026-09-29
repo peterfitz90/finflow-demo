@@ -5,6 +5,7 @@
 
 import { createClient } from '@supabase/supabase-js';
 import { withSentry, captureError } from '../_sentry.js';
+import { requireCompanyMember, AuthError } from '../_auth.js';
 
 function yapilyBasicAuth() {
   const id  = process.env.YAPILY_APP_ID?.trim();
@@ -27,6 +28,17 @@ export default withSentry(async function handler(req, res) {
     institution = 'modelo-sandbox',
   } = req.body ?? {};
   if (!company_id) return res.status(400).json({ error: 'company_id required' });
+
+  // company_id must belong to the caller: this starts a bank consent that, once authorised,
+  // becomes the company's live feed. Unauthenticated, anyone could attach THEIR OWN bank
+  // account to someone else's company, and the (then-open) ingest would post it into that
+  // company's ledger. Any member may connect — a business_owner connects their own bank.
+  try {
+    await requireCompanyMember(req, company_id);
+  } catch (e) {
+    if (e instanceof AuthError) return res.status(e.status).json({ error: e.message });
+    throw e;
+  }
 
   // institutionCountryCode should come from the picker (the institution's real country,
   // per GET /institutions). Validate it's a proper ISO 3166 alpha-2 code before trusting it —

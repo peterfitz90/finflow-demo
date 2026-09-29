@@ -20096,7 +20096,7 @@ function YapilyBankFeeds({ companyId, company, isActive, isBusinessOwner = false
     try {
       const res  = await fetch('/api/yapily/connect', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${await window.Clerk?.session?.getToken()}` },
         body: JSON.stringify({
           company_id:            companyId,
           institution:           inst.id,
@@ -20124,7 +20124,7 @@ function YapilyBankFeeds({ companyId, company, isActive, isBusinessOwner = false
     try {
       const res  = await fetch('/api/yapily/ingest', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${await window.Clerk?.session?.getToken()}` },
         body: JSON.stringify({ company_id: companyId, allow_pending: isSandbox, dry_run: true, import_from: importFromDate || null }),
       });
       const data = await res.json();
@@ -20176,7 +20176,7 @@ function YapilyBankFeeds({ companyId, company, isActive, isBusinessOwner = false
     try {
       const res  = await fetch('/api/yapily/ingest', {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${await window.Clerk?.session?.getToken()}` },
         body: JSON.stringify({
           company_id:    companyId,
           allow_pending: isSandbox,

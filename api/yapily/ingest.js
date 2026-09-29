@@ -20,6 +20,7 @@ import { withSentry, captureError } from '../_sentry.js';
 import { decryptToken } from '../_token-crypto.js';
 import { findContentDuplicates, postImportBatch } from '../../src/shared/importDedup.js';
 import { fetchAllRows } from '../../src/shared/fetchAllRows.js';
+import { requireCompanyMember, AuthError } from '../_auth.js';
 
 // ── Yapily auth ───────────────────────────────────────────────────────────────
 function yapilyBasicAuth() {
@@ -158,6 +159,17 @@ export default withSentry(async function handler(req, res) {
   } = req.body ?? {};
 
   if (!company_id) return res.status(400).json({ error: 'company_id required' });
+
+  // The service-role client below bypasses RLS, so company_id from the body must be
+  // verified against the caller — without this, anyone who knew a company's id could read
+  // its bank transactions (dry_run) or post journals into its ledger (with arbitrary
+  // account overrides). Any member may import: a business_owner feeds their own bank.
+  try {
+    await requireCompanyMember(req, company_id);
+  } catch (e) {
+    if (e instanceof AuthError) return res.status(e.status).json({ error: e.message });
+    throw e;
+  }
 
   const db = createClient(supabaseUrl, serviceKey);
 

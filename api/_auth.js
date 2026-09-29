@@ -13,10 +13,11 @@ class AuthError extends Error {
   }
 }
 
-// Returns the verified caller's Clerk user id if they are the accountant for
-// companyId (direct owner via companies.clerk_user_id, or role='accountant' in
-// user_company_access). Throws AuthError (with .status) otherwise.
-export async function requireAccountant(req, companyId) {
+// Verifies the Bearer token and resolves the caller's role on companyId:
+// 'accountant' (direct owner via companies.clerk_user_id, or role='accountant' in
+// user_company_access), 'business_owner', or null (no access). Throws AuthError on a
+// missing/invalid token. Same membership rule as the RLS helper user_company_ids().
+async function resolveCompanyRole(req, companyId) {
   if (!companyId) throw new AuthError("company_id required", 400);
 
   const authHeader = req.headers["authorization"] || "";
@@ -41,14 +42,30 @@ export async function requireAccountant(req, companyId) {
 
   const { data: co } = await db
     .from("companies").select("clerk_user_id").eq("id", companyId).maybeSingle();
-  if (co?.clerk_user_id === userId) return userId;
+  if (co?.clerk_user_id === userId) return { userId, role: "accountant" };
 
   const { data: access } = await db
     .from("user_company_access").select("role")
     .eq("company_id", companyId).eq("user_id", userId).maybeSingle();
-  if (access?.role === "accountant") return userId;
+  return { userId, role: access?.role ?? null };
+}
 
+// Returns the verified caller's Clerk user id if they are the accountant for
+// companyId (direct owner via companies.clerk_user_id, or role='accountant' in
+// user_company_access). Throws AuthError (with .status) otherwise.
+export async function requireAccountant(req, companyId) {
+  const { userId, role } = await resolveCompanyRole(req, companyId);
+  if (role === "accountant") return userId;
   throw new AuthError("Forbidden — accountant access required", 403);
+}
+
+// Any member of companyId — accountant OR business_owner — i.e. exactly who RLS lets read
+// and write that company's rows. For endpoints both roles legitimately use (the bank feed:
+// a business_owner connects their own bank and imports from it). Returns { userId, role }.
+export async function requireCompanyMember(req, companyId) {
+  const { userId, role } = await resolveCompanyRole(req, companyId);
+  if (role === "accountant" || role === "business_owner") return { userId, role };
+  throw new AuthError("Forbidden — no access to this company", 403);
 }
 
 export { AuthError };

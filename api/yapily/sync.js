@@ -7,6 +7,7 @@
 import { createClient } from '@supabase/supabase-js';
 import { withSentry, captureError } from '../_sentry.js';
 import { decryptToken } from '../_token-crypto.js';
+import { requireAccountant, AuthError } from '../_auth.js';
 
 function yapilyBasicAuth() {
   const id  = process.env.YAPILY_APP_ID?.trim();
@@ -36,6 +37,16 @@ export default withSentry(async function handler(req, res) {
 
   const { company_id } = req.body ?? {};
   if (!company_id) return res.status(400).json({ error: 'company_id required' });
+
+  // Debug/shape-inspection endpoint (nothing in the app calls it) that returns 90 days of raw
+  // bank data straight from Yapily. It was fully open — accountant-only now, same check as
+  // disconnect.js. Candidate for removal once the feed no longer needs shape inspection.
+  try {
+    await requireAccountant(req, company_id);
+  } catch (e) {
+    if (e instanceof AuthError) return res.status(e.status).json({ error: e.message });
+    throw e;
+  }
 
   const db = createClient(supabaseUrl, serviceKey);
 
