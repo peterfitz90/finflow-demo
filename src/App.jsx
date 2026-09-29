@@ -10,6 +10,7 @@ import { useHealthy } from './shared/useHealthy.js';
 import { AutomationHero, HealthPulseDot } from './shared/AutomationHero.jsx';
 import { confirmBankTxn, approveApBill, markApBillPaid } from './shared/approvals.js';
 import { computeDeadlines } from './shared/computeDeadlines.js';
+import { isAccountantFor, portfolioTotals, crossClientDeadlines } from './shared/practicePortfolio.js';
 import { fetchAllRows } from './shared/fetchAllRows.js';
 import { findContentDuplicates, postImportBatch } from './shared/importDedup.js';
 import { localDateStr, monthEnd, monthStart } from './shared/dates.js';
@@ -16490,7 +16491,13 @@ function PracticeDashboard({ companies, onSelectCompany, onAddCompany }) {
     });
   }, [companies.length]); // eslint-disable-line
 
-  // Returns { dueDate, daysUntil } for the most recent unfiled VAT period, or null if all filed.
+  // Returns { dueDate, daysUntil, val } for the MOST URGENT unfiled VAT period (earliest due date)
+  // among the current period and the two before it, or null if all are filed.
+  //
+  // It used to return the first unfiled period in newest-first order — which is always the
+  // current, still-open period — so a genuinely overdue older period was never reported while
+  // the current one was also unfiled (i.e. almost always), and the status column could never
+  // show "VAT overdue". Now every unfiled period is considered and the earliest due wins.
   function getVATStatus(company, vatFiled) {
     if (!company.vat_registered) return null;
     const type   = company.vat_period || 'bimonthly';
@@ -16514,12 +16521,10 @@ function PracticeDashboard({ companies, onSelectCompany, onAddCompany }) {
         periods.push({ val: `b-${y}-${pair}`, dueDate: new Date(dy, dm % 12, dueDay) });
       }
     }
-    for (const p of periods) {
-      if (!vatFiled.has(p.val)) {
-        return { dueDate: p.dueDate, daysUntil: Math.floor((p.dueDate - now) / 86400000) };
-      }
-    }
-    return null;
+    const unfiled = periods.filter(p => !vatFiled.has(p.val)).sort((a, b) => a.dueDate - b.dueDate);
+    if (!unfiled.length) return null;
+    const p = unfiled[0];
+    return { dueDate: p.dueDate, daysUntil: Math.floor((p.dueDate - now) / 86400000), val: p.val };
   }
 
   // Next upcoming VAT3 deadline from computeDeadlines.
@@ -16642,6 +16647,34 @@ function PracticeDashboard({ companies, onSelectCompany, onAddCompany }) {
         </div>
       </div>
 
+      {/* ── A: portfolio totals (RPT-02) — whole book (not the search filter), from the data
+           this dashboard already loaded; no extra queries. ── */}
+      {companies.length > 0 && (() => {
+        const t = portfolioTotals(companies, data, getClientStatus, crossClientDeadlines(companies, data, computeDeadlines, { pastDays: 30, aheadDays: 60 }));
+        const pending = t.loaded < t.clients;
+        const tile = (label, value, sub, color) => (
+          <div style={{ flex: '1 1 150px', minWidth: 0, padding: '10px 12px', border: '1px solid var(--border)', borderRadius: 'var(--radius-card, 8px)', background: 'var(--surface)' }}>
+            <div style={{ fontSize: 10, textTransform: 'uppercase', letterSpacing: '0.06em', color: 'var(--muted)', fontFamily: 'Source Code Pro, monospace' }}>{label}</div>
+            <div style={{ fontSize: 18, fontWeight: 700, color: color || 'var(--text)', marginTop: 2, fontVariantNumeric: 'tabular-nums' }}>{value}</div>
+            {sub && <div style={{ fontSize: 11, color: 'var(--muted)', marginTop: 1 }}>{sub}</div>}
+          </div>
+        );
+        return (
+          <div className="no-print" style={{ display: 'flex', flexWrap: 'wrap', gap: 10, marginBottom: 16 }} aria-label="Portfolio totals">
+            {tile('Total cash', pending ? '…' : fmtMoney(t.cash) + (t.cash < 0 ? ' OD' : ''), pending ? `loading ${t.loaded}/${t.clients} clients` : (t.cashKnown < t.clients ? `${t.cashKnown} of ${t.clients} clients with a bank balance` : `across ${t.clients} clients`), t.cash < 0 ? 'var(--red)' : undefined)}
+            {tile('Owed to clients', pending ? '…' : fmtMoney(t.arTotal), 'open sales invoices')}
+            {tile('Overdue', pending ? '…' : fmtMoney(t.arOverdue), 'past due date', t.arOverdue > 0 ? 'var(--red)' : undefined)}
+            {tile('Client status', pending ? '…' : (
+              <span style={{ display: 'inline-flex', gap: 10 }}>
+                <span style={{ color: DOT.red }} title="Overdue">● {t.red}</span>
+                <span style={{ color: DOT.amber }} title="Needs attention">● {t.amber}</span>
+                <span style={{ color: DOT.green }} title="On track">● {t.green}</span>
+              </span>), 'overdue · attention · on track')}
+            {tile('VAT returns due', pending ? '…' : `${t.vatOverdue + t.vatDueSoon}`, pending ? '' : `clients: ${t.vatOverdue} overdue · ${t.vatDueSoon} due ≤7 days`, t.vatOverdue > 0 ? 'var(--red)' : (t.vatDueSoon > 0 ? 'var(--gold)' : undefined))}
+          </div>
+        );
+      })()}
+
       {/* ── Desktop table ── */}
       <div className="prac-table-wrap">
         <table className="prac-table">
@@ -16754,6 +16787,39 @@ function PracticeDashboard({ companies, onSelectCompany, onAddCompany }) {
           );
         })}
       </div>
+
+      {/* ── B: cross-client deadline list (RPT-02) — computeDeadlines() for every client,
+           filtered to what applies (VAT-registered and not already filed, PAYE-registered,
+           CT1 not for sole traders), one date-sorted list. No extra queries. ── */}
+      {companies.length > 0 && (() => {
+        const rows = crossClientDeadlines(companies, data, computeDeadlines, { pastDays: 30, aheadDays: 60 });
+        const dd = n => n < 0 ? `${-n}d overdue` : n === 0 ? 'today' : `in ${n}d`;
+        return (
+          <div className="card" style={{ marginTop: 18 }}>
+            <div className="card-header"><span className="card-title">Deadlines across all clients</span>
+              <span style={{ fontSize: 11, color: 'var(--muted)', marginLeft: 8 }}>next 60 days · overdue up to 30 days</span></div>
+            {rows.length === 0
+              ? <div style={{ padding: '14px 15px', fontSize: 12, color: 'var(--muted)' }}>Nothing due in the next 60 days.</div>
+              : <div style={{ overflowX: 'auto' }}><table className="prac-table"><tbody>
+                  {rows.map((r, i) => {
+                    const c = companies.find(x => x.id === r.companyId);
+                    const col = r.daysUntil < 0 ? 'var(--red)' : r.daysUntil <= 7 ? 'var(--gold)' : 'var(--text)';
+                    return (
+                      <tr key={r.companyId + r.type + i} className="prac-tr" onClick={() => c && onSelectCompany(c)}>
+                        <td className="prac-td" style={{ width: 96, fontFamily: 'Source Code Pro, monospace', fontSize: 12, color: col, whiteSpace: 'nowrap' }}>{fmtDate(r.due)}</td>
+                        <td className="prac-td" style={{ width: 96, fontSize: 11, color: col, whiteSpace: 'nowrap' }}>{dd(r.daysUntil)}</td>
+                        <td className="prac-td" style={{ fontWeight: 600 }}>{r.companyName}</td>
+                        <td className="prac-td" style={{ fontSize: 12, color: 'var(--muted)' }}>{r.desc}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody></table></div>}
+            <div style={{ padding: '8px 15px', fontSize: 11, color: 'var(--text-faint, var(--muted))', borderTop: '1px solid var(--border)' }}>
+              VAT3 excludes periods already filed in Ledgrly. Other deadlines are computed from each client's settings; their filing status isn't tracked here.
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
@@ -21827,6 +21893,25 @@ export default function App() {
   }, [company?.id]);
   const isBusinessOwner = companyRole === 'business_owner';
 
+  // Practice Dashboard scope (RPT-02): only companies where this user is the ACCOUNTANT. The
+  // companies list comes from RLS (user_company_ids()), which includes companies where the
+  // user is a business_owner too — those must not appear in the practice view or its totals.
+  // One query for the user's own access rows (RLS: own rows only); owners count as accountant.
+  const [roleByCompanyId, setRoleByCompanyId] = useState({});
+  useEffect(() => {
+    if (!user?.id) { setRoleByCompanyId({}); return; }
+    let cancelled = false;
+    supabase.from('user_company_access').select('company_id, role').eq('user_id', user.id)
+      .then(({ data, error }) => {
+        if (error) { captureError(error, { operation: 'practice-roles-load' }); return; }
+        if (!cancelled) setRoleByCompanyId(Object.fromEntries((data || []).map(r => [r.company_id, r.role])));
+      });
+    return () => { cancelled = true; };
+  }, [user?.id, companies.length]);
+  const practiceCompanies = useMemo(
+    () => companies.filter(c => isAccountantFor(c, user?.id, roleByCompanyId)),
+    [companies, user?.id, roleByCompanyId]);
+
   // Bumped by the zeroCompanyCheck safety net below when a delayed resolvePendingAccess
   // retry succeeds, to force the company-resolution effect to re-run and pick up the
   // newly-granted access (user?.id/isLoaded alone wouldn't change in that case).
@@ -22054,7 +22139,7 @@ export default function App() {
   };
 
   const [title, subtitle] = showPractice
-    ? ["Practice Dashboard", `${companies.length} workspaces`]
+    ? ["Practice Dashboard", `${practiceCompanies.length} workspaces`]
     : (titles[page] || ["", ""]);
 
   const openWizard = (step = 1) => { setWizardInitStep(step); setShowWizard(true); };
@@ -22262,7 +22347,7 @@ export default function App() {
             <div className="content">
               {showPractice ? (
                 <PracticeDashboard
-                  companies={companies}
+                  companies={practiceCompanies}
                   onSelectCompany={c => { setCompany(c); setShowPractice(false); setPage("overview"); }}
                   onAddCompany={() => setShowAddCompany(true)}
                 />

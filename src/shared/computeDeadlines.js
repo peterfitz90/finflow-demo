@@ -18,11 +18,13 @@ export function computeDeadlines(company) {
   if (vatPeriod === 'bimonthly') {
     const pairs = [{m:[0,1],dm:2},{m:[2,3],dm:4},{m:[4,5],dm:6},{m:[6,7],dm:8},{m:[8,9],dm:10},{m:[10,11],dm:0,ny:true}];
     for (let y = today.getFullYear()-1; y <= today.getFullYear()+1; y++) {
-      pairs.forEach(p => {
+      pairs.forEach((p, pairIdx) => {
         const due = new Date(p.ny ? y+1 : y, p.dm, 19);
         const d = diff(due);
+        // period_val matches vat_returns.period_val / getVATPeriods ('b-<year>-<pair 0-5>'),
+        // so callers can tell a filed period apart from an outstanding one.
         if (d >= -30 && d <= 120)
-          deadlines.push({ type:"VAT3", desc:`VAT3 — ${MONTH_SHORT[p.m[0]]}/${MONTH_SHORT[p.m[1]]} ${y}`, due });
+          deadlines.push({ type:"VAT3", desc:`VAT3 — ${MONTH_SHORT[p.m[0]]}/${MONTH_SHORT[p.m[1]]} ${y}`, due, period_val: `b-${y}-${pairIdx}` });
       });
     }
   } else {
@@ -31,7 +33,7 @@ export function computeDeadlines(company) {
       const due = new Date(today.getFullYear(), today.getMonth()+i+1, 19);
       const d = diff(due);
       if (d >= -30 && d <= 120)
-        deadlines.push({ type:"VAT3", desc:`VAT3 — ${MONTH_SHORT[m.getMonth()]} ${m.getFullYear()}`, due });
+        deadlines.push({ type:"VAT3", desc:`VAT3 — ${MONTH_SHORT[m.getMonth()]} ${m.getFullYear()}`, due, period_val: `m-${m.getFullYear()}-${m.getMonth()}` });
     }
   }
   for (let y = today.getFullYear()-1; y <= today.getFullYear()+1; y++) {
