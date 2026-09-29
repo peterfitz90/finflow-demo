@@ -13,7 +13,7 @@ import { computeDeadlines } from './shared/computeDeadlines.js';
 import { isAccountantFor, portfolioTotals, crossClientDeadlines } from './shared/practicePortfolio.js';
 import { fetchAllRows } from './shared/fetchAllRows.js';
 import { findContentDuplicates, postImportBatch } from './shared/importDedup.js';
-import { localDateStr, monthEnd, monthStart, todayStr, thisMonthStr, addDaysStr } from './shared/dates.js';
+import { localDateStr, monthEnd, monthStart, todayStr as localToday, thisMonthStr, addDaysStr } from './shared/dates.js';
 import { useSavedViews, ViewsMenu } from './shared/SavedViews.jsx';
 import {
   INV_VAT_RATES, INV_VAT_LABELS,
@@ -2538,7 +2538,7 @@ function CashFlow({ selPeriod, setSelPeriod, onNavigate, companyId, company }) {
                   <ExportDropdown
                     onCSV={() => downloadCSV(`cash-flow-${ytdMode ? `ytd-to-${selPeriod}` : selPeriod}.csv`, [
                       ["Ledgrly — Cash Flow", periodStart, "to", periodEndStr],
-                      ["Exported", fmtIE(todayStr())],
+                      ["Exported", fmtIE(localToday())],
                       [],
                       ["Date", "Description", "Nominal", "Amount (€)", "Balance (€)"],
                       ...periodTxnsWithBalance.map(t => [t.date, t.description || "", t.nominal_account || "", fmtEUR(t.amount), fmtEUR(t.runningBalance)]),
@@ -2608,7 +2608,7 @@ function CashFlow({ selPeriod, setSelPeriod, onNavigate, companyId, company }) {
                       <td className="r mono" style={{ color: "var(--muted)" }}>{r.count}×</td>
                       <td className="r mono" style={{ fontWeight: 600, color: "var(--red)" }}>{fmtBal(-r.medAmt)}</td>
                       <td style={{ fontSize: 11, color: "var(--dim)" }}>{r.freq}</td>
-                      <td style={{ fontSize: 11, fontFamily: "Source Code Pro, monospace", color: r.nextDate && r.nextDate <= todayStr() ? "var(--red)" : "var(--muted)" }}>
+                      <td style={{ fontSize: 11, fontFamily: "Source Code Pro, monospace", color: r.nextDate && r.nextDate <= localToday() ? "var(--red)" : "var(--muted)" }}>
                         {r.nextDate ? fmtDate(r.nextDate) : "—"}
                       </td>
                     </tr>
@@ -2758,7 +2758,7 @@ function Invoices({ companyName, companyId: propCid, company, onNavigate, isBusi
   const baseCurrency = company?.base_currency || 'EUR';
   const fmtC = v => new Intl.NumberFormat('en-IE', { style: 'currency', currency: baseCurrency }).format(Number(v) || 0);
   const fmtN = v => Number(v || 0).toFixed(2);
-  const todayStr = todayStr();
+  const todayStr = localToday();
 
   // ── Data ──────────────────────────────────────────────────────────────────
   const [allDocs,     setAllDocs]     = useState([]);
@@ -5760,7 +5760,7 @@ function Compliance({ company, onNavigate }) {
 
   useEffect(() => {
     if (!company?.id) return;
-    const in90 = addDaysStr(todayStr(), 90);
+    const in90 = addDaysStr(localToday(), 90);
     supabase
       .from("contracts")
       .select("id,title,counterparty,contract_type,renewal_date,notice_period_days,auto_renews")
@@ -6678,7 +6678,7 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
     if (!companyId) { setLoading(false); return; }
     (async () => {
       setLoading(true);
-      const today = todayStr();
+      const today = localToday();
       const dayBeforeChartStart = addDaysStr(chartRangeStart, -1);
 
       const [periodEndBal, openingForPeriod, btRecent, overdueRes, expRes, chkRes, jnlRes] = await Promise.all([
@@ -6800,7 +6800,7 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
     const todayS = localDateStr(now);
     const start  = isHistorical
       ? periodStart
-      : addDaysStr(todayStr(), -89);
+      : addDaysStr(localToday(), -89);
     const end    = isHistorical ? periodEnd : todayS;
     const dayBeforeStart = addDaysStr(start, -1);
     (async () => {
@@ -6829,9 +6829,9 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
   // (which items are open), not a balance.
   useEffect(() => {
     if (!companyId) return;
-    const today  = todayStr();
-    const d30ago = addDaysStr(todayStr(), -30);
-    const d30fwd = addDaysStr(todayStr(), 30);
+    const today  = localToday();
+    const d30ago = addDaysStr(localToday(), -30);
+    const d30fwd = addDaysStr(localToday(), 30);
     Promise.all([
       fetchNominalBalanceAsOf(companyId, activeBankNominals, d30ago).catch(() => null),
       fetchNominalBalanceAsOf(companyId, '1100', today).catch(() => 0), // Debtors — asset, debit-normal
@@ -7914,7 +7914,6 @@ function Checklist({ period, selPeriod, companyId, company }) {
     setLoadingTmpl(true); setChkError(null);
     try {
       const cid = getCid();
-      setResolvedCid(cid);
       const tmpl = CHECKLIST_TEMPLATES_MAP[key].template;
       let so = 0;
       const rows = tmpl.flatMap(({ section, items: tItems }) =>
@@ -8093,7 +8092,6 @@ function Checklist({ period, selPeriod, companyId, company }) {
     if (!newLabel.trim()) return;
     try {
       const cid = getCid();
-      setResolvedCid(cid);
       const { data, error } = await supabase.from("checklists")
         .insert({ company_id: cid, section: newSection.trim() || "General", item_label: newLabel.trim(), is_auto: false, checked: false, period, sort_order: maxSo() })
         .select().single();
@@ -9634,7 +9632,7 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
   const bsRetainedBfwd  = priorPeriodsNP + bsDirectRE;
   const bsTotalCapital  = bsShareCap + bsRetainedBfwd + np;
 
-  const exportDate = fmtIE(todayStr());
+  const exportDate = fmtIE(localToday());
 
   const exportTB = () => downloadCSV(`trial-balance-${slug}.csv`, [
     ["Ledgrly — Trial Balance", companyName, reportLabel],
@@ -10271,7 +10269,7 @@ function GLExtract({ period, glLines, bsGlLines = [], glAccounts, accountTypeMap
   const totCr = lines.reduce((s, l) => s + l.credit, 0);
   const closingBal = totDr - totCr;
 
-  const exportDate = fmtIE(todayStr());
+  const exportDate = fmtIE(localToday());
   const exportGL = () => downloadCSV(`gl-extract-${account?.code || "all"}-${period.replace(" ", "-")}.csv`, [
     ["Ledgrly — General Ledger Extract", companyName, period],
     ["Account", account ? `${account.code} — ${account.name}` : ""],
@@ -10412,7 +10410,7 @@ function FullGLReport({ companyId, companyName, company, coaAccounts }) {
   const totalCr  = rows.reduce((s, r) => s + r.credit, 0);
   const balanced = Math.abs(totalDr - totalCr) < 0.005;
 
-  const exportDate = fmtIE(todayStr());
+  const exportDate = fmtIE(localToday());
 
   const exportCSV = () => {
     const csvRows = [
@@ -10560,7 +10558,7 @@ function FullGLReport({ companyId, companyName, company, coaAccounts }) {
 // original journal is never modified. See computeReclassLegs()/hasRealVatCode() above for
 // the accounting derivation, and the period-lock / VAT-filed gating this enforces.
 function GLReclassModal({ companyId, company, coaAccounts, journal, side, onClose, onDone }) {
-  const today   = todayStr();
+  const today   = localToday();
   const oldCode = side === 'debit' ? journal.debit_account : journal.credit_account;
   const oldName = (coaAccounts?.find(a => a.code === oldCode)?.name) || GL_ACCOUNTS.find(a => a.code === oldCode)?.name || oldCode;
 
@@ -10871,7 +10869,7 @@ function GLReclassModal({ companyId, company, coaAccounts, journal, side, onClos
 const EMPTY_REC_FORM = () => ({
   name: '', debit_account: '', credit_account: '', amount: '',
   vat_code: '', description_template: '', day_of_month: '28',
-  start_date: todayStr(), end_date: '',
+  start_date: localToday(), end_date: '',
   journal_type: 'standard', active: true,
 });
 
@@ -11300,7 +11298,7 @@ function Journals({ period, selPeriod, companyName, companyId: propCompanyId, re
   // the user actually expanded.
   useEffect(() => { setExpanded(null); }, [searchQ, accountFilter]);
 
-  const emptyForm = () => ({ date: todayStr(), description: "", debit_account: "", credit_account: "", amount: "", reference: "" });
+  const emptyForm = () => ({ date: localToday(), description: "", debit_account: "", credit_account: "", amount: "", reference: "" });
   const [form, setForm] = useState(emptyForm());
 
   const toDisplayJournal = (j) => ({
@@ -11426,7 +11424,7 @@ function Journals({ period, selPeriod, companyName, companyId: propCompanyId, re
   };
 
   const exportCSV = () => downloadCSV(`journals-${selPeriod}.csv`, [
-    ["Ledgrly — Journal Postings", companyName, `${periodLabel} · Exported ${fmtIE(todayStr())}`],
+    ["Ledgrly — Journal Postings", companyName, `${periodLabel} · Exported ${fmtIE(localToday())}`],
     [],
     ["Date", "Reference", "Description", "Debit Account", "Debit Account Name", "Credit Account", "Credit Account Name", "Amount (€)"],
     ...filteredJournals.map(j => [
@@ -11440,7 +11438,7 @@ function Journals({ period, selPeriod, companyName, companyId: propCompanyId, re
     <div className="fade-up">
       <div className="print-only card-body">
         <div className="print-title">{companyName} — Journal Postings</div>
-        <div className="print-meta">Period: {periodLabel} · Exported: {fmtIE(todayStr())}</div>
+        <div className="print-meta">Period: {periodLabel} · Exported: {fmtIE(localToday())}</div>
       </div>
       <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 10 }}>
         <div>
@@ -13548,9 +13546,9 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
             {toast && <span className="bi-toast">✓ {toast}</span>}
             <div style={{ marginLeft: "auto", display: "flex", gap: 8 }}>
               <button className="btn btn-s btn-sm" onClick={() => downloadCSV(
-                `bank-import-${fmtIE(todayStr()).replace(/\//g,"-")}.csv`,
+                `bank-import-${fmtIE(localToday()).replace(/\//g,"-")}.csv`,
                 [
-                  ["Ledgrly — Bank Import", `Exported ${fmtIE(todayStr())}`],
+                  ["Ledgrly — Bank Import", `Exported ${fmtIE(localToday())}`],
                   [],
                   ["Date", "Description", "Reference", "Amount (€)", "Balance (€)", "Nominal Account", "VAT Code"],
                   ...rows.map(r => {
@@ -13827,8 +13825,8 @@ function Chat({ page, companyName, period, selPeriod, companyId, company, onClos
       try {
         if (companyId) {
           const db = supabase;
-          const today  = todayStr();
-          const in30   = addDaysStr(todayStr(), 30);
+          const today  = localToday();
+          const in30   = addDaysStr(localToday(), 30);
 
           // Derive period bounds from YYYY-MM selPeriod
           const sp = selPeriod || (() => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}`; })();
@@ -15362,7 +15360,7 @@ function FinancialStatements({ company, companyName }) {
   const yeDate  = new Date(yearEnd + "T00:00:00");
   const yeFmt   = yeDate.toLocaleDateString("en-IE", { day: "numeric", month: "long", year: "numeric" });
   const yeYear  = yeDate.getFullYear();
-  const expDate = fmtIE(todayStr());
+  const expDate = fmtIE(localToday());
 
   // Format as statutory amount: negatives bracketed, zero as dash
   const fa = n => {
@@ -16451,7 +16449,7 @@ function PracticeDashboard({ companies, onSelectCompany, onAddCompany }) {
     if (!companies.length) return;
     companies.forEach(async c => {
       try {
-        const today = todayStr();
+        const today = localToday();
         // Item 3 — real balance via fetchNominalBalanceAsOf across the company's active bank
         // accounts, replacing the raw bank_transactions.balance read (which returns null for
         // every real company today, since the most recent transaction is almost always
@@ -16604,9 +16602,9 @@ function PracticeDashboard({ companies, onSelectCompany, onAddCompany }) {
 
   // Exports what's on screen — filtered rows when a search is active, flagged in both the
   // filename and a header row so a partial export is never mistaken for the full client list.
-  const exportPractice = () => downloadCSV(`practice-dashboard-${todayStr()}${q ? '-filtered' : ''}.csv`, [
+  const exportPractice = () => downloadCSV(`practice-dashboard-${localToday()}${q ? '-filtered' : ''}.csv`, [
     ["Ledgrly — Practice Dashboard"],
-    ["Exported", fmtIE(todayStr())],
+    ["Exported", fmtIE(localToday())],
     ...(q ? [["Filtered", `"${search.trim()}" — ${visible.length} of ${companies.length} workspaces`]] : []),
     [],
     ["Client", "Status", "Reason", "Next VAT Due", "AR Owed", "AR Overdue", "Last Import", "Cash"],
@@ -19574,7 +19572,7 @@ function FixedAssets({ companyId, company, selPeriod }) {
     const def = FA_CATEGORY_DEFAULTS.plant_machinery;
     setAssetForm({
       name: '', description: '', category: 'plant_machinery',
-      cost: '', purchase_date: todayStr(),
+      cost: '', purchase_date: localToday(),
       method: 'straight_line', useful_life_months: '60', rate_percent: '25',
       residual_value: '0',
       asset_nominal: def.asset_nominal, accum_dep_nominal: def.accum_dep_nominal,
@@ -19658,7 +19656,7 @@ function FixedAssets({ companyId, company, selPeriod }) {
   // ── Disposal ───────────────────────────────────────────────────────────────
   const openDisposal = (a) => {
     setDisposalAsset(a);
-    setDisposalForm({ date: todayStr(), proceeds: '0', proceeds_nominal: defaultBankNominal });
+    setDisposalForm({ date: localToday(), proceeds: '0', proceeds_nominal: defaultBankNominal });
     setDisposalErr(null);
     setShowDisposal(true);
   };
@@ -21177,7 +21175,7 @@ function BankBalances({ companyId, onDrillToGL }) {
       const { data } = await supabase.from('bank_accounts')
         .select('id, display_name, currency, nominal_code, feed_balance, feed_balance_synced_at')
         .eq('company_id', companyId).eq('is_active', true).order('display_name');
-      const today = todayStr();
+      const today = localToday();
       const rows = await Promise.all((data || []).map(async (a) => ({
         ...a,
         ledgerBalance: a.nominal_code ? await fetchNominalBalanceAsOf(companyId, a.nominal_code, today) : null,
