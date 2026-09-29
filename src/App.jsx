@@ -8914,8 +8914,8 @@ function SuggestedJournals({ period, companyId, company }) {
         try {
           const resp = await fetch('/api/suggest-journals', {
             method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ candidates: prepayCandidates, period }),
+            headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${await window.Clerk?.session?.getToken()}` },
+            body: JSON.stringify({ candidates: prepayCandidates, period, company_id: companyId }),
           });
           if (resp.ok) {
             const body = await resp.json();
@@ -11836,7 +11836,7 @@ let globalCatAbortCtrl = null;
 
 // Accepts deduplicated payees array: [{ key, name, count, totalAmount, direction }]
 // Returns { map, allChunksFailed }.
-async function categoriseWithAI(uniquePayees, { onProgress, cancelRef, businessContext, txRules } = {}) {
+async function categoriseWithAI(uniquePayees, { onProgress, cancelRef, businessContext, txRules, companyId } = {}) {
   globalCatAbortCtrl = new AbortController();
   const signal = globalCatAbortCtrl.signal;
 
@@ -11870,10 +11870,11 @@ async function categoriseWithAI(uniquePayees, { onProgress, cancelRef, businessC
     const timeoutPromise = new Promise((_, reject) =>
       setTimeout(() => reject(new Error(`Chunk timed out after ${CAT_CHUNK_TIMEOUT / 1000}s`)), CAT_CHUNK_TIMEOUT)
     );
-    const body = businessContext ? { payees: chunk, businessContext } : { payees: chunk };
+    const body = businessContext ? { payees: chunk, businessContext, company_id: companyId } : { payees: chunk, company_id: companyId };
+    const catToken = await window.Clerk?.session?.getToken();
     const fetchPromise = fetch("/api/categorise", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${catToken}` },
       body: JSON.stringify(body),
       signal,
     }).then(async res => {
@@ -12709,6 +12710,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
             cancelRef: cancelCatRef,
             businessContext,
             txRules,
+            companyId: getCid(),
           }
         );
 
@@ -13907,8 +13909,8 @@ RULES: Max 2–3 sentences per reply unless the user asks for detail. Be direct 
     if (!msg.trim() || ctxLoading) return;
     setInp(""); setMsgs(p => [...p, { role: "user", text: msg }]); setTyping(true);
     try {
-      const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ model: "claude-sonnet-4-5", max_tokens: 1000,
+      const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json", 'Authorization': `Bearer ${await window.Clerk?.session?.getToken()}` },
+        body: JSON.stringify({ company_id: companyId, max_tokens: 1000, // model is fixed server-side
           system: systemPrompt,
           messages: [...msgs.map(m => ({ role: m.role, content: m.text })), { role: "user", content: msg }] }) });
       const data = await res.json();
@@ -14226,7 +14228,9 @@ function Settings({ company, onUpdate, onNavigate }) {
   useEffect(() => {
     if (!company?.clerk_org_id) return;
     setMembersLoading(true);
-    fetch(`/api/org-members?orgId=${company.clerk_org_id}`)
+    // Server derives the org from companyId (after checking the caller is its accountant).
+    window.Clerk?.session?.getToken()
+      .then(tok => fetch(`/api/org-members?companyId=${company.id}`, { headers: { 'Authorization': `Bearer ${tok}` } }))
       .then(r => r.json())
       .then(d => { setMembers(d.members || []); setMembersLoading(false); })
       .catch(() => setMembersLoading(false));
@@ -16841,8 +16845,8 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
         rd.readAsDataURL(file);
       });
       const resp = await fetch("/api/extract-receipt", {
-        method: "POST", headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ base64: b64, mediaType: file.type }),
+        method: "POST", headers: { "Content-Type": "application/json", 'Authorization': `Bearer ${await window.Clerk?.session?.getToken()}` },
+        body: JSON.stringify({ base64: b64, mediaType: file.type, company_id: companyId }),
       });
       const d = await resp.json();
       setForm(p => ({

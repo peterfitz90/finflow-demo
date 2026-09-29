@@ -1,11 +1,25 @@
+import { requireCompanyMember, AuthError } from './_auth.js';
+
+const MAX_BASE64_CHARS = 10_000_000; // ~7.5 MB image
+
 export default async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
+
+  const { company_id } = req.body ?? {};
+  // Was fully open — anyone could run image extraction on our API key. Any member (receipts are captured on mobile by the owner).
+  try {
+    await requireCompanyMember(req, company_id);
+  } catch (e) {
+    if (e instanceof AuthError) return res.status(e.status).json({ error: e.message });
+    throw e;
+  }
 
   const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
   if (!apiKey) return res.status(500).json({ error: "ANTHROPIC_API_KEY not configured" });
 
   const { base64, mediaType } = req.body;
   if (!base64) return res.status(400).json({ error: "base64 required" });
+  if (typeof base64 !== "string" || base64.length > MAX_BASE64_CHARS) return res.status(413).json({ error: "Image too large" });
 
   const supportedTypes = ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"];
   const mt = (mediaType || "image/jpeg").toLowerCase();

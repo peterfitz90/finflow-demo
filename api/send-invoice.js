@@ -9,13 +9,6 @@ export const config = { api: { bodyParser: { sizeLimit: "16kb" } } };
 export default withSentry(async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
-  const pmToken = process.env.POSTMARK_SERVER_TOKEN?.trim();
-  if (!pmToken) return res.status(500).json({ error: "POSTMARK_SERVER_TOKEN not configured" });
-
-  const supabaseUrl = process.env.SUPABASE_URL?.trim();
-  const serviceKey  = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
-  if (!supabaseUrl || !serviceKey) return res.status(500).json({ error: "Storage not configured" });
-
   const { invoice_id, company_id } = req.body ?? {};
   if (!invoice_id || !company_id) {
     return res.status(400).json({ error: "invoice_id and company_id required" });
@@ -28,6 +21,15 @@ export default withSentry(async function handler(req, res) {
     if (e instanceof AuthError) return res.status(e.status).json({ error: e.message });
     throw e;
   }
+
+  // Config checks come AFTER auth, so unauthenticated / other-company callers get 401/403
+  // rather than learning how the server is configured.
+  const pmToken = process.env.POSTMARK_SERVER_TOKEN?.trim();
+  if (!pmToken) return res.status(500).json({ error: "POSTMARK_SERVER_TOKEN not configured" });
+
+  const supabaseUrl = process.env.SUPABASE_URL?.trim();
+  const serviceKey  = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+  if (!supabaseUrl || !serviceKey) return res.status(500).json({ error: "Storage not configured" });
 
   const supabase = createClient(supabaseUrl, serviceKey);
 

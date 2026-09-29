@@ -41,7 +41,10 @@ function pickCountryCode(inst, preferredCountry) {
 export default withSentry(async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).json({ error: 'Method not allowed' });
 
-  const country = (req.query.country || 'IE').toUpperCase();
+  // Validated before it goes into the Yapily URL — unvalidated, a value like "IE&foo=bar"
+  // injected extra query parameters into our authenticated request to Yapily.
+  const country = String(req.query.country || 'IE').toUpperCase();
+  if (!/^[A-Z]{2}$/.test(country)) return res.status(400).json({ error: 'country must be a 2-letter ISO code' });
 
   let auth;
   try { auth = yapilyBasicAuth(); }

@@ -6,14 +6,25 @@
 // It NEVER invents amounts, accounts, or journal entries.
 
 import { withSentry } from './_sentry.js';
+import { requireAccountant, AuthError } from './_auth.js';
+
+const MAX_CANDIDATES = 50;
 
 export const config = { api: { bodyParser: { sizeLimit: "256kb" } } };
 
 export default withSentry(async function handler(req, res) {
   if (req.method !== "POST") return res.status(405).end();
 
-  const { candidates, period } = req.body ?? {};
+  const { candidates, period, company_id } = req.body ?? {};
+  // Was fully open (Claude on our API key). Accountant-only, like the Suggested Journals screen that calls it.
+  try {
+    await requireAccountant(req, company_id);
+  } catch (e) {
+    if (e instanceof AuthError) return res.status(e.status).json({ error: e.message });
+    throw e;
+  }
   if (!Array.isArray(candidates) || !candidates.length) return res.json({ results: [] });
+  if (candidates.length > MAX_CANDIDATES) return res.status(413).json({ error: `Too many candidates (max ${MAX_CANDIDATES})` });
 
   const apiKey = process.env.ANTHROPIC_API_KEY?.trim();
 

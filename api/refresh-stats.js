@@ -11,14 +11,25 @@
 // Never called directly by users — protected by CRON_SECRET.
 
 import { createClient } from '@supabase/supabase-js';
+import { timingSafeEqual } from 'crypto';
 
 const WINDOW_DAYS = 30;
 
 export default async function handler(req, res) {
   if (req.method !== 'GET') return res.status(405).end();
 
-  // Vercel sets CRON_SECRET automatically; all cron requests carry it.
-  if (req.headers.authorization !== `Bearer ${process.env.CRON_SECRET}`) {
+  // Vercel sends `Authorization: Bearer <CRON_SECRET>` on cron requests when CRON_SECRET is set
+  // in the project's env. Fail closed if it isn't: the old compare against
+  // `Bearer ${process.env.CRON_SECRET}` let anyone through with "Bearer undefined" whenever the
+  // env var was unset. Constant-time compare.
+  const cronSecret = process.env.CRON_SECRET?.trim();
+  if (!cronSecret) {
+    console.error('[refresh-stats] CRON_SECRET not set — refusing to run');
+    return res.status(401).end();
+  }
+  const got = Buffer.from(req.headers.authorization || '');
+  const want = Buffer.from(`Bearer ${cronSecret}`);
+  if (got.length !== want.length || !timingSafeEqual(got, want)) {
     return res.status(401).end();
   }
 

@@ -474,8 +474,8 @@ function ReceiptCapture({ companyId, user }) {
         rd.readAsDataURL(file);
       });
       const resp = await fetch('/api/extract-receipt', {
-        method:'POST', headers:{'Content-Type':'application/json'},
-        body: JSON.stringify({ base64: b64, mediaType: file.type }),
+        method:'POST', headers:{'Content-Type':'application/json', 'Authorization': `Bearer ${await window.Clerk?.session?.getToken()}`},
+        body: JSON.stringify({ base64: b64, mediaType: file.type, company_id: companyId }),
       });
       const d = await resp.json();
       setForm(p => ({
