@@ -13,6 +13,7 @@ import { computeDeadlines } from './shared/computeDeadlines.js';
 import { fetchAllRows } from './shared/fetchAllRows.js';
 import { findContentDuplicates, postImportBatch } from './shared/importDedup.js';
 import { localDateStr, monthEnd, monthStart } from './shared/dates.js';
+import { useSavedViews, ViewsMenu } from './shared/SavedViews.jsx';
 import {
   INV_VAT_RATES, INV_VAT_LABELS,
   calcLineAmounts, calcInvTotals, vatCodeForRate,
@@ -2163,7 +2164,7 @@ function useActiveBankNominals(companyId) {
 }
 
 // ─── CASH FLOW PAGE ───────────────────────────────────────────────────────────
-function CashFlow({ selPeriod, onNavigate, companyId, company }) {
+function CashFlow({ selPeriod, setSelPeriod, onNavigate, companyId, company }) {
   const now = new Date();
   const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
   const baseCurrency = company?.base_currency || company?.currency || "EUR";
@@ -2192,6 +2193,12 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
   // on ytdMode at all (only the opening anchor/window do), so both comparison options are
   // valid regardless of ytdMode — no gating needed here.
   const [cmpMode, setCmpMode] = useState("none");
+  // Saved views (RPT-01) — see src/shared/SavedViews.jsx
+  const savedViews = useSavedViews({
+    screen: 'cash_flow', companyId, setSelPeriod,
+    current: { ytdMode, cmpMode },
+    apply: c => { if ('ytdMode' in c) setYtdMode(c.ytdMode); if ('cmpMode' in c) setCmpMode(c.cmpMode); },
+  });
   const [cmpCurrentBalance, setCmpCurrentBalance] = useState(null);
   const [cmpBalance, setCmpBalance] = useState(null);
   const [cmpDates, setCmpDates] = useState(null); // { current, cmp }
@@ -2407,6 +2414,7 @@ function CashFlow({ selPeriod, onNavigate, companyId, company }) {
               <option value="prev">Previous period</option>
               <option value="prev_year">Previous year</option>
             </select>
+            <ViewsMenu savedViews={savedViews} companyName={company?.name} />
           </div>
 
           {/* ── Balance comparison ── */}
@@ -6636,6 +6644,12 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
   // fetchNominalBalanceAsOf. Not gated by ytdMode, same reasoning as Cash Flow's — periodEnd
   // itself doesn't depend on ytdMode, so both comparison options are always valid.
   const [cmpMode, setCmpMode] = useState("none");
+  // Saved views (RPT-01) — see src/shared/SavedViews.jsx
+  const savedViews = useSavedViews({
+    screen: 'overview', companyId, setSelPeriod,
+    current: { ytdMode, cmpMode, chartMode },
+    apply: c => { if ('ytdMode' in c) setYtdMode(c.ytdMode); if ('cmpMode' in c) setCmpMode(c.cmpMode); if ('chartMode' in c) setChartMode(c.chartMode); },
+  });
   const [cmpCurrentBalance, setCmpCurrentBalance] = useState(null);
   const [cmpBalance, setCmpBalance] = useState(null);
   const [cmpDates, setCmpDates] = useState(null);
@@ -7291,6 +7305,7 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
             <option value="prev">vs. previous period</option>
             <option value="prev_year">vs. previous year</option>
           </select>
+          <ViewsMenu savedViews={savedViews} companyName={company?.name} />
           <button className="btn btn-s btn-sm" onClick={() => window.print()}>🖨 Print / Save PDF</button>
         </div>
       )}
@@ -9304,6 +9319,12 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
   const [cmpJournals, setCmpJournals] = useState([]);
   const [apInvoices, setApInvoices]   = useState([]);
   const [spendSort, setSpendSort]     = useState("desc");
+  // Saved views (RPT-01) — see src/shared/SavedViews.jsx
+  const savedViews = useSavedViews({
+    screen: 'gl_reports', companyId, setSelPeriod, skipDefault: !!drillAccountCode,
+    current: { tab, ytdMode, cmpMode, spendSort },
+    apply: c => { if ('tab' in c) setTab(c.tab); if ('ytdMode' in c) setYtdMode(c.ytdMode); if ('cmpMode' in c) setCmpMode(c.cmpMode); if ('spendSort' in c) setSpendSort(c.spendSort); },
+  });
   const [drillSupplier, setDrillSupplier] = useState(null);
   // Part 2.4 — set by a BS/TB/P&L/P&L Trend row click; switches to the GL tab pre-selected to
   // that account.
@@ -9714,6 +9735,9 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
             </select>
           </div>
         )}
+        <div style={{ marginLeft: tab === "pnl" ? 0 : "auto" }}>
+          <ViewsMenu savedViews={savedViews} companyName={companyName} />
+        </div>
       </div>
 
       <div className="gl-tabs">
@@ -22245,7 +22269,7 @@ export default function App() {
               ) : (
                 <>
                   {page === "overview"     && <Overview period={period} selPeriod={selPeriod} setSelPeriod={setSelPeriod} appCurPeriod={appCurPeriod} companyId={company?.id} company={company} onNavigate={setPage} recurringPosted={recurringToast} recurringSkipped={recurringSkipped} onOpenWizard={isBusinessOwner ? undefined : openWizard} onDismissGetStarted={dismissGettingStarted} />}
-                  {page === "cashflow"     && <CashFlow selPeriod={selPeriod} onNavigate={setPage} companyId={company?.id} company={company} />}
+                  {page === "cashflow"     && <CashFlow selPeriod={selPeriod} setSelPeriod={setSelPeriod} onNavigate={setPage} companyId={company?.id} company={company} />}
                   {page === "invoices"     && <Invoices companyName={companyName} companyId={company?.id} company={company} onNavigate={setPage} isBusinessOwner={isBusinessOwner} />}
                   {page === "ar-import"   && <BulkARImport companyId={company?.id} />}
                   {page === "ap-invoices"  && <APInvoices companyName={companyName} company={company} onNavigate={setPage} isBusinessOwner={isBusinessOwner} />}
