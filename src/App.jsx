@@ -13822,14 +13822,17 @@ function Chat({ page, companyName, period, selPeriod, companyId, company, onClos
           })();
 
           const [btLatest, overdueInvs, upcomingInvs, periodJournals, trail12Journals] = await Promise.all([
-            db.from('bank_transactions').select('balance').eq('company_id', companyId).lte('date', periodEnd).order('date', { ascending: false }).limit(1),
+            // Bank balance = ledger balance of the active bank nominals at period end (the same source
+            // as Overview / Practice Dashboard). Was bank_transactions.balance of the latest row, which
+            // the live feed never populates — so the AI was told €0.00.
+            fetchActiveBankNominals(companyId).then(codes => fetchNominalBalanceAsOf(companyId, codes.length ? codes : [BANK_NOMINAL_CODE], periodEnd)).catch(() => null),
             db.from('invoices').select('amount,client,invoice_ref').eq('company_id', companyId).lt('due_date', today).neq('status', 'paid'),
             db.from('invoices').select('amount,due_date,client').eq('company_id', companyId).gte('due_date', today).lte('due_date', in30).in('status', ['pending','chased']),
             db.from('journals').select('debit_account,credit_account,amount,date,description,reference').eq('company_id', companyId).gte('date', periodStart).lte('date', periodEnd).order('date'),
             fetchAllRows(() => db.from('journals').select('debit_account,credit_account,amount,date').eq('company_id', companyId).gte('date', trail12Start).lte('date', periodEnd).order('date').order('id')),
           ]);
 
-          const currentBal = btLatest.data?.[0] ? Number(btLatest.data[0].balance) : null;
+          const currentBal = btLatest ?? null;
           const overdueAmt = (overdueInvs.data || []).reduce((s, i) => s + Number(i.amount), 0);
           const overdueN   = overdueInvs.data?.length || 0;
           const upcomingAmt= (upcomingInvs.data || []).reduce((s, i) => s + Number(i.amount), 0);
