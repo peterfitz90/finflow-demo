@@ -993,7 +993,7 @@ function QuickInvoiceTab({ companyId, company }) {
     setSending(true); setErr(null);
     try {
       const r = await fetch('/api/send-invoice', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${await window.Clerk?.session?.getToken()}` },
         body: JSON.stringify({ invoice_id: result.id, company_id: companyId }),
       });
       const d = await r.json();
@@ -1008,7 +1008,7 @@ function QuickInvoiceTab({ companyId, company }) {
     setDownloading(true); setErr(null);
     try {
       const r = await fetch('/api/invoice-pdf', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${await window.Clerk?.session?.getToken()}` },
         body: JSON.stringify({ invoice_id: result.id, company_id: companyId }),
       });
       if (!r.ok) throw new Error('PDF generation failed');

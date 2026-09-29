@@ -1,5 +1,5 @@
 import { createClient } from "@supabase/supabase-js";
-import { createDecipheriv, createHmac } from "crypto";
+import { createDecipheriv, createHmac, timingSafeEqual } from "crypto";
 
 // Raw body required for Stripe signature verification.
 export const config = { api: { bodyParser: false } };
@@ -20,8 +20,12 @@ function verifySignature(rawBody, header, secret) {
   if (!tPart || !v1List.length) return false;
   const ts = tPart.slice(2);
   if (Math.abs(Date.now() / 1000 - Number(ts)) > 300) return false;
-  const expected = createHmac("sha256", secret).update(`${ts}.${rawBody.toString("utf8")}`).digest("hex");
-  return v1List.some(p => p.slice(3) === expected);
+  const expected = Buffer.from(createHmac("sha256", secret).update(`${ts}.${rawBody.toString("utf8")}`).digest("hex"));
+  // Constant-time compare (a plain === leaks how many leading characters matched).
+  return v1List.some(p => {
+    const got = Buffer.from(p.slice(3));
+    return got.length === expected.length && timingSafeEqual(got, expected);
+  });
 }
 
 function weekBounds(isoDate) {
@@ -73,23 +77,39 @@ export default async function handler(req, res) {
     .neq("status", "disconnected")
     .maybeSingle();
 
+  // Same response for "no such connection" as for a bad signature, so the endpoint doesn't
+  // reveal which companies have Stripe connected.
+  const unauthorized = () => res.status(401).json({ error: "Signature verification failed" });
   if (!conn) {
     console.warn(`[stripe-webhook] No active connection for company ${companyId}`);
-    return res.status(404).json({ error: "No active Stripe connection" });
+    return unauthorized();
   }
 
-  // Signature verification
-  if (credKeyHex && conn.credentials_enc) {
-    try {
-      const { signing_secret } = JSON.parse(decrypt(conn.credentials_enc, credKeyHex));
-      if (signing_secret && !verifySignature(body, sigHeader, signing_secret)) {
-        console.warn("[stripe-webhook] Signature verification failed");
-        return res.status(401).json({ error: "Signature verification failed" });
-      }
-    } catch (e) {
-      console.error("[stripe-webhook] Credential decryption error:", e.message);
-      return res.status(500).json({ error: "Credential error" });
-    }
+  // Signature verification — MANDATORY. It used to run only if STRIPE_CRED_KEY was set, the
+  // connection had stored credentials AND a signing secret, so any gap meant unsigned events
+  // were accepted from anyone who knew the company id. Now every one of those is a rejection.
+  if (!credKeyHex) {
+    console.error("[stripe-webhook] STRIPE_CRED_KEY not set — cannot verify signatures, rejecting");
+    return res.status(500).json({ error: "Webhook verification not configured" });
+  }
+  if (!conn.credentials_enc) {
+    console.warn(`[stripe-webhook] Connection for company ${companyId} has no stored credentials — rejecting`);
+    return unauthorized();
+  }
+  let signingSecret;
+  try {
+    ({ signing_secret: signingSecret } = JSON.parse(decrypt(conn.credentials_enc, credKeyHex)));
+  } catch (e) {
+    console.error("[stripe-webhook] Credential decryption error:", e.message);
+    return res.status(500).json({ error: "Credential error" });
+  }
+  if (!signingSecret) {
+    console.warn(`[stripe-webhook] Connection for company ${companyId} has no signing secret — rejecting (reconnect with the whsec_ secret)`);
+    return unauthorized();
+  }
+  if (!verifySignature(body, sigHeader, signingSecret)) {
+    console.warn("[stripe-webhook] Signature verification failed");
+    return unauthorized();
   }
 
   let event;

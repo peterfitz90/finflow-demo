@@ -1,5 +1,6 @@
 import { createClient } from "@supabase/supabase-js";
 import { createCipheriv, createDecipheriv, randomBytes } from "crypto";
+import { requireAccountant, AuthError } from "./_auth.js";
 
 export const config = { api: { bodyParser: { sizeLimit: "16kb" } } };
 
@@ -20,33 +21,39 @@ export default async function handler(req, res) {
 
   const supabase = createClient(supabaseUrl, serviceKey);
 
-  // ── GET: list active connections for a company ────────────────────────────
-  if (req.method === "GET") {
-    const { company_id } = req.query;
-    if (!company_id) return res.status(400).json({ error: "company_id required" });
-    const { data, error } = await supabase
-      .from("provider_connections")
-      .select("id,provider,status,display_name,last_event_at,acc_sales,acc_clearing,acc_fees,acc_bank,webhook_secret_hint,created_at")
-      .eq("company_id", company_id)
-      .neq("status", "disconnected")
-      .order("created_at");
-    if (error) return res.status(500).json({ error: error.message });
-    return res.json({ connections: data || [] });
+  // Every method is accountant-only and scoped to the verified company. The service-role
+  // client bypasses RLS, so company_id from the request must be checked against the caller:
+  // unauthenticated, anyone could replace a company's Stripe credentials (then sign their
+  // own events into its books via the webhook) or disconnect any connection by id.
+  // (The unused GET listing was removed — the app reads provider_connections directly,
+  // under RLS.)
+  const company_id = req.method === "DELETE" ? req.query.company_id : req.body?.company_id;
+  if (req.method !== "DELETE" && req.method !== "POST") return res.status(405).end();
+  try {
+    await requireAccountant(req, company_id);
+  } catch (e) {
+    if (e instanceof AuthError) return res.status(e.status).json({ error: e.message });
+    throw e;
   }
 
-  // ── DELETE: soft-delete a connection ─────────────────────────────────────
+  // ── DELETE: soft-delete a connection (only this company's) ───────────────
   if (req.method === "DELETE") {
     const { id } = req.query;
     if (!id) return res.status(400).json({ error: "id required" });
-    await supabase.from("provider_connections").update({ status: "disconnected" }).eq("id", id);
+    const { data, error } = await supabase.from("provider_connections")
+      .update({ status: "disconnected" }).eq("id", id).eq("company_id", company_id).select("id");
+    if (error) return res.status(500).json({ error: error.message });
+    if (!data?.length) return res.status(404).json({ error: "Connection not found" });
     return res.json({ ok: true });
   }
 
-  if (req.method !== "POST") return res.status(405).end();
-
   // ── POST: create or update connection ─────────────────────────────────────
-  const { company_id, api_key, signing_secret, acc_sales, acc_clearing, acc_fees, acc_bank } = req.body ?? {};
-  if (!company_id || !api_key) return res.status(400).json({ error: "company_id and api_key required" });
+  const { api_key, signing_secret, acc_sales, acc_clearing, acc_fees, acc_bank } = req.body ?? {};
+  if (!api_key) return res.status(400).json({ error: "company_id and api_key required" });
+  // Mandatory: without it the webhook can't verify that events really come from Stripe.
+  if (typeof signing_secret !== "string" || !signing_secret.trim().startsWith("whsec_")) {
+    return res.status(400).json({ error: "The webhook signing secret (whsec_…) is required — copy it from the Stripe webhook endpoint you created for the URL shown." });
+  }
 
   // Validate key against Stripe
   let accountName = "Stripe Account";
@@ -68,9 +75,9 @@ export default async function handler(req, res) {
     return res.status(500).json({ error: "STRIPE_CRED_KEY env var not set — credentials cannot be encrypted" });
   }
 
-  const creds = JSON.stringify({ api_key: api_key.trim(), signing_secret: (signing_secret || "").trim() });
+  const creds = JSON.stringify({ api_key: api_key.trim(), signing_secret: signing_secret.trim() });
   const credentialsEnc = encrypt(creds, credKeyHex);
-  const hint = signing_secret ? `whsec_…${signing_secret.slice(-4)}` : null;
+  const hint = `whsec_…${signing_secret.trim().slice(-4)}`;
 
   const { data, error } = await supabase
     .from("provider_connections")

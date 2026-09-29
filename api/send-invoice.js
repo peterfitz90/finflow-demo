@@ -2,6 +2,7 @@ import { createClient } from "@supabase/supabase-js";
 import { renderInvoicePDF } from "./_invoice-pdf-doc.js";
 import { buildInvoiceHTML } from "./_invoice-html.js";
 import { withSentry, captureError } from './_sentry.js';
+import { requireCompanyMember, AuthError } from './_auth.js';
 
 export const config = { api: { bodyParser: { sizeLimit: "16kb" } } };
 
@@ -18,6 +19,14 @@ export default withSentry(async function handler(req, res) {
   const { invoice_id, company_id } = req.body ?? {};
   if (!invoice_id || !company_id) {
     return res.status(400).json({ error: "invoice_id and company_id required" });
+  }
+
+  // Service role below bypasses RLS — the caller must belong to company_id. Unauthenticated, anyone could email any invoice from our Postmark sender, flip it to sent, and read back the customer email. Any member (a business_owner sends their own invoices).
+  try {
+    await requireCompanyMember(req, company_id);
+  } catch (e) {
+    if (e instanceof AuthError) return res.status(e.status).json({ error: e.message });
+    throw e;
   }
 
   const supabase = createClient(supabaseUrl, serviceKey);

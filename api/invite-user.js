@@ -1,15 +1,19 @@
-import { requireAccountant, AuthError } from './_auth.js';
+import { requireAccountant, companyOrgId, AuthError } from './_auth.js';
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end();
 
-  const { orgId, companyId, emailAddress, role } = req.body;
-  if (!orgId || !companyId || !emailAddress) {
-    return res.status(400).json({ error: 'orgId, companyId and emailAddress required' });
+  // Any orgId in the body is deliberately ignored — the org is derived from the verified
+  // company (companyOrgId), so an accountant can only ever invite into their own company's org.
+  const { companyId, emailAddress, role } = req.body ?? {};
+  if (!companyId || !emailAddress) {
+    return res.status(400).json({ error: 'companyId and emailAddress required' });
   }
 
+  let orgId;
   try {
     await requireAccountant(req, companyId);
+    orgId = await companyOrgId(companyId);
   } catch (e) {
     if (e instanceof AuthError) return res.status(e.status).json({ error: e.message });
     throw e;

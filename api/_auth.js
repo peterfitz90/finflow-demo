@@ -68,4 +68,19 @@ export async function requireCompanyMember(req, companyId) {
   throw new AuthError("Forbidden — no access to this company", 403);
 }
 
+// The Clerk organisation that belongs to companyId, read server-side. Endpoints that act on
+// an org (invites, member listing) must use THIS, never an orgId from the request: the
+// caller's access was verified against companyId, so an org taken from the body could be
+// any other company's — an accountant of their own company could invite themselves into a
+// client's org and, on acceptance, be granted accountant access to that client.
+export async function companyOrgId(companyId) {
+  const supabaseUrl = process.env.SUPABASE_URL?.trim();
+  const serviceKey  = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+  if (!supabaseUrl || !serviceKey) throw new AuthError("Server not configured", 500);
+  const db = createClient(supabaseUrl, serviceKey);
+  const { data } = await db.from("companies").select("clerk_org_id").eq("id", companyId).maybeSingle();
+  if (!data?.clerk_org_id) throw new AuthError("This company has no organisation yet — set one up in Settings first", 409);
+  return data.clerk_org_id;
+}
+
 export { AuthError };

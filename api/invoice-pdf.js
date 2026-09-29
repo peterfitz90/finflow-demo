@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { renderInvoicePDF } from "./_invoice-pdf-doc.js";
 import { withSentry, captureError } from './_sentry.js';
+import { requireCompanyMember, AuthError } from './_auth.js';
 
 export const config = { api: { bodyParser: { sizeLimit: "16kb" } } };
 
@@ -10,6 +11,14 @@ export default withSentry(async function handler(req, res) {
   const { invoice_id, company_id } = req.body ?? {};
   if (!invoice_id || !company_id) {
     return res.status(400).json({ error: "invoice_id and company_id required" });
+  }
+
+  // Service role below bypasses RLS — the caller must belong to company_id. Unauthenticated, anyone could download any invoice (customer + payment details). Any member.
+  try {
+    await requireCompanyMember(req, company_id);
+  } catch (e) {
+    if (e instanceof AuthError) return res.status(e.status).json({ error: e.message });
+    throw e;
   }
 
   const supabaseUrl = process.env.SUPABASE_URL?.trim();

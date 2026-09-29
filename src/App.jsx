@@ -1769,7 +1769,7 @@ function OnboardingWizard({ user, company, onComplete, onUpdate, onDismiss, init
           if (r.ok) {
             const { orgId } = await r.json();
             if (orgId) {
-              await supabase.from('companies').update({ clerk_org_id: orgId }).eq('id', data.id);
+              // clerk_org_id is written server-side by /api/create-org (clients can no longer set it).
               advance(2, { ...data, clerk_org_id: orgId });
               setSaving(false); return;
             }
@@ -2906,7 +2906,7 @@ function Invoices({ companyName, companyId: propCid, company, onNavigate, isBusi
 
   const handlePrint = async (inv) => {
     const r = await fetch('/api/invoice-pdf', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${await window.Clerk?.session?.getToken()}` },
       body: JSON.stringify({ invoice_id: inv.id, company_id: cid }),
     });
     if (!r.ok) { alert('PDF generation failed — check console'); return; }
@@ -2921,7 +2921,7 @@ function Invoices({ companyName, companyId: propCid, company, onNavigate, isBusi
     const cust = customers.find(c => c.id === inv.customer_id);
     if (!cust?.email) { alert('Customer has no email address on file'); return; }
     const r = await fetch('/api/send-invoice', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${await window.Clerk?.session?.getToken()}` },
       body: JSON.stringify({ invoice_id: inv.id, company_id: cid }),
     });
     if (!r.ok) { const err = await r.json().catch(() => ({})); alert('Email failed: ' + (err.error || 'unknown')); return; }
@@ -8464,9 +8464,10 @@ function RevenueFeed({ companyId, company }) {
 
   const connectStripe = async () => {
     if (!connForm.api_key.trim()) { setConnectErr('API key required'); return; }
+    if (!connForm.signing_secret.trim().startsWith('whsec_')) { setConnectErr('Webhook signing secret (whsec_…) required — see step 4 above'); return; }
     setConnecting(true); setConnectErr(null); setWebhookUrl(null);
     const r = await fetch('/api/stripe-connect', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      method: 'POST', headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${await window.Clerk?.session?.getToken()}` },
       body: JSON.stringify({ company_id: companyId, api_key: connForm.api_key.trim(), signing_secret: connForm.signing_secret.trim() }),
     });
     const d = await r.json();
@@ -8479,7 +8480,7 @@ function RevenueFeed({ companyId, company }) {
 
   const disconnectStripe = async (id) => {
     if (!confirm('Disconnect this Stripe account? Existing journal entries are not affected.')) return;
-    await fetch(`/api/stripe-connect?id=${id}`, { method: 'DELETE' });
+    await fetch(`/api/stripe-connect?id=${id}&company_id=${companyId}`, { method: 'DELETE', headers: { 'Authorization': `Bearer ${await window.Clerk?.session?.getToken()}` } });
     loadAll();
   };
 
@@ -14262,7 +14263,7 @@ function Settings({ company, onUpdate, onNavigate }) {
           setCreatingOrgError(msg);
         }
       } else if (d.orgId) {
-        await supabase.from("companies").update({ clerk_org_id: d.orgId }).eq("id", company.id);
+        // clerk_org_id is written server-side by /api/create-org (clients can no longer set it).
         onUpdate({ ...company, clerk_org_id: d.orgId });
       } else {
         setCreatingOrgError("Unexpected response from server — no organisation ID returned.");
@@ -14282,7 +14283,7 @@ function Settings({ company, onUpdate, onNavigate }) {
       const res = await fetch('/api/invite-user', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ orgId: company.clerk_org_id, companyId: company.id, emailAddress: inviteEmail.trim(), role: inviteRole }),
+        body: JSON.stringify({ companyId: company.id, emailAddress: inviteEmail.trim(), role: inviteRole }),
       });
       const d = await res.json();
       if (!res.ok) setInviteMsg({ ok: false, text: d.error || "Invitation failed" });
@@ -14301,7 +14302,7 @@ function Settings({ company, onUpdate, onNavigate }) {
       const res = await fetch('/api/invite-business-owner', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${token}` },
-        body: JSON.stringify({ orgId: company.clerk_org_id, companyId: company.id, emailAddress: bizOwnerEmail.trim() }),
+        body: JSON.stringify({ companyId: company.id, emailAddress: bizOwnerEmail.trim() }),
       });
       const d = await res.json();
       if (!res.ok) setBizOwnerMsg({ ok: false, text: d.error || "Invitation failed" });
@@ -16095,7 +16096,7 @@ function AddCompanyModal({ user, onSuccess, onClose }) {
       if (r.ok) {
         const { orgId } = await r.json();
         if (orgId) {
-          await supabase.from("companies").update({ clerk_org_id: orgId }).eq("id", data.id);
+          // clerk_org_id is written server-side by /api/create-org (clients can no longer set it).
           coData = { ...data, clerk_org_id: orgId };
         }
       } else { orgWarnMsg = "Company saved — team sharing setup failed. Retry in Settings."; }

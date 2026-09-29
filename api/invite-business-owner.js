@@ -6,19 +6,22 @@
 // invitation is accepted (organizationMembership.created) to set
 // user_company_access.role = 'business_owner' rather than the 'accountant' default.
 import { createClient } from '@supabase/supabase-js';
-import { requireAccountant, AuthError } from './_auth.js';
+import { requireAccountant, companyOrgId, AuthError } from './_auth.js';
 
 export default async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end();
 
-  const { companyId, orgId, emailAddress } = req.body ?? {};
-  if (!companyId || !orgId || !emailAddress) {
-    return res.status(400).json({ error: 'companyId, orgId and emailAddress required' });
+  // Any orgId in the body is deliberately ignored — the org is derived from the verified
+  // company (companyOrgId), so an accountant can only ever invite into their own company's org.
+  const { companyId, emailAddress } = req.body ?? {};
+  if (!companyId || !emailAddress) {
+    return res.status(400).json({ error: 'companyId and emailAddress required' });
   }
 
-  let accountantId;
+  let accountantId, orgId;
   try {
     accountantId = await requireAccountant(req, companyId);
+    orgId = await companyOrgId(companyId);
   } catch (e) {
     if (e instanceof AuthError) return res.status(e.status).json({ error: e.message });
     throw e;
