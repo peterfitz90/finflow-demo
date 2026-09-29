@@ -1,10 +1,21 @@
 import { StrictMode, useCallback } from 'react'
 import { createRoot } from 'react-dom/client'
 import { ClerkProvider } from '@clerk/clerk-react'
-import { BrowserRouter, Routes, Route, useNavigate } from 'react-router-dom'
+import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from 'react-router-dom'
 import App from './App.jsx'
 import Mobile from './Mobile.jsx'
 import { initSentry, Sentry } from './sentry.js'
+import { shouldUseMobile } from './shared/viewMode.js'
+
+// Phones get /mobile by default (src/shared/viewMode.js); tablets and desktops the full app.
+// The query string is carried over, so the Yapily bank-connection callback
+// (/?bank_connected=1&company_id=… or /?bank_error=…) lands on the SAME experience the user
+// started from — /mobile on a phone in mobile view, the full app if they chose the full site.
+function RootRoute() {
+  const location = useLocation();
+  if (shouldUseMobile()) return <Navigate to={`/mobile${location.search}`} replace />;
+  return <App />;
+}
 
 initSentry();
 
@@ -51,7 +62,7 @@ createRoot(document.getElementById('root')).render(
         <ClerkWithRouter>
           <Routes>
             <Route path="/mobile" element={<Mobile />} />
-            <Route path="/*" element={<App />} />
+            <Route path="/*" element={<RootRoute />} />
           </Routes>
         </ClerkWithRouter>
       </BrowserRouter>

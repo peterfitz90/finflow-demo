@@ -1,5 +1,8 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { useUser, useAuth } from '@clerk/clerk-react';
+import { useUser, useAuth, useClerk } from '@clerk/clerk-react';
+import { useCompanyContext } from './shared/useCompanyContext.js';
+import { goToFullSite } from './shared/viewMode.js';
+import { isPending } from './entitlements.js';
 import { SignIn } from '@clerk/clerk-react';
 import { supabase } from './supabase.js';
 import { approveApBill, confirmBankTxn } from './shared/approvals.js';
@@ -54,6 +57,27 @@ const M_CSS = `
 
   /* Page header */
   .m-page-hdr { padding: 20px 18px 12px; }
+  .m-topbar { position: sticky; top: 0; z-index: 30; display: flex; align-items: center; gap: 8px; padding: calc(env(safe-area-inset-top, 0px) + 8px) 12px 8px; background: var(--mb); border-bottom: 1px solid var(--mbd); }
+  .m-co-btn { flex: 1; min-width: 0; display: flex; align-items: center; gap: 6px; background: none; border: none; color: var(--mtx); font: 600 14px 'Inter', system-ui, sans-serif; text-align: left; padding: 6px 4px; cursor: pointer; }
+  .m-co-btn:disabled { cursor: default; }
+  .m-co-btn-name { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .m-co-btn-caret { font-size: 10px; color: var(--mm); }
+  .m-menu-btn { width: 40px; height: 40px; border-radius: 10px; background: var(--mc); border: 1px solid var(--mbd); color: var(--mtx); font-size: 18px; cursor: pointer; }
+  .m-sheet-scrim { position: fixed; inset: 0; background: rgba(0,0,0,0.45); z-index: 40; }
+  .m-sheet { position: fixed; left: 0; right: 0; bottom: 0; z-index: 50; max-width: 430px; margin: 0 auto; background: var(--ms); border-top: 1px solid var(--mbd); border-radius: 16px 16px 0 0; padding: 14px 14px calc(14px + env(safe-area-inset-bottom, 0px)); }
+  .m-sheet-title { font-size: 11px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--mm); font-family: 'Source Code Pro', monospace; margin: 2px 4px 10px; }
+  .m-sheet-list { max-height: 55vh; overflow-y: auto; }
+  .m-sheet-item { display: block; width: 100%; text-align: left; background: none; border: none; color: var(--mtx); font: 500 15px 'Inter', system-ui, sans-serif; padding: 13px 8px; border-radius: 10px; cursor: pointer; }
+  .m-sheet-item.active { color: var(--teal2); }
+  .m-sheet-item:active { background: var(--mc); }
+  .m-banner { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 10px 12px 0; padding: 10px 12px; border-radius: 10px; font-size: 13px; }
+  .m-banner.ok { background: rgba(16,185,129,0.12); color: var(--teal2); border: 1px solid rgba(16,185,129,0.3); }
+  .m-banner.err { background: rgba(224,85,85,0.12); color: var(--red); border: 1px solid rgba(224,85,85,0.3); }
+  .m-banner button { background: none; border: none; color: inherit; font-size: 14px; cursor: pointer; }
+  .m-notice { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; padding: 40px 28px; }
+  .m-notice-title { font-size: 17px; font-weight: 600; color: var(--mtx); }
+  .m-notice-body { font-size: 13px; color: var(--mm); line-height: 1.6; max-width: 320px; }
+  .m-link-btn { background: none; border: none; color: var(--teal2); font: 600 14px 'Inter', system-ui, sans-serif; cursor: pointer; padding: 8px; }
   .m-company-name { font-family: 'Playfair Display', serif; font-size: 22px; font-weight: 700; color: var(--mtx); letter-spacing: -0.01em; }
   .m-date-str { font-size: 11px; color: var(--mm); font-family: 'Source Code Pro', monospace; margin-top: 3px; }
 
@@ -205,7 +229,7 @@ function MobileAuth() {
       <div className="m-auth-sub">Mobile · Finance OS</div>
       <p className="m-auth-hint">Sign in to access your dashboard, deadlines, and expense capture on the go.</p>
       <SignIn routing="hash" afterSignInUrl="/mobile" afterSignUpUrl="/mobile" appearance={{ variables: { colorBackground: '#0d1526', colorText: '#e4eaf4', colorInputBackground: '#111d30', colorInputText: '#e4eaf4' } }} />
-      <a className="m-auth-link" href="/">← Back to full app</a>
+      <button type="button" className="m-auth-link m-link-btn" onClick={goToFullSite}>← View full site</button>
     </div>
   );
 }
@@ -1195,12 +1219,78 @@ function AskAiTab() {
 }
 
 // ─── Main Mobile component ────────────────────────────────────────────────────
+// ─── Top bar: company switcher + menu (UX-03 Stage 0) ─────────────────────────
+function MobileTopBar({ companies, company, onSwitch }) {
+  const { signOut } = useClerk();
+  const [picker, setPicker] = useState(false);
+  const [menu, setMenu]     = useState(false);
+  const [q, setQ]           = useState('');
+  const many = companies.length > 1;
+  const shown = q.trim()
+    ? companies.filter(c => (c.name || '').toLowerCase().includes(q.trim().toLowerCase()))
+    : companies;
+  const close = () => { setPicker(false); setMenu(false); setQ(''); };
+  return (
+    <>
+      <div className="m-topbar">
+        <button type="button" className="m-co-btn" onClick={() => { if (many) { setPicker(p => !p); setMenu(false); } }}
+          aria-haspopup={many ? 'listbox' : undefined} aria-expanded={many ? picker : undefined} disabled={!many}>
+          <span className="m-co-btn-name">{company?.name || '—'}</span>
+          {many && <span className="m-co-btn-caret">▾</span>}
+        </button>
+        <button type="button" className="m-menu-btn" aria-label="Menu" aria-expanded={menu}
+          onClick={() => { setMenu(m => !m); setPicker(false); }}>⋯</button>
+      </div>
+      {(picker || menu) && <div className="m-sheet-scrim" onClick={close} />}
+      {picker && (
+        <div className="m-sheet" role="listbox" aria-label="Switch company">
+          <div className="m-sheet-title">Switch company</div>
+          {companies.length >= 6 && (
+            <input className="m-finput" autoFocus placeholder={`Search ${companies.length} companies…`} value={q} onChange={e => setQ(e.target.value)} style={{ marginBottom: 8 }} />
+          )}
+          <div className="m-sheet-list">
+            {shown.map(c => (
+              <button key={c.id} type="button" role="option" aria-selected={c.id === company?.id}
+                className={`m-sheet-item${c.id === company?.id ? ' active' : ''}`}
+                onClick={() => { onSwitch(c); close(); }}>
+                {c.id === company?.id ? '✓ ' : ''}{c.name}
+              </button>
+            ))}
+            {shown.length === 0 && <div className="m-empty">No matching companies</div>}
+          </div>
+        </div>
+      )}
+      {menu && (
+        <div className="m-sheet" role="menu" aria-label="Menu">
+          <button type="button" role="menuitem" className="m-sheet-item" onClick={goToFullSite}>🖥  View full site</button>
+          <button type="button" role="menuitem" className="m-sheet-item" onClick={() => signOut({ redirectUrl: '/mobile' })}>⏻  Sign out</button>
+        </div>
+      )}
+    </>
+  );
+}
+
+// Full-screen message states (loading / access being set up / no company / not yet active).
+function MobileNotice({ title, body, children }) {
+  return (
+    <div className="m-notice">
+      {title && <div className="m-notice-title">{title}</div>}
+      {body && <div className="m-notice-body">{body}</div>}
+      {children}
+    </div>
+  );
+}
+
+const MOBILE_COMPANY_KEY = 'ledgrly_mobile_company'; // last company chosen on this device
+
 export default function Mobile() {
   const { isLoaded, isSignedIn } = useAuth();
-  const { user }                 = useUser();
-  const [tab, setTab]            = useState('home');
-  const [companyId, setCompanyId] = useState(null);
-  const [company, setCompany]    = useState(null);
+  const [tab, setTab] = useState('home');
+  // One source of truth for company / role / access, shared with the full app — this is what
+  // makes /mobile work for business owners (access via user_company_access, not ownership).
+  const { user, companies, company, setCompany, onboarding, companyLoading, zeroCompanyCheck } = useCompanyContext();
+  const companyId = company?.id ?? null;
+  const [bankMsg, setBankMsg] = useState(null); // { ok, text } from the Yapily callback
 
   useEffect(() => {
     if ('serviceWorker' in navigator) {
@@ -1208,39 +1298,80 @@ export default function Mobile() {
     }
   }, []);
 
+  // Bank-connection callback (/mobile?bank_connected=1&company_id=… or ?bank_error=…) — routed
+  // here from / by main.jsx so a phone flow doesn't land on the desktop app. Show the outcome,
+  // remember which company it was for, and clean the URL.
+  const callbackCompanyRef = useRef(null);
   useEffect(() => {
-    if (!user) return;
-    supabase.from('companies').select('*').eq('clerk_user_id', user.id).limit(1)
-      .then(({ data }) => { if (data?.[0]) { setCompanyId(data[0].id); setCompany(data[0]); } });
-  }, [user]);
+    const p = new URLSearchParams(window.location.search);
+    if (!p.has('bank_connected') && !p.has('bank_error')) return;
+    if (p.get('bank_connected') === '1') setBankMsg({ ok: true, text: 'Bank account connected.' });
+    else setBankMsg({ ok: false, text: `Bank connection failed: ${p.get('bank_error')}` });
+    callbackCompanyRef.current = p.get('company_id');
+    window.history.replaceState({}, '', window.location.pathname);
+  }, []);
 
-  if (!isLoaded) return (
+  // Pick the company: the one a bank callback was for, else the last one chosen on this device.
+  const pickedRef = useRef(false);
+  useEffect(() => {
+    if (pickedRef.current || !companies.length) return;
+    pickedRef.current = true;
+    let wanted = callbackCompanyRef.current;
+    if (!wanted) { try { wanted = localStorage.getItem(MOBILE_COMPANY_KEY); } catch { /* ignore */ } }
+    const c = wanted && companies.find(x => x.id === wanted);
+    if (c) setCompany(c);
+  }, [companies, setCompany]);
+
+  const switchCompany = (c) => {
+    setCompany(c);
+    try { localStorage.setItem(MOBILE_COMPANY_KEY, c.id); } catch { /* ignore */ }
+  };
+
+  if (!isLoaded) return (<><style>{M_CSS}</style><div className="m-loading">LOADING…</div></>);
+  if (!isSignedIn) return (<><style>{M_CSS}</style><MobileAuth /></>);
+
+  const shell = (body) => (
     <>
       <style>{M_CSS}</style>
-      <div className="m-loading">LOADING…</div>
+      <div className="m-wrap">{body}</div>
     </>
   );
+  const fullSiteLink = <button type="button" className="m-link-btn" onClick={goToFullSite}>View full site</button>;
 
-  if (!isSignedIn) return (
-    <>
-      <style>{M_CSS}</style>
-      <MobileAuth />
-    </>
-  );
+  // Same gates as the full app, in the same order.
+  if (onboarding && (zeroCompanyCheck === null || zeroCompanyCheck === 'pending'))
+    return shell(<MobileNotice title="Setting up your access…" />);
+  if (onboarding && zeroCompanyCheck === 'has_access')
+    return shell(<MobileNotice title="Having trouble loading your account"
+      body="This can happen right after accepting an invite. Try again, or sign out and back in.">
+      <button type="button" className="m-btn m-btn-p" onClick={() => window.location.reload()}>Try again</button>
+    </MobileNotice>);
+  if (onboarding)
+    return shell(<MobileNotice title="No company yet" body="Set up your first company on the full site — it takes a few minutes, then everything is available here too.">{fullSiteLink}</MobileNotice>);
+  if (companyLoading && !company) return (<><style>{M_CSS}</style><div className="m-loading">LOADING…</div></>);
+  if (company && isPending(company))
+    return shell(<>
+      <MobileTopBar companies={companies} company={company} onSwitch={switchCompany} />
+      <MobileNotice title="Awaiting activation" body={`${company.name} isn't active yet. You'll get access to everything once it's activated.`}>{fullSiteLink}</MobileNotice>
+    </>);
 
-  return (
+  return shell(
     <>
-      <style>{M_CSS}</style>
-      <div className="m-wrap">
-        <div className="m-content">
-          {tab === 'home'       && <HomeTab          companyId={companyId} company={company} setTab={setTab} />}
-          {tab === 'approvals'  && <ApprovalsTab     companyId={companyId} user={user} />}
-          {tab === 'cash'       && <CashTab          companyId={companyId} />}
-          {tab === 'compliance' && <ComplianceTab    company={company} />}
-          {tab === 'invoice'    && <QuickInvoiceTab  companyId={companyId} company={company} />}
+      <MobileTopBar companies={companies} company={company} onSwitch={switchCompany} />
+      {bankMsg && (
+        <div className={`m-banner ${bankMsg.ok ? 'ok' : 'err'}`} role="status">
+          <span>{bankMsg.text}</span>
+          <button type="button" aria-label="Dismiss" onClick={() => setBankMsg(null)}>✕</button>
         </div>
-        <BottomNav tab={tab} setTab={setTab} />
+      )}
+      <div className="m-content">
+        {tab === 'home'       && <HomeTab          key={companyId} companyId={companyId} company={company} setTab={setTab} />}
+        {tab === 'approvals'  && <ApprovalsTab     key={companyId} companyId={companyId} user={user} />}
+        {tab === 'cash'       && <CashTab          key={companyId} companyId={companyId} />}
+        {tab === 'compliance' && <ComplianceTab    key={companyId} company={company} />}
+        {tab === 'invoice'    && <QuickInvoiceTab  key={companyId} companyId={companyId} company={company} />}
       </div>
+      <BottomNav tab={tab} setTab={setTab} />
     </>
   );
 }

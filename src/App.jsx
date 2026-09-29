@@ -15,36 +15,14 @@ import { fetchAllRows } from './shared/fetchAllRows.js';
 import { findContentDuplicates, postImportBatch } from './shared/importDedup.js';
 import { localDateStr, monthEnd, monthStart, todayStr as localToday, thisMonthStr, addDaysStr } from './shared/dates.js';
 import { useSavedViews, ViewsMenu } from './shared/SavedViews.jsx';
+import { useCompanyContext, resolvePendingAccess } from './shared/useCompanyContext.js';
+import { NARROW_QUERY, matches as matchesMedia, goToMobile } from './shared/viewMode.js';
 import {
   INV_VAT_RATES, INV_VAT_LABELS,
   calcLineAmounts, calcInvTotals, vatCodeForRate,
   upsertInvoiceLines, postJournals,
   createInvoiceDraft, finaliseInvoice,
 } from './shared/invoice.js';
-
-// Resolves any pending business_owner invite for the CURRENTLY signed-in Clerk user
-// synchronously, instead of relying solely on the async organizationMembership.created
-// webhook (api/clerk/webhook.js) to have already written user_company_access by the time
-// company resolution runs. Used both by the normal company-resolution effect (App) and as
-// a last-ditch guard before OnboardingWizard creates a new company, so an invited user can
-// never be routed into "create your own company" while their real invite is still pending.
-// Best-effort — resolves to [] (not the resolved company ids) on any failure; callers fall
-// through to their existing behaviour.
-async function resolvePendingAccess() {
-  try {
-    const token = await window.Clerk?.session?.getToken();
-    if (!token) return [];
-    const res = await fetch('/api/resolve-pending-access', {
-      method: 'POST',
-      headers: { Authorization: `Bearer ${token}` },
-    });
-    if (!res.ok) return [];
-    const data = await res.json();
-    return data?.resolved || [];
-  } catch {
-    return [];
-  }
-}
 
 const GL_ACCOUNTS = [
   // Assets
@@ -1330,7 +1308,9 @@ const AUTO_POSTED_SUMMARY = [
 
 const SOURCES = ["AIB Open Banking", "Invoice OCR", "Payroll feed", "Manual journals"];
 
-function MagicMoment({ onComplete }) {
+// companyName / period were module-level demo constants (COMPANY, PERIOD) until f213d79 removed
+// them; the references were left behind. Unused today — props so it works if it is ever rendered.
+function MagicMoment({ onComplete, companyName = '', period = '' }) {
   const [phase, setPhase] = useState("idle"); // idle → processing → results
   const [progress, setProgress] = useState(0);
   const [visibleFeed, setVisibleFeed] = useState([]);
@@ -1390,9 +1370,9 @@ function MagicMoment({ onComplete }) {
           </svg>
           Ledgrly
         </div>
-        <div className="mm-idle-sub">Finance OS · Ireland · {PERIOD}</div>
-        <div className="mm-company">{COMPANY}</div>
-        <div className="mm-period">▸ Month end close ready · {PERIOD}</div>
+        <div className="mm-idle-sub">Finance OS · Ireland · {period}</div>
+        <div className="mm-company">{companyName}</div>
+        <div className="mm-period">▸ Month end close ready · {period}</div>
         <button className="mm-btn" onClick={() => setPhase("processing")}>
           <span className="mm-btn-icon">⚡</span>
           <div className="mm-btn-text">
@@ -1420,7 +1400,7 @@ function MagicMoment({ onComplete }) {
           <div>
             <div className="mm-proc-title">AI processing month end…</div>
             <div style={{ fontSize: 11, fontFamily: "'Source Code Pro', monospace", color: "rgba(255,255,255,0.3)", marginTop: 4 }}>
-              {COMPANY} · {PERIOD}
+              {companyName} · {period}
             </div>
           </div>
           <div className="mm-proc-pct">{progress}%</div>
@@ -1577,7 +1557,8 @@ function MagicMoment({ onComplete }) {
   );
 }
 
-function Login({ onLogin }) {
+// companyName was the module-level demo constant COMPANY until f213d79 removed it. Unused today.
+function Login({ onLogin, companyName = 'Ledgrly' }) {
   const [email, setEmail] = useState("");
   const [pass, setPass] = useState("");
   const [err, setErr] = useState("");
@@ -1605,7 +1586,7 @@ function Login({ onLogin }) {
         </div>
         <div className="login-body">
           <div className="login-title">Sign in to your workspace</div>
-          <div className="login-sub">{COMPANY} · Irish SME Finance OS</div>
+          <div className="login-sub">{companyName} · Irish SME Finance OS</div>
           <div className="login-field">
             <label className="login-label">Email address</label>
             <input className="login-input" type="email" placeholder="demo@finflow.ie" value={email} onChange={e => { setEmail(e.target.value); setErr(""); }} onKeyDown={e => e.key === "Enter" && attempt()} />
@@ -13855,6 +13836,10 @@ function Chat({ page, companyName, period, selPeriod, companyId, company, onClos
           const upcomingN  = upcomingInvs.data?.length || 0;
           const yem        = company?.year_end_month ? MONTH_NAMES_LONG[company.year_end_month - 1] : "December";
           const vatPeriod  = company?.vat_period === 'monthly' ? 'Monthly' : 'Bi-monthly';
+          // baseCurrency was never declared in Chat (lost in 61a88b8, 2026-06-27): every fmtE call threw,
+          // the catch below swallowed it, and the AI silently got "live account data could not be loaded"
+          // instead of the company figures on every chat since then.
+          const baseCurrency = company?.base_currency || company?.currency || "EUR";
           const fmtE = n => fmtCurrencyFull(n, baseCurrency);
 
           // Build trailing-12-month monthly summary from journals
@@ -21592,10 +21577,20 @@ export default function App() {
     return next;
   });
 
-  const [companies, setCompanies] = useState([]);
-  const [company, setCompany] = useState(null);
-  const [onboarding, setOnboarding] = useState(false);
-  const [companyLoading, setCompanyLoading] = useState(true);
+  // Company / role / access resolution — shared with Mobile.jsx (src/shared/useCompanyContext.js).
+  const {
+    companies, setCompanies, company, setCompany, onboarding, setOnboarding, companyLoading,
+    companyRole, isBusinessOwner, accountantCompanies: practiceCompanies, zeroCompanyCheck,
+  } = useCompanyContext();
+
+  // Narrow viewport → offer the phone app (UX-03). Reactive, so rotating or resizing updates it.
+  const [isNarrow, setIsNarrow] = useState(() => matchesMedia(NARROW_QUERY));
+  useEffect(() => {
+    let mq; try { mq = window.matchMedia(NARROW_QUERY); } catch { return; }
+    const onChange = e => setIsNarrow(e.matches);
+    mq.addEventListener?.('change', onChange);
+    return () => mq.removeEventListener?.('change', onChange);
+  }, []);
   const [showPractice, setShowPractice] = useState(false);
   const [showWizard, setShowWizard] = useState(false);
   const [wizardInitStep, setWizardInitStep] = useState(1);
@@ -21874,115 +21869,6 @@ export default function App() {
 
   const isReadOnly = userRole === 'org:member';
 
-  // Accountant vs business_owner — authoritative signal is user_company_access.role via
-  // this RPC (see [[user_company_role]] migration), NOT Clerk's own admin/member field,
-  // which carries a different, unrelated distinction (colleague read-only, above).
-  const [companyRole, setCompanyRole] = useState(null); // 'accountant' | 'business_owner' | null (loading)
-  useEffect(() => {
-    if (!company?.id) { setCompanyRole(null); return; }
-    let cancelled = false;
-    supabase.rpc('user_company_role', { p_company_id: company.id }).then(({ data, error }) => {
-      if (cancelled) return;
-      setCompanyRole(error ? null : (data || 'accountant'));
-    });
-    return () => { cancelled = true; };
-  }, [company?.id]);
-  const isBusinessOwner = companyRole === 'business_owner';
-
-  // Practice Dashboard scope (RPT-02): only companies where this user is the ACCOUNTANT. The
-  // companies list comes from RLS (user_company_ids()), which includes companies where the
-  // user is a business_owner too — those must not appear in the practice view or its totals.
-  // One query for the user's own access rows (RLS: own rows only); owners count as accountant.
-  const [roleByCompanyId, setRoleByCompanyId] = useState({});
-  useEffect(() => {
-    if (!user?.id) { setRoleByCompanyId({}); return; }
-    let cancelled = false;
-    supabase.from('user_company_access').select('company_id, role').eq('user_id', user.id)
-      .then(({ data, error }) => {
-        if (error) { captureError(error, { operation: 'practice-roles-load' }); return; }
-        if (!cancelled) setRoleByCompanyId(Object.fromEntries((data || []).map(r => [r.company_id, r.role])));
-      });
-    return () => { cancelled = true; };
-  }, [user?.id, companies.length]);
-  const practiceCompanies = useMemo(
-    () => companies.filter(c => isAccountantFor(c, user?.id, roleByCompanyId)),
-    [companies, user?.id, roleByCompanyId]);
-
-  // Bumped by the zeroCompanyCheck safety net below when a delayed resolvePendingAccess
-  // retry succeeds, to force the company-resolution effect to re-run and pick up the
-  // newly-granted access (user?.id/isLoaded alone wouldn't change in that case).
-  const [resolveNonce, setResolveNonce] = useState(0);
-
-  useEffect(() => {
-    if (!isLoaded) return;
-    if (!user) { setCompanyLoading(false); return; }
-    setCompanyLoading(true);
-
-    // RLS already returns exactly the companies this user can access — direct ownership
-    // (companies.clerk_user_id) or user_company_access membership, either role — so no
-    // manual filtering against Clerk's own client-side org list is needed. That legacy
-    // .or(clerk_user_id/clerk_org_id) filter predated user_company_access and never knew
-    // about it: it was the actual cause of a business_owner resolving to zero companies
-    // (Clerk's org list not reflecting their membership the way the filter expected) and
-    // landing in the ungated onboarding wizard instead of their own company. One source of
-    // truth now. Also drops the prior dependency on orgsLoaded/userMemberships timing.
-    //
-    // resolvePendingAccess() runs FIRST and is awaited: a just-accepted business_owner
-    // invite is granted synchronously here rather than depending on the async Clerk
-    // webhook having already landed, so the companies query below reliably sees it instead
-    // of racing it (see [[resolve-pending-access]] — was the root cause of an invited user
-    // landing in the create-company wizard and creating a phantom company).
-    (async () => {
-      await resolvePendingAccess();
-      const { data } = await supabase.from("companies").select("*");
-      if (!data || data.length === 0) {
-        setOnboarding(true);
-      } else {
-        setCompanies(data);
-        setCompany(prev => prev ? (data.find(c => c.id === prev.id) || data[0]) : data[0]);
-        setOnboarding(false);
-      }
-      setCompanyLoading(false);
-    })();
-  }, [user?.id, isLoaded, resolveNonce]);
-
-  // Zero companies resolved could mean two very different things: a genuinely new
-  // accountant who hasn't created their first company yet (show the create-company
-  // wizard), or an invited user (business_owner or colleague) hitting a resolution hiccup
-  // — they already have access via user_company_access, just not reflected yet. There's no
-  // company to check a role against at this point, so this is a lightweight, role-agnostic
-  // side check: does this user have ANY user_company_access row at all? If so, they're
-  // clearly not someone who needs the "create a company" flow.
-  //
-  // Safety net for the residual race (resolvePendingAccess above hit a transient failure —
-  // network hiccup — rather than there truly being no invite): before concluding "new", make
-  // one more resolve attempt (surfaced as the 'pending' state — "setting up your access…"),
-  // and only fall through to 'new' if a short wait afterward still shows no access.
-  const [zeroCompanyCheck, setZeroCompanyCheck] = useState(null); // null (checking) | 'new' | 'has_access' | 'pending'
-  useEffect(() => {
-    if (!onboarding || !user?.id) { setZeroCompanyCheck(null); return; }
-    let cancelled = false;
-    (async () => {
-      const { count } = await supabase.from('user_company_access')
-        .select('company_id', { count: 'exact', head: true }).eq('user_id', user.id);
-      if (cancelled) return;
-      if (count > 0) { setZeroCompanyCheck('has_access'); return; }
-
-      setZeroCompanyCheck('pending');
-      const resolved = await resolvePendingAccess();
-      if (cancelled) return;
-      if (resolved.length > 0) { setResolveNonce(n => n + 1); return; } // re-run resolution above
-
-      await new Promise(r => setTimeout(r, 1500));
-      if (cancelled) return;
-      const { count: count2 } = await supabase.from('user_company_access')
-        .select('company_id', { count: 'exact', head: true }).eq('user_id', user.id);
-      if (cancelled) return;
-      setZeroCompanyCheck(count2 > 0 ? 'has_access' : 'new');
-    })();
-    return () => { cancelled = true; };
-  }, [onboarding, user?.id]);
-
   // Auto-open the accountant onboarding wizard when active company hasn't completed setup.
   // Accountant-only — the wizard checks only companies.onboarding_completed, with no
   // awareness of who's viewing, so a business_owner must never be routed into it (they
@@ -22016,9 +21902,7 @@ export default function App() {
   useEffect(() => {
     if (prevUserIdRef.current === user?.id) return;
     prevUserIdRef.current = user?.id;
-    setCompany(null);
-    setCompanies([]);
-    setCompanyRole(null);
+    // company / companies / role are reset by useCompanyContext
     setShowWizard(false);
     setWizardInitStep(1);
     setShowWelcome(false);
@@ -22282,6 +22166,11 @@ export default function App() {
               <button className="sidebar-footer-btn" onClick={() => setPage("settings")}>
                 <span style={{fontSize:13}}>⚙</span> Settings
               </button>
+              {isNarrow && (
+                <button className="sidebar-footer-btn" onClick={goToMobile}>
+                  <span style={{fontSize:13}}>📱</span> Switch to mobile view
+                </button>
+              )}
               <button className="sidebar-footer-btn" onClick={() => signOut()}>
                 <span style={{fontSize:13}}>⏻</span> Sign Out
               </button>
