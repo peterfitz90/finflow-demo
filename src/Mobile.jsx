@@ -2,22 +2,27 @@ import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useUser, useAuth, useClerk } from '@clerk/clerk-react';
 import { useCompanyContext } from './shared/useCompanyContext.js';
 import { goToFullSite } from './shared/viewMode.js';
-import { isPending } from './entitlements.js';
+import { isPending, can } from './entitlements.js';
 import { SignIn } from '@clerk/clerk-react';
 import { supabase } from './supabase.js';
 import { approveApBill, confirmBankTxn } from './shared/approvals.js';
 import { InboxZeroCelebration } from './shared/InboxZeroCelebration.jsx';
 import { recScoreCandidate } from './shared/recScore.js';
-import { computeDeadlines } from './shared/computeDeadlines.js';
+import { computeDeadlines, vatPeriodStartOf } from './shared/computeDeadlines.js';
 import { fetchAllRows } from './shared/fetchAllRows.js';
 import { monthEnd, todayStr as localToday } from './shared/dates.js';
 import { useHealthy } from './shared/useHealthy.js';
 import { fetchCashBalance } from './shared/bankBalance.js';
 import { deadlineApplies } from './shared/practicePortfolio.js';
+import { useChartOfAccounts } from './shared/chartOfAccounts.js';
+import { useTransactionRules } from './shared/txRules.js';
+import { suggestExpenseAccount, expenseAccountOptions } from './shared/expenseSuggest.js';
+import { fetchInstitutions, filterInstitutions, startBankConnect, prepareReconnect, connectionState } from './shared/bankConnect.js';
 import { AutomationHero, HealthPulseDot } from './shared/AutomationHero.jsx';
 import {
   INV_VAT_LABELS, calcLineAmounts, calcInvTotals, vatCodeForRate,
   createInvoiceDraft, finaliseInvoice,
+  creditedByInvoice, invoiceOutstanding, invoiceStatus,
 } from './shared/invoice.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -153,6 +158,12 @@ const M_CSS = `
   .m-finput { width: 100%; background: var(--ms); border: 1px solid var(--mbd); border-radius: var(--rsm); padding: 11px 13px; font-size: 14px; font-family: 'Inter', system-ui, sans-serif; color: var(--mtx); outline: none; -webkit-appearance: none; }
   .m-finput:focus { border-color: var(--teal); }
   .m-fselect { width: 100%; background: var(--ms); border: 1px solid var(--mbd); border-radius: var(--rsm); padding: 11px 13px; font-size: 14px; color: var(--mtx); outline: none; -webkit-appearance: none; }
+  .m-fhint { font-size: 10px; color: var(--teal2); margin-top: 4px; font-family: 'Source Code Pro', monospace; }
+  .m-seg { display: flex; gap: 6px; padding: 0 16px 10px; }
+  .m-seg button { flex: 1; padding: 8px; border-radius: var(--rsm); border: 1px solid var(--mbd); background: var(--mc); color: var(--mm); font: 600 12px 'Inter', system-ui, sans-serif; cursor: pointer; }
+  .m-seg button.active { color: var(--teal2); border-color: var(--teal); background: rgba(16,185,129,0.08); }
+  .m-bank-logo { width: 32px; height: 32px; border-radius: 8px; background: var(--mc); border: 1px solid var(--mbd); display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--mm); overflow: hidden; flex-shrink: 0; }
+  .m-bank-logo img { width: 28px; height: 28px; object-fit: contain; }
   .m-frow { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
 
   /* Buttons */
@@ -245,7 +256,7 @@ function BottomNav({ tab, setTab }) {
     { id: 'approvals',  icon: '⊛',  label: 'Approvals' },
     { id: 'cash',       icon: '◎',  label: 'Cash' },
     { id: 'compliance', icon: '⊙',  label: 'Compliance' },
-    { id: 'invoice',    icon: '◨',  label: 'Invoice' },
+    { id: 'invoice',    icon: '◨',  label: 'Invoices' },
   ];
   return (
     <nav className="m-nav">
@@ -268,39 +279,52 @@ function BottomNav({ tab, setTab }) {
 // builds them). Rounded, not floored: across a clock change a day is 23 or 25 hours.
 const daysFromToday = d => { const t = new Date(); t.setHours(0, 0, 0, 0); return Math.round((d - t) / 86400000); };
 
-// Overdue invoices, same rule as the Invoices page (statusOf/outstanding): drafts, voids,
-// credited invoices and credit notes aside, still owed after payments and credit notes, and
-// past the calculated due date (due_date_calc) where there is one. Oldest first.
-async function fetchOverdueInvoices(companyId, today) {
+// All invoices rows (invoices and credit notes) for a company, past the 1,000-row cap.
+async function fetchInvoiceDocs(companyId) {
   const { data, error } = await fetchAllRows(() => supabase.from('invoices')
-    .select('id,client,invoice_ref,status,total,amount_paid,due_date,due_date_calc,credit_note_for')
-    .eq('company_id', companyId).not('status', 'in', '(draft,void)').order('id'));
+    .select('id,type,customer_id,client,invoice_number,invoice_ref,status,total,amount_paid,issue_date,invoice_date,due_date,due_date_calc,credit_note_for')
+    .eq('company_id', companyId).order('id'));
   if (error) throw new Error(error.message);
-  const credited = {};
-  for (const r of data) if (r.credit_note_for) credited[r.credit_note_for] = (credited[r.credit_note_for] || 0) + Number(r.total || 0);
-  return data
-    .filter(r => !r.credit_note_for && r.status !== 'credited' && r.status !== 'paid')
-    .map(r => ({ ...r, owed: Math.max(0, Number(r.total || 0) - Number(r.amount_paid || 0) - (credited[r.id] || 0)), due: r.due_date_calc || r.due_date }))
-    .filter(r => r.owed > 0.005 && r.due && r.due < today)
+  return data;
+}
+
+// Overdue invoices — the Invoices page's status rule (invoiceStatus, src/shared/invoice.js):
+// still owed after payments and issued credit notes, past the calculated due date where there
+// is one; drafts, voids and credited invoices never count. Oldest first.
+async function fetchOverdueInvoices(companyId) {
+  const docs = await fetchInvoiceDocs(companyId);
+  const credited = creditedByInvoice(docs);
+  const today = new Date();
+  return docs
+    .filter(d => d.type === 'invoice' && invoiceStatus(d, credited, today) === 'overdue')
+    .map(d => ({ ...d, owed: invoiceOutstanding(d, credited), due: d.due_date_calc || d.due_date }))
     .sort((a, b) => (a.due < b.due ? -1 : a.due > b.due ? 1 : 0));
 }
 
 // The company's deadlines that actually apply — VAT3 only if VAT-registered and that period
 // isn't filed, P30/P35 only if PAYE-registered, no CT1 for a sole trader (deadlineApplies).
-// null while the filed VAT periods load.
+// null while the filed VAT periods load. Filed periods come from the get_locked_periods RPC, not
+// vat_returns: that table's SELECT is accountant-only, so for a business_owner a direct query is
+// silently empty and every filed period would show as late.
 function useApplicableDeadlines(company) {
   const companyId = company?.id;
-  const [vatFiled, setVatFiled] = useState(null);
+  const [locked, setLocked] = useState(null); // [{ period_start, period_end }]
   useEffect(() => {
     if (!companyId) return;
     let cancelled = false;
-    supabase.from('vat_returns').select('period_val').eq('company_id', companyId).eq('status', 'filed')
-      .then(({ data }) => { if (!cancelled) setVatFiled(new Set((data || []).map(r => r.period_val))); });
+    supabase.rpc('get_locked_periods', { p_company_id: companyId })
+      .then(({ data }) => { if (!cancelled) setLocked(data || []); });
     return () => { cancelled = true; };
   }, [companyId]);
-  return useMemo(() => (company && vatFiled
-    ? computeDeadlines(company).filter(dl => deadlineApplies(company, dl, vatFiled))
-    : null), [company, vatFiled]);
+  return useMemo(() => {
+    if (!company || !locked) return null;
+    const all = computeDeadlines(company);
+    const vatFiled = new Set(all
+      .filter(dl => dl.type === 'VAT3' && dl.period_val)
+      .filter(dl => { const st = vatPeriodStartOf(dl.period_val); return locked.some(p => st >= p.period_start && st <= p.period_end); })
+      .map(dl => dl.period_val));
+    return all.filter(dl => deadlineApplies(company, dl, vatFiled));
+  }, [company, locked]);
 }
 
 // Only an unfiled VAT3 is known to be late. Filing isn't tracked for P30 / P35 / CT1 / CRO, so a
@@ -331,7 +355,7 @@ function HomeTab({ companyId, company, setTab }) {
     const today = localToday();
     const [bal, overdue, exp, recent] = await Promise.all([
       fetchCashBalance(companyId, today).catch(() => null),
-      fetchOverdueInvoices(companyId, today).catch(() => []),
+      fetchOverdueInvoices(companyId).catch(() => []),
       supabase.from('expenses').select('id').eq('company_id', companyId).eq('status','submitted'),
       supabase.from('bank_transactions').select('date,description,amount').eq('company_id', companyId).order('date',{ascending:false}).limit(4),
     ]);
@@ -458,7 +482,7 @@ function HomeTab({ companyId, company, setTab }) {
 }
 
 // ─── Cash tab ─────────────────────────────────────────────────────────────────
-function CashTab({ companyId }) {
+function CashTab({ companyId, company }) {
   const [cash, setCash]         = useState(null);
   const [cashLm, setCashLm]     = useState(null);   // balance at the end of last month
   const [txns, setTxns]         = useState([]);
@@ -523,6 +547,8 @@ function CashTab({ companyId }) {
         )}
       </div>
 
+      <BankFeeds companyId={companyId} company={company} />
+
       <div className="m-sec-title">Transactions</div>
       <div className="m-card">
         {loading ? <div className="m-empty">Loading…</div> :
@@ -549,13 +575,42 @@ function CashTab({ companyId }) {
 
 // ─── Receipt capture (reusable sub-component) ─────────────────────────────────
 function ReceiptCapture({ companyId, user }) {
+  const blankForm = () => ({ supplier:'', description:'', receipt_date: localToday(), amount:'', vat_amount:'0', nominal_account:'6600', nominal_name:'Sundry Expenses', category:'Overheads', payment_method:'company_card', notes:'' });
   const [extracting, setExtracting] = useState(false);
   const [receiptUrl, setReceiptUrl] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [submitted, setSubmitted]   = useState(false);
-  const [form, setForm] = useState({ supplier:'', receipt_date: localToday(), amount:'', vat_amount:'0', nominal_account:'6600', payment_method:'company_card', notes:'' });
+  const [saveError, setSaveError]   = useState(null);
+  const [form, setForm] = useState(blankForm);
+  // Category — same as the full app's Expenses form: the company's chart of accounts, a
+  // suggestion from the transaction rules (suggestExpenseAccount) that never overrides a
+  // category the user picked (nominalTouched), and Sundry when nothing matches.
+  const { accounts: coaAccounts } = useChartOfAccounts(companyId);
+  const { rules: txRules }        = useTransactionRules(companyId);
+  const acctOptions = expenseAccountOptions(coaAccounts);
+  const [nominalTouched, setNominalTouched] = useState(false);
+  const [suggestedLabel, setSuggestedLabel] = useState(null);
   const fileRef = useRef(null);
   const ff = f => e => setForm(p => ({ ...p, [f]: e.target.value }));
+
+  const setNominal = code => {
+    const acct = acctOptions.find(a => a.code === code);
+    if (!acct) return;
+    setForm(p => ({ ...p, nominal_account: code, nominal_name: acct.name, category: acct.category || acct.type || '' }));
+    setNominalTouched(true); setSuggestedLabel(null);
+  };
+
+  const applySuggestion = (supplier, description, amount) => {
+    if (nominalTouched) return;
+    const acct = suggestExpenseAccount(supplier, description, amount, txRules, coaAccounts);
+    if (!acct) return;
+    setForm(p => ({ ...p, nominal_account: acct.code, nominal_name: acct.name, category: acct.category }));
+    setSuggestedLabel(acct.name);
+  };
+
+  const reset = () => {
+    setReceiptUrl(null); setForm(blankForm()); setNominalTouched(false); setSuggestedLabel(null); setSaveError(null);
+  };
 
   const handleFile = async file => {
     if (!file) return;
@@ -578,30 +633,33 @@ function ReceiptCapture({ companyId, user }) {
       setForm(p => ({
         ...p,
         supplier:     d.supplier     || p.supplier,
+        description:  d.description  || p.description,
         receipt_date: d.date         || p.receipt_date,
         amount:       d.total_amount ? String(d.total_amount) : p.amount,
         vat_amount:   d.vat_amount   ? String(d.vat_amount)   : p.vat_amount,
       }));
+      applySuggestion(d.supplier || form.supplier, d.description || form.description, d.total_amount || form.amount);
     } catch (e) { console.error('[mobile receipts]', e); }
     setExtracting(false);
   };
 
   const submit = async () => {
     if (!form.supplier || !form.amount || !companyId) return;
-    setSubmitting(true);
+    setSubmitting(true); setSaveError(null);
     const byName = user?.firstName ? `${user.firstName} ${user.lastName??''}`.trim() : user?.emailAddresses?.[0]?.emailAddress || 'Unknown';
-    await supabase.from('expenses').insert({
+    const { error } = await supabase.from('expenses').insert({
       company_id: companyId, submitted_by_clerk_id: user?.id || '',
       submitted_by_name: byName, receipt_date: form.receipt_date,
-      supplier: form.supplier, amount: parseFloat(form.amount)||0,
+      supplier: form.supplier, description: form.description, amount: parseFloat(form.amount)||0,
       vat_amount: parseFloat(form.vat_amount)||0,
       net_amount: (parseFloat(form.amount)||0) - (parseFloat(form.vat_amount)||0),
-      nominal_account: form.nominal_account, nominal_name: 'Sundry Expenses',
+      nominal_account: form.nominal_account, nominal_name: form.nominal_name, category: form.category,
       payment_method: form.payment_method, status: 'submitted', notes: form.notes,
     });
-    setReceiptUrl(null);
-    setForm({ supplier:'', receipt_date: localToday(), amount:'', vat_amount:'0', nominal_account:'6600', payment_method:'company_card', notes:'' });
-    setSubmitted(true); setSubmitting(false);
+    setSubmitting(false);
+    if (error) { setSaveError(`Couldn't submit: ${error.message}`); return; }
+    reset();
+    setSubmitted(true);
   };
 
   if (submitted) {
@@ -636,7 +694,8 @@ function ReceiptCapture({ companyId, user }) {
         <div className="m-receipt-fields">
           <div className="m-fgroup">
             <label className="m-flabel">Supplier</label>
-            <input className="m-finput" value={form.supplier} onChange={ff('supplier')} placeholder="Supplier name" />
+            <input className="m-finput" value={form.supplier} onChange={ff('supplier')}
+              onBlur={() => applySuggestion(form.supplier, form.description, form.amount)} placeholder="Supplier name" />
           </div>
           <div className="m-fgroup">
             <label className="m-flabel">Date</label>
@@ -645,6 +704,11 @@ function ReceiptCapture({ companyId, user }) {
         </div>
       </div>
       <div className="m-form">
+        <div className="m-fgroup">
+          <label className="m-flabel">Description</label>
+          <input className="m-finput" value={form.description} onChange={ff('description')}
+            onBlur={() => applySuggestion(form.supplier, form.description, form.amount)} placeholder="What was purchased" />
+        </div>
         <div className="m-frow">
           <div className="m-fgroup">
             <label className="m-flabel">Total (€)</label>
@@ -654,6 +718,14 @@ function ReceiptCapture({ companyId, user }) {
             <label className="m-flabel">VAT (€)</label>
             <input className="m-finput" type="number" step="0.01" value={form.vat_amount} onChange={ff('vat_amount')} placeholder="0.00" />
           </div>
+        </div>
+        <div className="m-fgroup">
+          <label className="m-flabel">Category</label>
+          <select className="m-fselect" value={form.nominal_account} onChange={e => setNominal(e.target.value)}>
+            {!acctOptions.some(a => a.code === form.nominal_account) && <option value={form.nominal_account}>{form.nominal_account} — {form.nominal_name}</option>}
+            {acctOptions.map(a => <option key={a.code} value={a.code}>{a.code} — {a.name}</option>)}
+          </select>
+          {suggestedLabel && <div className="m-fhint">Suggested: {suggestedLabel}</div>}
         </div>
         <div className="m-fgroup">
           <label className="m-flabel">Payment Method</label>
@@ -668,10 +740,11 @@ function ReceiptCapture({ companyId, user }) {
           <label className="m-flabel">Notes</label>
           <input className="m-finput" value={form.notes} onChange={ff('notes')} placeholder="Optional notes…" />
         </div>
+        {saveError && <div className="qi-err" style={{ margin:'0 0 10px' }}>{saveError}</div>}
         <button className="m-btn m-btn-p" onClick={submit} disabled={!form.supplier || !form.amount || submitting}>
           {submitting ? 'Submitting…' : 'Submit for Approval'}
         </button>
-        <button className="m-btn m-btn-s" onClick={() => setReceiptUrl(null)}>Cancel</button>
+        <button className="m-btn m-btn-s" onClick={reset}>Cancel</button>
       </div>
     </>
   );
@@ -739,6 +812,7 @@ function ApprovalsTab({ companyId, user }) {
   const [loading, setLoading]       = useState(true);
   const [loadErr, setLoadErr]       = useState(null);
   const [approving, setApproving]   = useState(null); // id of item being approved
+  const [actionErr, setActionErr]   = useState(null);
   const [justCleared, setJustCleared] = useState(false);
 
   useEffect(() => { if (items.length > 0) setJustCleared(false); }, [items.length]);
@@ -880,12 +954,12 @@ function ApprovalsTab({ companyId, user }) {
   useEffect(() => { load(); }, [load]);
 
   const handleApprove = async (item) => {
-    setApproving(item.id);
+    setApproving(item.id); setActionErr(null);
     try {
       if (item._type === 'ap_bill') {
         await approveApBill(item._raw);
       } else {
-        await confirmBankTxn(item.matchId, item.id);
+        await confirmBankTxn(item.company_id, item.matchId, item.id);
       }
       setItems(prev => {
         const next = prev.filter(i => i.id !== item.id);
@@ -894,6 +968,7 @@ function ApprovalsTab({ companyId, user }) {
       });
     } catch (e) {
       console.error('[approvals] approve failed:', e.message);
+      setActionErr(`Couldn't approve ${item.description || 'item'}: ${e.message}`);
     }
     setApproving(null);
   };
@@ -914,6 +989,7 @@ function ApprovalsTab({ companyId, user }) {
         </div>
       </div>
 
+      {actionErr && <div className="qi-err">{actionErr}</div>}
       {loadErr && (
         <div style={{ margin:'0 16px 12px', padding:'12px', background:'rgba(248,113,113,0.08)', border:'1px solid rgba(248,113,113,0.2)', borderRadius:10, fontSize:12, color:'var(--red)' }}>
           {loadErr}
@@ -1271,6 +1347,214 @@ function QuickInvoiceTab({ companyId, company }) {
   );
 }
 
+// ─── Invoices tab (UX-03 Stage 2) ─────────────────────────────────────────────
+// The company's invoices with status — the Invoices page's rule (src/shared/invoice.js), same
+// as Home's overdue count — plus Quick Invoice for creating one. Read-only list: void / delete /
+// mark paid stay on the full site.
+const INV_BADGE = {
+  overdue:   { label: 'Overdue',   color: 'var(--red)' },
+  part_paid: { label: 'Part paid', color: 'var(--gold)' },
+  paid:      { label: 'Paid',      color: 'var(--green)' },
+  draft:     { label: 'Draft',     color: 'var(--mm)' },
+  void:      { label: 'Void',      color: 'var(--md)' },
+  credited:  { label: 'Credited',  color: 'var(--md)' },
+  chased:    { label: 'Chased',    color: 'var(--teal2)' },
+  sent:      { label: 'Sent',      color: 'var(--teal2)' },
+};
+const OPEN_STATUSES = new Set(['overdue', 'part_paid', 'sent', 'chased', 'pending']);
+
+function InvoicesTab({ companyId, company }) {
+  const [mode, setMode]       = useState('list');   // list | new
+  const [rows, setRows]       = useState(null);     // null while loading
+  const [loadErr, setLoadErr] = useState(null);
+  const [show, setShow]       = useState('open');   // open | all
+
+  const load = useCallback(async () => {
+    if (!companyId) return;
+    setLoadErr(null);
+    try {
+      const [docs, cust] = await Promise.all([
+        fetchInvoiceDocs(companyId),
+        supabase.from('customers').select('id,name').eq('company_id', companyId),
+      ]);
+      const credited = creditedByInvoice(docs);
+      const custName = Object.fromEntries((cust.data || []).map(c => [c.id, c.name]));
+      const today = new Date();
+      setRows(docs.filter(d => d.type === 'invoice').map(inv => ({
+        inv,
+        st:   invoiceStatus(inv, credited, today),
+        owed: invoiceOutstanding(inv, credited),
+        who:  custName[inv.customer_id] || inv.client || '—',
+      })).sort((a, b) => String(b.inv.issue_date || b.inv.invoice_date || '').localeCompare(String(a.inv.issue_date || a.inv.invoice_date || ''))));
+    } catch (e) { setLoadErr(e.message); setRows([]); }
+  }, [companyId]);
+
+  useEffect(() => { if (mode === 'list') load(); }, [mode, load]);
+
+  if (mode === 'new') {
+    return (
+      <>
+        <div style={{ padding: '10px 10px 0' }}>
+          <button type="button" className="m-link-btn" onClick={() => setMode('list')}>← Invoices</button>
+        </div>
+        <QuickInvoiceTab companyId={companyId} company={company} />
+      </>
+    );
+  }
+
+  const open = (rows || []).filter(r => OPEN_STATUSES.has(r.st));
+  const shown = show === 'open' ? open : (rows || []);
+  const outstanding = open.reduce((s, r) => s + r.owed, 0);
+  const overdue = open.filter(r => r.st === 'overdue').reduce((s, r) => s + r.owed, 0);
+
+  return (
+    <div>
+      <div className="m-page-hdr" style={{ display:'flex', alignItems:'flex-end', justifyContent:'space-between', gap:10 }}>
+        <div>
+          <div className="m-company-name">Invoices</div>
+          <div className="m-date-str">{rows === null ? 'Loading…' : `${fmtCash(outstanding)} outstanding${overdue > 0 ? ` · ${fmtCash(overdue)} overdue` : ''}`}</div>
+        </div>
+        <button type="button" className="m-btn-sm" style={{ background:'var(--teal)', color:'white' }} onClick={() => setMode('new')}>+ New</button>
+      </div>
+
+      <div className="m-seg">
+        <button type="button" className={show === 'open' ? 'active' : ''} onClick={() => setShow('open')}>Open{rows ? ` (${open.length})` : ''}</button>
+        <button type="button" className={show === 'all' ? 'active' : ''} onClick={() => setShow('all')}>All{rows ? ` (${rows.length})` : ''}</button>
+      </div>
+
+      {loadErr && <div className="qi-err">{loadErr}</div>}
+      <div className="m-card">
+        {rows === null ? <div className="m-empty">Loading…</div> :
+         shown.length === 0 ? <div className="m-empty">{show === 'open' ? 'No open invoices' : 'No invoices yet'}</div> :
+         shown.map(({ inv, st, owed, who }) => {
+           const b = INV_BADGE[st] || { label: st, color: 'var(--mm)' };
+           const due = inv.due_date_calc || inv.due_date;
+           const isOpen = OPEN_STATUSES.has(st);
+           return (
+             <div key={inv.id} className="m-inv">
+               <div className="m-inv-info">
+                 <div className="m-inv-client">{who}</div>
+                 <div className="m-inv-meta">
+                   {inv.invoice_number || inv.invoice_ref || 'Draft'} · {fmtD(inv.issue_date || inv.invoice_date)}{isOpen && due ? ` · due ${fmtD(due)}` : ''}
+                 </div>
+               </div>
+               <div style={{ textAlign:'right', flexShrink:0 }}>
+                 <div style={{ fontFamily:'Source Code Pro,monospace', fontSize:13, fontWeight:600 }}>{fmtCash(isOpen ? owed : inv.total)}</div>
+                 <span className="m-badge" style={{ color: b.color, border: `1px solid ${b.color}`, marginTop: 4 }}>{b.label}</span>
+               </div>
+             </div>
+           );
+         })}
+      </div>
+    </div>
+  );
+}
+
+// ─── Bank feeds (UX-03 Stage 2) — Cash tab section ────────────────────────────
+// Connect / reconnect a bank through Yapily's hosted consent (src/shared/bankConnect.js, the
+// same flow as the full app's Bank Feeds). The callback lands on /?bank_connected=…, which
+// main.jsx routes back to /mobile, where Mobile shows the result banner. Importing the feed
+// (preview → import) and disconnecting stay on the full site.
+const fmtDateLong = d => d ? new Date(d).toLocaleDateString('en-IE', { day:'2-digit', month:'short', year:'numeric' }) : '—';
+const TONE = { accent: 'var(--teal2)', warn: 'var(--gold)', danger: 'var(--red)', faint: 'var(--md)' };
+
+function BankFeeds({ companyId, company }) {
+  const [conns, setConns]           = useState(null);
+  const [error, setError]           = useState(null);
+  const [picker, setPicker]         = useState(false);
+  const [institutions, setInsts]    = useState([]);
+  const [instLoading, setInstLoading] = useState(false);
+  const [search, setSearch]         = useState('');
+  const [connecting, setConnecting] = useState(false);
+
+  useEffect(() => {
+    if (!companyId) return;
+    let cancelled = false;
+    supabase.from('bank_connections')
+      .select('id, institution_id, status, consent_expires_at, yapily_reconfirm_by, account_refs, created_at')
+      .eq('company_id', companyId).neq('status', 'revoked').order('created_at', { ascending: false })
+      .then(({ data, error: e }) => { if (!cancelled) { if (e) setError(e.message); setConns(data || []); } });
+    return () => { cancelled = true; };
+  }, [companyId]);
+
+  if (!can(company, 'bank_feeds')) return null; // plan without bank feeds — same gate as the full app
+
+  const loadInstitutions = async () => {
+    if (institutions.length) return institutions;
+    setInstLoading(true);
+    try { const { institutions: list } = await fetchInstitutions('IE'); setInsts(list); return list; }
+    catch (e) { setError(e.message); setPicker(false); return []; }
+    finally { setInstLoading(false); }
+  };
+  const openPicker = () => { setPicker(true); setSearch(''); setError(null); loadInstitutions(); };
+  const connect = async inst => {
+    setPicker(false); setConnecting(true); setError(null);
+    try { window.location.href = await startBankConnect(companyId, inst); }
+    catch (e) { setError(e.message); setConnecting(false); }
+  };
+  const reconnect = async conn => {
+    setConnecting(true); setError(null);
+    try { connect(await prepareReconnect(conn, await loadInstitutions())); }
+    catch (e) { setError(e.message); setConnecting(false); }
+  };
+
+  return (
+    <>
+      <div className="m-sec-title">Bank feeds</div>
+      <div className="m-card">
+        {conns === null ? <div className="m-empty">Loading…</div> :
+         conns.length === 0 ? <div className="m-empty" style={{ padding:'8px 0 14px' }}>No bank connected yet</div> :
+         conns.map(c => {
+           const st = connectionState(c, fmtDateLong);
+           const accts = Array.isArray(c.account_refs) ? c.account_refs.map(a => a.name || a.id).join(', ') : '';
+           return (
+             <div key={c.id} className="m-inv">
+               <div className="m-inv-info">
+                 <div className="m-inv-client">{c.institution_id}</div>
+                 <div className="m-inv-meta">{accts || '—'}</div>
+               </div>
+               <div style={{ textAlign:'right', flexShrink:0 }}>
+                 <span className="m-badge" style={{ color: TONE[st.tone], border: `1px solid ${TONE[st.tone]}` }}>{st.label}</span>
+                 {(st.key === 'expired' || st.key === 'expiring') && (
+                   <div><button type="button" className="m-link-btn" style={{ fontSize:12, padding:'6px 0 0' }} disabled={connecting} onClick={() => reconnect(c)}>Reconnect</button></div>
+                 )}
+               </div>
+             </div>
+           );
+         })}
+        {error && <div className="qi-err" style={{ margin:'10px 0 0' }}>{error}</div>}
+        <button type="button" className="m-btn m-btn-p" style={{ marginTop: 12 }} onClick={openPicker} disabled={connecting}>
+          {connecting ? 'Redirecting to your bank…' : '+ Connect a bank'}
+        </button>
+      </div>
+
+      {picker && (
+        <>
+          <div className="m-sheet-scrim" onClick={() => setPicker(false)} />
+          <div className="m-sheet" role="listbox" aria-label="Choose your bank">
+            <div className="m-sheet-title">Choose your bank</div>
+            <input className="m-finput" placeholder="Search banks…" value={search} onChange={e => setSearch(e.target.value)} style={{ marginBottom: 8 }} />
+            <div className="m-sheet-list">
+              {instLoading ? <div className="m-empty">Loading banks…</div> :
+               filterInstitutions(institutions, search).length === 0 ? <div className="m-empty">No banks match “{search}”</div> :
+               filterInstitutions(institutions, search).map(inst => (
+                 <button key={inst.id} type="button" role="option" className="m-sheet-item" onClick={() => connect(inst)}
+                   style={{ display:'flex', alignItems:'center', gap:12 }}>
+                   <span className="m-bank-logo">
+                     {inst.logo ? <img src={inst.logo} alt="" onError={e => { e.target.style.display = 'none'; }} /> : inst.name.slice(0, 2).toUpperCase()}
+                   </span>
+                   <span style={{ flex:1, minWidth:0, overflow:'hidden', textOverflow:'ellipsis', whiteSpace:'nowrap' }}>{inst.name}</span>
+                   {inst.id === 'modelo-sandbox' && <span className="m-badge" style={{ color:'var(--gold)', border:'1px solid var(--gold)' }}>Sandbox</span>}
+                 </button>
+               ))}
+            </div>
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
 // ─── Ask AI tab ───────────────────────────────────────────────────────────────
 function AskAiTab() {
   return (
@@ -1437,9 +1721,9 @@ export default function Mobile() {
       <div className="m-content">
         {tab === 'home'       && <HomeTab          key={companyId} companyId={companyId} company={company} setTab={setTab} />}
         {tab === 'approvals'  && <ApprovalsTab     key={companyId} companyId={companyId} user={user} />}
-        {tab === 'cash'       && <CashTab          key={companyId} companyId={companyId} />}
+        {tab === 'cash'       && <CashTab          key={companyId} companyId={companyId} company={company} />}
         {tab === 'compliance' && <ComplianceTab    key={companyId} company={company} />}
-        {tab === 'invoice'    && <QuickInvoiceTab  key={companyId} companyId={companyId} company={company} />}
+        {tab === 'invoice'    && <InvoicesTab      key={companyId} companyId={companyId} company={company} />}
       </div>
       <BottomNav tab={tab} setTab={setTab} />
     </>

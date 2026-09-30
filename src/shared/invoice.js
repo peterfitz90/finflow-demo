@@ -157,3 +157,37 @@ export async function finaliseInvoice(supabase, companyId, inv, lines, customers
   if (updErr) throw new Error(updErr.message);
   return { numStr, jids };
 }
+
+// ── Invoice status — the Invoices page's rule, shared with /mobile (Home overdue + invoice list)
+// `docs` are invoices rows of both types; a credit note reduces what its invoice still owes once
+// it's issued (not draft / void).
+export function creditedByInvoice(docs) {
+  const credited = {};
+  for (const cn of docs) {
+    if (cn.type === 'credit_note' && cn.credit_note_for && cn.status !== 'draft' && cn.status !== 'void') {
+      credited[cn.credit_note_for] = (credited[cn.credit_note_for] || 0) + Number(cn.total || 0);
+    }
+  }
+  return credited;
+}
+
+export const invoiceOutstanding = (inv, credited) =>
+  Math.max(0, Number(inv.total || 0) - Number(inv.amount_paid || 0) - (credited[inv.id] || 0));
+
+// Days past the due date (calculated due date first); ≤ 0 = not yet due.
+export function invoiceDaysDue(inv, today = new Date()) {
+  const due = inv.due_date_calc || inv.due_date;
+  if (!due) return 0;
+  return Math.floor((today - new Date(due + 'T00:00:00')) / 86400000);
+}
+
+// draft | void | credited | paid | overdue | part_paid | <stored status, e.g. sent / chased>
+export function invoiceStatus(inv, credited, today = new Date()) {
+  if (inv.status === 'void' || inv.status === 'credited') return inv.status;
+  if (inv.status === 'draft') return 'draft';
+  const owed = invoiceOutstanding(inv, credited);
+  if (owed <= 0.005) return 'paid';
+  if (invoiceDaysDue(inv, today) > 0) return 'overdue';
+  if (owed < Number(inv.total) - 0.005) return 'part_paid';
+  return inv.status || 'sent';
+}

@@ -18,182 +18,17 @@ import { useSavedViews, ViewsMenu } from './shared/SavedViews.jsx';
 import { useCompanyContext, resolvePendingAccess } from './shared/useCompanyContext.js';
 import { NARROW_QUERY, matches as matchesMedia, goToMobile } from './shared/viewMode.js';
 import { BANK_NOMINAL_CODE, fetchNominalBalanceAsOf, fetchActiveBankNominals } from './shared/bankBalance.js';
+import { GL_ACCOUNTS, COA_SEED_SOLE_TRADER, COA_STATIC_FALLBACK, useChartOfAccounts } from './shared/chartOfAccounts.js';
+import { useTransactionRules, preCleanDesc, applyRules } from './shared/txRules.js';
+import { suggestExpenseAccount } from './shared/expenseSuggest.js';
+import { fetchInstitutions, filterInstitutions, startBankConnect, prepareReconnect, connectionState as connectionStateOf } from './shared/bankConnect.js';
 import {
   INV_VAT_RATES, INV_VAT_LABELS,
   calcLineAmounts, calcInvTotals, vatCodeForRate,
   upsertInvoiceLines, postJournals,
   createInvoiceDraft, finaliseInvoice,
+  creditedByInvoice, invoiceOutstanding, invoiceDaysDue, invoiceStatus,
 } from './shared/invoice.js';
-
-const GL_ACCOUNTS = [
-  // Assets
-  { code: "1000", name: "Bank — Current Account",  type: "Asset" },
-  { code: "1100", name: "Trade Debtors",            type: "Asset" },
-  { code: "1200", name: "Prepayments",              type: "Asset" },
-  { code: "1300", name: "Stripe Clearing",          type: "Asset" },
-  { code: "1500", name: "Fixed Assets",             type: "Asset" },
-  { code: "1501", name: "Accum Dep — Fixed Assets",           type: "Asset" },
-  { code: "1510", name: "Plant & Machinery",                  type: "Asset" },
-  { code: "1511", name: "Accum Dep — Plant & Machinery",      type: "Asset" },
-  { code: "1520", name: "Fixtures & Fittings",                type: "Asset" },
-  { code: "1521", name: "Accum Dep — Fixtures & Fittings",   type: "Asset" },
-  { code: "1530", name: "Computer Equipment",                 type: "Asset" },
-  { code: "1531", name: "Accum Dep — Computer Equipment",    type: "Asset" },
-  { code: "1540", name: "Motor Vehicles",                     type: "Asset" },
-  { code: "1541", name: "Accum Dep — Motor Vehicles",         type: "Asset" },
-  { code: "1600", name: "VAT Receivable",           type: "Asset" },
-  // Liabilities
-  { code: "2000", name: "Trade Creditors",          type: "Liability" },
-  { code: "2100", name: "VAT Control",              type: "Liability" },
-  { code: "1250", name: "Supplier Prepayments",     type: "Asset" },
-  { code: "2200", name: "PAYE & PRSI Payable",      type: "Liability" },
-  { code: "2250", name: "Net Wages Payable",        type: "Liability" },
-  { code: "2260", name: "Pension Payable",          type: "Liability" },
-  { code: "2300", name: "Accruals",                 type: "Liability" },
-  { code: "2350", name: "Customer Advance Payments",type: "Liability" },
-  { code: "2400", name: "Directors Loan Account",   type: "Liability" },
-  { code: "2500", name: "Bank Loan",                type: "Liability" },
-  // Capital
-  { code: "3000", name: "Share Capital",            type: "Equity" },
-  { code: "3100", name: "Retained Earnings",        type: "Equity" },
-  // Income
-  { code: "4000", name: "Sales Revenue",            type: "Income" },
-  { code: "4100", name: "Service Income",           type: "Income" },
-  { code: "4200", name: "Other Income",             type: "Income" },
-  { code: "4300", name: "Interest Received",        type: "Income" },
-  // Cost of Sales
-  { code: "5000", name: "Cost of Sales",            type: "Expense" },
-  { code: "5100", name: "Materials & Supplies",     type: "Expense" },
-  { code: "5200", name: "Subcontractor Costs",      type: "Expense" },
-  { code: "5300", name: "Direct Labour",            type: "Expense" },
-  // Overheads
-  { code: "6000", name: "Payroll & PAYE",           type: "Expense" },
-  { code: "6100", name: "Rent & Rates",             type: "Expense" },
-  { code: "6200", name: "Motor & Travel",           type: "Expense" },
-  { code: "6300", name: "Telecoms & IT",            type: "Expense" },
-  { code: "6400", name: "Professional Fees",        type: "Expense" },
-  { code: "6500", name: "Bank Charges & Interest",  type: "Expense" },
-  { code: "6600", name: "Sundry Expenses",          type: "Expense" },
-  { code: "6750", name: "Settlement Rounding",      type: "Expense" },
-  { code: "6700", name: "Marketing & Advertising",  type: "Expense" },
-  { code: "6800", name: "Insurance",                type: "Expense" },
-  { code: "6900", name: "Repairs & Maintenance",    type: "Expense" },
-  { code: "6910", name: "Loss on Disposal of Assets", type: "Expense" },
-  { code: "6950", name: "Depreciation",             type: "Expense" },
-];
-
-const COA_SEED = [
-  { code: "1000", name: "Bank — Current Account",  account_type: "asset",     category: "Current Assets",        is_system: true },
-  { code: "1100", name: "Trade Debtors",            account_type: "asset",     category: "Current Assets",        is_system: true },
-  { code: "1200", name: "Prepayments",              account_type: "asset",     category: "Current Assets",        is_system: true },
-  { code: "1250", name: "Supplier Prepayments",     account_type: "asset",     category: "Current Assets",        is_system: true },
-  { code: "1300", name: "Stripe Clearing",          account_type: "asset",     category: "Current Assets",        is_system: true },
-  { code: "1500", name: "Fixed Assets",                          account_type: "asset",   category: "Fixed Assets", is_system: true },
-  { code: "1501", name: "Accum Dep — Fixed Assets",           account_type: "asset",   category: "Fixed Assets", is_system: true },
-  { code: "1510", name: "Plant & Machinery",                  account_type: "asset",   category: "Fixed Assets", is_system: true },
-  { code: "1511", name: "Accum Dep — Plant & Machinery",      account_type: "asset",   category: "Fixed Assets", is_system: true },
-  { code: "1520", name: "Fixtures & Fittings",                account_type: "asset",   category: "Fixed Assets", is_system: true },
-  { code: "1521", name: "Accum Dep — Fixtures & Fittings",   account_type: "asset",   category: "Fixed Assets", is_system: true },
-  { code: "1530", name: "Computer Equipment",                 account_type: "asset",   category: "Fixed Assets", is_system: true },
-  { code: "1531", name: "Accum Dep — Computer Equipment",    account_type: "asset",   category: "Fixed Assets", is_system: true },
-  { code: "1540", name: "Motor Vehicles",                     account_type: "asset",   category: "Fixed Assets", is_system: true },
-  { code: "1541", name: "Accum Dep — Motor Vehicles",         account_type: "asset",   category: "Fixed Assets", is_system: true },
-  { code: "1600", name: "VAT Receivable",           account_type: "asset",     category: "Current Assets",        is_system: true },
-  { code: "2000", name: "Trade Creditors",          account_type: "liability", category: "Current Liabilities",   is_system: true },
-  { code: "2100", name: "VAT Control",              account_type: "liability", category: "Current Liabilities",   is_system: true },
-  { code: "2200", name: "PAYE & PRSI Payable",      account_type: "liability", category: "Current Liabilities",   is_system: true },
-  { code: "2250", name: "Net Wages Payable",        account_type: "liability", category: "Current Liabilities",   is_system: true },
-  { code: "2260", name: "Pension Payable",          account_type: "liability", category: "Current Liabilities",   is_system: true },
-  { code: "2300", name: "Accruals",                 account_type: "liability", category: "Current Liabilities",   is_system: true },
-  { code: "2350", name: "Customer Advance Payments",account_type: "liability", category: "Current Liabilities",   is_system: true },
-  { code: "2400", name: "Directors Loan Account",   account_type: "liability", category: "Current Liabilities",   is_system: true },
-  { code: "2500", name: "Bank Loan",                account_type: "liability", category: "Long-term Liabilities", is_system: true },
-  { code: "3000", name: "Share Capital",            account_type: "equity",    category: "Equity",                is_system: true },
-  { code: "3100", name: "Retained Earnings",        account_type: "equity",    category: "Equity",                is_system: true },
-  { code: "4000", name: "Sales Revenue",            account_type: "income",    category: "Income",                is_system: true },
-  { code: "4100", name: "Service Income",           account_type: "income",    category: "Income",                is_system: true },
-  { code: "4200", name: "Other Income",             account_type: "income",    category: "Income",                is_system: true },
-  { code: "4300", name: "Interest Received",        account_type: "income",    category: "Income",                is_system: true },
-  { code: "5000", name: "Cost of Sales",            account_type: "expense",   category: "Cost of Sales",         is_system: true },
-  { code: "5100", name: "Materials & Supplies",     account_type: "expense",   category: "Cost of Sales",         is_system: true },
-  { code: "5200", name: "Subcontractor Costs",      account_type: "expense",   category: "Cost of Sales",         is_system: true },
-  { code: "5300", name: "Direct Labour",            account_type: "expense",   category: "Cost of Sales",         is_system: true },
-  { code: "6000", name: "Payroll & PAYE",           account_type: "expense",   category: "Overheads",             is_system: true },
-  { code: "6100", name: "Rent & Rates",             account_type: "expense",   category: "Overheads",             is_system: true },
-  { code: "6200", name: "Motor & Travel",           account_type: "expense",   category: "Overheads",             is_system: true },
-  { code: "6300", name: "Telecoms & IT",            account_type: "expense",   category: "Overheads",             is_system: true },
-  { code: "6400", name: "Professional Fees",        account_type: "expense",   category: "Overheads",             is_system: true },
-  { code: "6500", name: "Bank Charges & Interest",  account_type: "expense",   category: "Overheads",             is_system: true },
-  { code: "6600", name: "Sundry Expenses",          account_type: "expense",   category: "Overheads",             is_system: true },
-  { code: "6750", name: "Settlement Rounding",      account_type: "expense",   category: "Overheads",             is_system: true },
-  { code: "6700", name: "Marketing & Advertising",  account_type: "expense",   category: "Overheads",             is_system: true },
-  { code: "6800", name: "Insurance",                account_type: "expense",   category: "Overheads",             is_system: true },
-  { code: "6900", name: "Repairs & Maintenance",       account_type: "expense",   category: "Overheads",  is_system: true },
-  { code: "6910", name: "Loss on Disposal of Assets", account_type: "expense",   category: "Overheads",  is_system: true },
-  { code: "6950", name: "Depreciation",                account_type: "expense",   category: "Overheads",  is_system: true },
-];
-
-// Sole Trader default chart — identical to COA_SEED except: Directors Loan Account (2400) is
-// excluded (a sole trader and their business aren't legally distinct persons, so there's no one
-// to "loan" money to — that relationship's entire economic substance is just Capital Account
-// movements), and the equity pair is replaced with Capital Account (3200) / Drawings (3300)
-// instead of Share Capital (3000) / Retained Earnings (3100) — new codes, not the same codes
-// relabeled, since GL Reports' Balance Sheet tab has hardcoded "Share Capital"/"Retained
-// Earnings" labels keyed off those exact code ranges regardless of the account's actual name
-// (tracked as a separate, not-yet-built gap — see Stage 3 write-up).
-const COA_SEED_SOLE_TRADER = [
-  { code: "1000", name: "Bank — Current Account",  account_type: "asset",     category: "Current Assets",        is_system: true },
-  { code: "1100", name: "Trade Debtors",            account_type: "asset",     category: "Current Assets",        is_system: true },
-  { code: "1200", name: "Prepayments",              account_type: "asset",     category: "Current Assets",        is_system: true },
-  { code: "1250", name: "Supplier Prepayments",     account_type: "asset",     category: "Current Assets",        is_system: true },
-  { code: "1300", name: "Stripe Clearing",          account_type: "asset",     category: "Current Assets",        is_system: true },
-  { code: "1500", name: "Fixed Assets",                          account_type: "asset",   category: "Fixed Assets", is_system: true },
-  { code: "1501", name: "Accum Dep — Fixed Assets",           account_type: "asset",   category: "Fixed Assets", is_system: true },
-  { code: "1510", name: "Plant & Machinery",                  account_type: "asset",   category: "Fixed Assets", is_system: true },
-  { code: "1511", name: "Accum Dep — Plant & Machinery",      account_type: "asset",   category: "Fixed Assets", is_system: true },
-  { code: "1520", name: "Fixtures & Fittings",                account_type: "asset",   category: "Fixed Assets", is_system: true },
-  { code: "1521", name: "Accum Dep — Fixtures & Fittings",   account_type: "asset",   category: "Fixed Assets", is_system: true },
-  { code: "1530", name: "Computer Equipment",                 account_type: "asset",   category: "Fixed Assets", is_system: true },
-  { code: "1531", name: "Accum Dep — Computer Equipment",    account_type: "asset",   category: "Fixed Assets", is_system: true },
-  { code: "1540", name: "Motor Vehicles",                     account_type: "asset",   category: "Fixed Assets", is_system: true },
-  { code: "1541", name: "Accum Dep — Motor Vehicles",         account_type: "asset",   category: "Fixed Assets", is_system: true },
-  { code: "1600", name: "VAT Receivable",           account_type: "asset",     category: "Current Assets",        is_system: true },
-  { code: "2000", name: "Trade Creditors",          account_type: "liability", category: "Current Liabilities",   is_system: true },
-  { code: "2100", name: "VAT Control",              account_type: "liability", category: "Current Liabilities",   is_system: true },
-  { code: "2200", name: "PAYE & PRSI Payable",      account_type: "liability", category: "Current Liabilities",   is_system: true },
-  { code: "2250", name: "Net Wages Payable",        account_type: "liability", category: "Current Liabilities",   is_system: true },
-  { code: "2260", name: "Pension Payable",          account_type: "liability", category: "Current Liabilities",   is_system: true },
-  { code: "2300", name: "Accruals",                 account_type: "liability", category: "Current Liabilities",   is_system: true },
-  { code: "2350", name: "Customer Advance Payments",account_type: "liability", category: "Current Liabilities",   is_system: true },
-  { code: "2500", name: "Bank Loan",                account_type: "liability", category: "Long-term Liabilities", is_system: true },
-  { code: "3200", name: "Capital Account",          account_type: "equity",    category: "Equity",                is_system: true },
-  { code: "3300", name: "Drawings",                 account_type: "equity",    category: "Equity",                is_system: true },
-  { code: "4000", name: "Sales Revenue",            account_type: "income",    category: "Income",                is_system: true },
-  { code: "4100", name: "Service Income",           account_type: "income",    category: "Income",                is_system: true },
-  { code: "4200", name: "Other Income",             account_type: "income",    category: "Income",                is_system: true },
-  { code: "4300", name: "Interest Received",        account_type: "income",    category: "Income",                is_system: true },
-  { code: "5000", name: "Cost of Sales",            account_type: "expense",   category: "Cost of Sales",         is_system: true },
-  { code: "5100", name: "Materials & Supplies",     account_type: "expense",   category: "Cost of Sales",         is_system: true },
-  { code: "5200", name: "Subcontractor Costs",      account_type: "expense",   category: "Cost of Sales",         is_system: true },
-  { code: "5300", name: "Direct Labour",            account_type: "expense",   category: "Cost of Sales",         is_system: true },
-  { code: "6000", name: "Payroll & PAYE",           account_type: "expense",   category: "Overheads",             is_system: true },
-  { code: "6100", name: "Rent & Rates",             account_type: "expense",   category: "Overheads",             is_system: true },
-  { code: "6200", name: "Motor & Travel",           account_type: "expense",   category: "Overheads",             is_system: true },
-  { code: "6300", name: "Telecoms & IT",            account_type: "expense",   category: "Overheads",             is_system: true },
-  { code: "6400", name: "Professional Fees",        account_type: "expense",   category: "Overheads",             is_system: true },
-  { code: "6500", name: "Bank Charges & Interest",  account_type: "expense",   category: "Overheads",             is_system: true },
-  { code: "6600", name: "Sundry Expenses",          account_type: "expense",   category: "Overheads",             is_system: true },
-  { code: "6750", name: "Settlement Rounding",      account_type: "expense",   category: "Overheads",             is_system: true },
-  { code: "6700", name: "Marketing & Advertising",  account_type: "expense",   category: "Overheads",             is_system: true },
-  { code: "6800", name: "Insurance",                account_type: "expense",   category: "Overheads",             is_system: true },
-  { code: "6900", name: "Repairs & Maintenance",       account_type: "expense",   category: "Overheads",  is_system: true },
-  { code: "6910", name: "Loss on Disposal of Assets", account_type: "expense",   category: "Overheads",  is_system: true },
-  { code: "6950", name: "Depreciation",                account_type: "expense",   category: "Overheads",  is_system: true },
-];
-
-const COA_STATIC_FALLBACK = COA_SEED.map((a, i) => ({
-  ...a, id: `static-${i}`, company_id: null, is_active: true, created_at: null, _static: true,
-}));
 
 // Irish VAT rates used in back-calculation (amounts are VAT-inclusive from bank imports)
 const VAT_RATES = { STD23: 23, RED13: 13.5, RED9: 9 };
@@ -204,59 +39,6 @@ function calcJournalVAT(amount, vatCode) {
   const abs = Math.abs(Number(amount));
   const vat = abs * rate / (100 + rate);
   return { vat, net: abs - vat };
-}
-
-function useChartOfAccounts(companyId) {
-  const [accounts, setAccounts] = useState([]);
-  const [loading, setLoading]   = useState(true);
-  const [version, setVersion]   = useState(0);
-  useEffect(() => {
-    if (!companyId) { setLoading(false); return; }
-    let cancelled = false;
-    setLoading(true);
-    (async () => {
-      try {
-        const db = supabase;
-        console.log('[CoA] loading for company:', companyId);
-        const { data, error } = await db
-          .from("chart_of_accounts").select("*").eq("company_id", companyId).order("code");
-        console.log('[CoA] fetch →', data?.length ?? 'null', 'rows | error:', error?.message ?? 'none');
-        if (cancelled) return;
-
-        if (error) {
-          console.warn('[CoA] fetch failed — showing static fallback. Run the chart_of_accounts SQL migration. Error:', error.message);
-          setAccounts(COA_STATIC_FALLBACK);
-        } else if (data && data.length > 0) {
-          setAccounts(data);
-        } else {
-          // Empty table — first real use for this company. Look up company_type here (not
-          // added to the hook's own params) so all existing call sites are unaffected; this
-          // query only ever runs on this rare first-seed path, never on a normal load.
-          const { data: co } = await db.from("companies").select("company_type").eq("id", companyId).single();
-          const seedSet = co?.company_type === 'Sole Trader' ? COA_SEED_SOLE_TRADER : COA_SEED;
-          console.log('[CoA] empty table — seeding', seedSet.length, `system accounts (${co?.company_type || 'unknown type'}) via upsert`);
-          const { data: seeded, error: seedErr } = await db
-            .from("chart_of_accounts")
-            .upsert(seedSet.map(a => ({ ...a, company_id: companyId })), { onConflict: 'company_id,code' })
-            .select();
-          console.log('[CoA] seed →', seeded?.length ?? 'null', 'rows | error:', seedErr?.message ?? 'none');
-          if (cancelled) return;
-          if (seedErr) {
-            console.warn('[CoA] seed failed — showing static fallback. Check RLS policy on chart_of_accounts. Error:', seedErr.message);
-            setAccounts(COA_STATIC_FALLBACK);
-          } else if (seeded) {
-            setAccounts(seeded.sort((a, b) => a.code.localeCompare(b.code)));
-          }
-        }
-      } catch (e) {
-        console.error('[CoA] unexpected error:', e);
-        if (!cancelled) setAccounts(COA_STATIC_FALLBACK);
-      }
-      if (!cancelled) setLoading(false);
-    })();
-    return () => { cancelled = true; };
-  }, [companyId, version]);
-  return { accounts, loading, refetch: () => setVersion(v => v + 1) };
 }
 
 function usePriorYearBalances(companyId) {
@@ -282,115 +64,6 @@ function usePriorYearBalances(companyId) {
       });
   }, [companyId, version]);
   return { balances, meta, loading, refetch: () => setVersion(v => v + 1) };
-}
-
-// ── System rule seed (mirrors SQL seed — used for client-side auto-seeding if table is empty) ──
-const SYSTEM_RULES_SEED = [
-  { pattern: 'wages',            match_type: 'contains',   direction: 'out',  nominal_code: '6000', nominal_name: 'Payroll & PAYE',          confidence: 'high' },
-  { pattern: 'salary',           match_type: 'contains',   direction: 'out',  nominal_code: '6000', nominal_name: 'Payroll & PAYE',          confidence: 'high' },
-  { pattern: 'payroll',          match_type: 'contains',   direction: 'out',  nominal_code: '6000', nominal_name: 'Payroll & PAYE',          confidence: 'high' },
-  { pattern: 'bwages',           match_type: 'contains',   direction: 'both', nominal_code: '6000', nominal_name: 'Payroll & PAYE',          confidence: 'high' },
-  { pattern: 'lwages',           match_type: 'contains',   direction: 'both', nominal_code: '6000', nominal_name: 'Payroll & PAYE',          confidence: 'high' },
-  { pattern: 'swages',           match_type: 'contains',   direction: 'both', nominal_code: '6000', nominal_name: 'Payroll & PAYE',          confidence: 'high' },
-  { pattern: 'wwages',           match_type: 'contains',   direction: 'both', nominal_code: '6000', nominal_name: 'Payroll & PAYE',          confidence: 'high' },
-  { pattern: 'inet.*wag',        match_type: 'regex',      direction: 'both', nominal_code: '6000', nominal_name: 'Payroll & PAYE',          confidence: 'high' },
-  { pattern: 'revenue commis',   match_type: 'contains',   direction: 'out',  nominal_code: '2100', nominal_name: 'VAT Control',             confidence: 'high' },
-  { pattern: 'collector general',match_type: 'contains',   direction: 'out',  nominal_code: '2100', nominal_name: 'VAT Control',             confidence: 'high' },
-  { pattern: 'd/d revenue',      match_type: 'contains',   direction: 'out',  nominal_code: '2100', nominal_name: 'VAT Control',             confidence: 'high' },
-  { pattern: 'stamp duty',       match_type: 'contains',   direction: 'out',  nominal_code: '2100', nominal_name: 'VAT Control',             confidence: 'high' },
-  { pattern: 'fee-qtr',          match_type: 'startswith', direction: 'out',  nominal_code: '6500', nominal_name: 'Bank Charges',            confidence: 'high' },
-  { pattern: 'bank charge',      match_type: 'contains',   direction: 'out',  nominal_code: '6500', nominal_name: 'Bank Charges',            confidence: 'high' },
-  { pattern: 'bank fee',         match_type: 'contains',   direction: 'out',  nominal_code: '6500', nominal_name: 'Bank Charges',            confidence: 'high' },
-  { pattern: 'monthly fee',      match_type: 'contains',   direction: 'out',  nominal_code: '6500', nominal_name: 'Bank Charges',            confidence: 'high' },
-  { pattern: 'cgs fee',          match_type: 'contains',   direction: 'out',  nominal_code: '6500', nominal_name: 'Bank Charges',            confidence: 'high' },
-  { pattern: 'pymt fee',         match_type: 'contains',   direction: 'out',  nominal_code: '6500', nominal_name: 'Bank Charges',            confidence: 'high' },
-  { pattern: 'quarterly fee',    match_type: 'contains',   direction: 'out',  nominal_code: '6500', nominal_name: 'Bank Charges',            confidence: 'high' },
-  { pattern: 'close brothers',   match_type: 'contains',   direction: 'out',  nominal_code: '2500', nominal_name: 'Bank Loan',               confidence: 'high' },
-  { pattern: 'naps loan',        match_type: 'contains',   direction: 'out',  nominal_code: '2500', nominal_name: 'Bank Loan',               confidence: 'high' },
-  { pattern: 'inet.*loan',       match_type: 'regex',      direction: 'out',  nominal_code: '2500', nominal_name: 'Bank Loan',               confidence: 'high' },
-  { pattern: 'inet.*rent',       match_type: 'regex',      direction: 'out',  nominal_code: '6100', nominal_name: 'Rent & Rates',            confidence: 'high' },
-  { pattern: 'herorent',         match_type: 'contains',   direction: 'out',  nominal_code: '6100', nominal_name: 'Rent & Rates',            confidence: 'high' },
-  { pattern: 'eir',              match_type: 'exact',      direction: 'out',  nominal_code: '6300', nominal_name: 'Telecoms & IT',           confidence: 'high' },
-  { pattern: 'vodafone',         match_type: 'contains',   direction: 'out',  nominal_code: '6300', nominal_name: 'Telecoms & IT',           confidence: 'high' },
-  { pattern: 'three mobile',     match_type: 'contains',   direction: 'out',  nominal_code: '6300', nominal_name: 'Telecoms & IT',           confidence: 'high' },
-  { pattern: 'google',           match_type: 'contains',   direction: 'out',  nominal_code: '6300', nominal_name: 'Telecoms & IT',           confidence: 'high' },
-  { pattern: 'gsuite',           match_type: 'contains',   direction: 'out',  nominal_code: '6300', nominal_name: 'Telecoms & IT',           confidence: 'high' },
-  { pattern: 'microsoft',        match_type: 'contains',   direction: 'out',  nominal_code: '6300', nominal_name: 'Telecoms & IT',           confidence: 'high' },
-  { pattern: 'adobe',            match_type: 'contains',   direction: 'out',  nominal_code: '6300', nominal_name: 'Telecoms & IT',           confidence: 'high' },
-  { pattern: 'zoom',             match_type: 'contains',   direction: 'out',  nominal_code: '6300', nominal_name: 'Telecoms & IT',           confidence: 'high' },
-  { pattern: 'slack',            match_type: 'contains',   direction: 'out',  nominal_code: '6300', nominal_name: 'Telecoms & IT',           confidence: 'high' },
-  { pattern: 'wix',              match_type: 'contains',   direction: 'out',  nominal_code: '6300', nominal_name: 'Telecoms & IT',           confidence: 'high' },
-  { pattern: 'spotify',          match_type: 'contains',   direction: 'out',  nominal_code: '6300', nominal_name: 'Telecoms & IT',           confidence: 'high' },
-  { pattern: 'hubfit',           match_type: 'contains',   direction: 'out',  nominal_code: '6300', nominal_name: 'Telecoms & IT',           confidence: 'high' },
-  { pattern: 'glofox',           match_type: 'contains',   direction: 'out',  nominal_code: '6300', nominal_name: 'Telecoms & IT',           confidence: 'high' },
-  { pattern: 'glofox',           match_type: 'contains',   direction: 'in',   nominal_code: '4000', nominal_name: 'Sales Revenue',           confidence: 'high' },
-  { pattern: 'stripe',           match_type: 'contains',   direction: 'in',   nominal_code: '4000', nominal_name: 'Sales Revenue',           confidence: 'high' },
-  { pattern: 'paypal',           match_type: 'contains',   direction: 'in',   nominal_code: '4000', nominal_name: 'Sales Revenue',           confidence: 'high' },
-  { pattern: 'insurance',        match_type: 'contains',   direction: 'both', nominal_code: '6800', nominal_name: 'Insurance',               confidence: 'high' },
-  { pattern: 'allianz',          match_type: 'contains',   direction: 'out',  nominal_code: '6800', nominal_name: 'Insurance',               confidence: 'high' },
-  { pattern: 'axa',              match_type: 'contains',   direction: 'out',  nominal_code: '6800', nominal_name: 'Insurance',               confidence: 'high' },
-  { pattern: 'aviva',            match_type: 'contains',   direction: 'out',  nominal_code: '6800', nominal_name: 'Insurance',               confidence: 'high' },
-  { pattern: 'fbd',              match_type: 'contains',   direction: 'out',  nominal_code: '6800', nominal_name: 'Insurance',               confidence: 'high' },
-  { pattern: 'zurich',           match_type: 'contains',   direction: 'out',  nominal_code: '6800', nominal_name: 'Insurance',               confidence: 'high' },
-  { pattern: 'circle k',         match_type: 'contains',   direction: 'out',  nominal_code: '6200', nominal_name: 'Motor & Travel',          confidence: 'high' },
-  { pattern: 'applegreen',       match_type: 'contains',   direction: 'out',  nominal_code: '6200', nominal_name: 'Motor & Travel',          confidence: 'high' },
-  { pattern: 'maxol',            match_type: 'contains',   direction: 'out',  nominal_code: '6200', nominal_name: 'Motor & Travel',          confidence: 'high' },
-  { pattern: 'texaco',           match_type: 'contains',   direction: 'out',  nominal_code: '6200', nominal_name: 'Motor & Travel',          confidence: 'high' },
-  { pattern: 'apcoa',            match_type: 'contains',   direction: 'out',  nominal_code: '6200', nominal_name: 'Motor & Travel',          confidence: 'high' },
-  { pattern: 'parking',          match_type: 'contains',   direction: 'out',  nominal_code: '6200', nominal_name: 'Motor & Travel',          confidence: 'high' },
-  { pattern: 'ryanair',          match_type: 'contains',   direction: 'out',  nominal_code: '6200', nominal_name: 'Motor & Travel',          confidence: 'high' },
-  { pattern: 'uber',             match_type: 'contains',   direction: 'out',  nominal_code: '6200', nominal_name: 'Motor & Travel',          confidence: 'high' },
-  { pattern: 'taxi',             match_type: 'contains',   direction: 'out',  nominal_code: '6200', nominal_name: 'Motor & Travel',          confidence: 'high' },
-  { pattern: 'imro',             match_type: 'contains',   direction: 'out',  nominal_code: '6400', nominal_name: 'Professional Fees',       confidence: 'high' },
-  { pattern: 'solicitor',        match_type: 'contains',   direction: 'out',  nominal_code: '6400', nominal_name: 'Professional Fees',       confidence: 'high' },
-  { pattern: 'legal fee',        match_type: 'contains',   direction: 'out',  nominal_code: '6400', nominal_name: 'Professional Fees',       confidence: 'high' },
-  { pattern: 'accountant fee',   match_type: 'contains',   direction: 'out',  nominal_code: '6400', nominal_name: 'Professional Fees',       confidence: 'high' },
-  { pattern: 'google ads',       match_type: 'contains',   direction: 'out',  nominal_code: '6700', nominal_name: 'Marketing & Advertising', confidence: 'high' },
-  { pattern: 'facebook ads',     match_type: 'contains',   direction: 'out',  nominal_code: '6700', nominal_name: 'Marketing & Advertising', confidence: 'high' },
-  { pattern: 'linkedin',         match_type: 'contains',   direction: 'out',  nominal_code: '6700', nominal_name: 'Marketing & Advertising', confidence: 'high' },
-  { pattern: 'wix.com',          match_type: 'contains',   direction: 'out',  nominal_code: '6700', nominal_name: 'Marketing & Advertising', confidence: 'high' },
-  { pattern: 'electric ireland', match_type: 'contains',   direction: 'out',  nominal_code: '6900', nominal_name: 'Repairs & Maintenance',   confidence: 'high' },
-  { pattern: 'bord gais',        match_type: 'contains',   direction: 'out',  nominal_code: '6900', nominal_name: 'Repairs & Maintenance',   confidence: 'high' },
-  { pattern: 'sse airtricity',   match_type: 'contains',   direction: 'out',  nominal_code: '6900', nominal_name: 'Repairs & Maintenance',   confidence: 'high' },
-  { pattern: 'irish water',      match_type: 'contains',   direction: 'out',  nominal_code: '6900', nominal_name: 'Repairs & Maintenance',   confidence: 'high' },
-  { pattern: 'equipment',        match_type: 'contains',   direction: 'out',  nominal_code: '5100', nominal_name: 'Materials & Supplies',    confidence: 'high' },
-  { pattern: 'fitness equip',    match_type: 'contains',   direction: 'out',  nominal_code: '5100', nominal_name: 'Materials & Supplies',    confidence: 'high' },
-];
-
-function useTransactionRules(companyId) {
-  const [rules,   setRules]   = useState([]);
-  const [loading, setLoading] = useState(true);
-  const [version, setVersion] = useState(0);
-  useEffect(() => {
-    if (!companyId) { setLoading(false); return; }
-    const db = supabase;
-    db.from('transaction_rules').select('*')
-      .or(`company_id.is.null,company_id.eq.${companyId}`)
-      .eq('is_active', true)
-      .order('created_at')
-      .then(async ({ data, error }) => {
-        if (error) {
-          console.warn('[useTransactionRules] fetch error:', error.message, '— falling back to in-memory seed');
-          setRules(SYSTEM_RULES_SEED.map((r, i) => ({ ...r, id: `seed-${i}`, company_id: null, source: 'system', is_active: true, usage_count: 0 })));
-          setLoading(false);
-          return;
-        }
-        const hasSystemRules = data?.some(r => r.company_id === null || r.source === 'system');
-        if (!hasSystemRules) {
-          console.log('[useTransactionRules] no system rules found — seeding defaults');
-          await db.from('transaction_rules').insert(
-            SYSTEM_RULES_SEED.map(r => ({ ...r, company_id: null, source: 'system' }))
-          );
-          const { data: seeded } = await db.from('transaction_rules').select('*')
-            .or(`company_id.is.null,company_id.eq.${companyId}`).eq('is_active', true).order('created_at');
-          setRules(seeded || []);
-        } else {
-          setRules(data || []);
-        }
-        setLoading(false);
-      });
-  }, [companyId, version]);
-  return { rules, loading, refetch: () => setVersion(v => v + 1) };
 }
 
 const GL_TB = [];
@@ -2751,30 +2424,11 @@ function Invoices({ companyName, companyId: propCid, company, onNavigate, isBusi
   const creditNotes = allDocs.filter(d => d.type === 'credit_note');
   const today       = new Date();
 
-  const cnByInvoice = {};
-  for (const cn of creditNotes) {
-    if (cn.credit_note_for && cn.status !== 'draft' && cn.status !== 'void') {
-      cnByInvoice[cn.credit_note_for] = (cnByInvoice[cn.credit_note_for] || 0) + Number(cn.total || 0);
-    }
-  }
-
-  const outstanding = inv => Math.max(0, Number(inv.total || 0) - Number(inv.amount_paid || 0) - (cnByInvoice[inv.id] || 0));
-
-  const daysDue = inv => {
-    const due = inv.due_date_calc || inv.due_date;
-    if (!due) return 0;
-    return Math.floor((today - new Date(due + 'T00:00:00')) / 86400000);
-  };
-
-  const statusOf = inv => {
-    if (inv.status === 'void' || inv.status === 'credited') return inv.status;
-    if (inv.status === 'draft') return 'draft';
-    const owed = outstanding(inv);
-    if (owed <= 0.005) return 'paid';
-    if (daysDue(inv) > 0) return 'overdue';
-    if (owed < Number(inv.total) - 0.005) return 'part_paid';
-    return inv.status || 'sent';
-  };
+  // Status rules live in src/shared/invoice.js (shared with /mobile).
+  const cnByInvoice = creditedByInvoice(creditNotes);
+  const outstanding = inv => invoiceOutstanding(inv, cnByInvoice);
+  const daysDue     = inv => invoiceDaysDue(inv, today);
+  const statusOf    = inv => invoiceStatus(inv, cnByInvoice, today);
 
   const agedRows = invoices
     .filter(inv => !['draft', 'void', 'credited'].includes(statusOf(inv)))
@@ -11894,25 +11548,6 @@ async function categoriseWithAI(uniquePayees, { onProgress, cancelRef, businessC
 // ─── BANK IMPORT ──────────────────────────────────────────────────────────────
 const CONF_COLOR = { high: "var(--green)", medium: "var(--gold)", low: "var(--red)" };
 
-// Strip AIB-style prefixes and trailing junk to get a clean merchant name for pattern matching.
-// Example: "*INET BWAGES IE25121264477151 TxnDate: 12Dec2025" → "inet bwages"
-function preCleanDesc(raw) {
-  let s = (raw || "").trim();
-  // Remove leading AIB transaction type codes
-  s = s.replace(/^(VDP-|VDC-|VDA-|VDP |VDC |VDA |D\/D |DD )/i, "").trim();
-  // Remove leading asterisk (e.g. "*INET WAGES")
-  s = s.replace(/^\*/, "").trim();
-  // Remove TxnDate and everything after (AIB format: "TxnDate: 12Dec2025")
-  s = s.replace(/\s*TxnDate:.*$/i, "").trim();
-  // Remove IBAN references — IE + 2 digits + any alphanumeric (e.g. IE25121264477151 or IE25AIBK...)
-  s = s.replace(/\bIE\d{2}[A-Z0-9]+\b.*$/i, "").trim();
-  // Remove trailing card-last-4 references like " *3702"
-  s = s.replace(/\s*\*\d{4}\b.*$/, "").trim();
-  // Remove trailing date/time stamps like "08FEB25 11:49", "08FEB25", "12Dec2025"
-  s = s.replace(/\s+\d{2}[A-Z]{3}\d{2,4}(\s+\d{2}:\d{2})?$/i, "").trim();
-  return s.toLowerCase();
-}
-
 // More aggressive version of preCleanDesc — strips reference codes and returns the first
 // distinctive uppercase merchant token, e.g. "VDP-Spotify P359F1 *3702" → "SPOTIFY".
 function extractKeyword(raw) {
@@ -11930,44 +11565,6 @@ function extractKeyword(raw) {
   s = s.replace(/\s+/g, ' ').trim();
   const first = s.split(/\s+/).find(t => t.length >= 3) || s.split(/\s+/)[0] || '';
   return first.replace(/[^A-Z0-9]/gi, '').toUpperCase();
-}
-
-// Applies transaction_rules from the DB against a description + amount.
-// Rules are sorted: user > learned > system, then exact > startswith > contains > regex,
-// then longer patterns first (more specific wins within same match_type).
-// Returns matched rule object or null.
-function applyRules(description, amount, rules) {
-  const rawLower   = (description || "").toLowerCase();
-  const cleanLower = preCleanDesc(description);
-  const isIncome   = amount > 0;
-
-  const MATCH_RANK  = { exact: 0, startswith: 1, contains: 2, regex: 3 };
-  const SOURCE_RANK = { user: 0, learned: 1, system: 2 };
-
-  const sorted = [...rules].sort((a, b) => {
-    const src = (SOURCE_RANK[a.source] ?? 2) - (SOURCE_RANK[b.source] ?? 2);
-    if (src !== 0) return src;
-    const mt = (MATCH_RANK[a.match_type] ?? 2) - (MATCH_RANK[b.match_type] ?? 2);
-    if (mt !== 0) return mt;
-    return b.pattern.length - a.pattern.length; // longer = more specific
-  });
-
-  for (const rule of sorted) {
-    if (rule.direction === 'in'  && !isIncome) continue;
-    if (rule.direction === 'out' &&  isIncome) continue;
-    const p = rule.pattern.toLowerCase();
-    let hit = false;
-    try {
-      switch (rule.match_type) {
-        case 'exact':      hit = rawLower === p || cleanLower === p; break;
-        case 'startswith': hit = rawLower.startsWith(p) || cleanLower.startsWith(p); break;
-        case 'regex':      { const rx = new RegExp(rule.pattern, 'i'); hit = rx.test(rawLower) || rx.test(cleanLower); break; }
-        default:           hit = rawLower.includes(p) || cleanLower.includes(p);
-      }
-    } catch (e) { console.warn('[applyRules] invalid regex:', rule.pattern); }
-    if (hit) return rule;
-  }
-  return null;
 }
 
 class BankImportErrorBoundary extends React.Component {
@@ -16836,22 +16433,16 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
     if (f === "nominal_account") { setNominalTouched(true); setSuggestedLabel(null); }
   };
 
-  // Stage 2 — suggests a nominal account from vendor/description text, reusing the same
-  // pattern-matching engine BankImport already uses for bank transactions (applyRules +
-  // useTransactionRules). Expenses are always money out regardless of the stored amount's
-  // sign, so -Math.abs(amount) is passed to make applyRules' direction filter ('out' vs 'in')
-  // treat every expense correctly, without touching applyRules itself. Never overwrites a
-  // choice the submitter already made deliberately (nominalTouched), and leaves today's
-  // Sundry default in place when nothing matches — no new required field or step either way.
+  // Stage 2 — suggests a nominal account from vendor/description text (suggestExpenseAccount,
+  // src/shared/expenseSuggest.js — the transaction_rules engine BankImport uses; shared with
+  // /mobile's receipt capture). Never overwrites a choice the submitter already made
+  // deliberately (nominalTouched), and leaves today's Sundry default in place when nothing
+  // matches — no new required field or step either way.
   const applySuggestion = (supplierVal, descriptionVal, amountVal) => {
     if (nominalTouched) return;
-    const matchText = `${supplierVal || ""} ${descriptionVal || ""}`.trim();
-    if (!matchText) return;
-    const match = applyRules(matchText, -Math.abs(parseFloat(amountVal) || 0), txRules);
-    if (!match) return;
-    const acct = coaAccounts.find(a => a.code === match.nominal_code) || GL_ACCOUNTS.find(a => a.code === match.nominal_code);
+    const acct = suggestExpenseAccount(supplierVal, descriptionVal, amountVal, txRules, coaAccounts);
     if (!acct) return;
-    setForm(p => ({ ...p, nominal_account: match.nominal_code, nominal_name: acct.name, category: acct.category || acct.type || "" }));
+    setForm(p => ({ ...p, nominal_account: acct.code, nominal_name: acct.name, category: acct.category }));
     setSuggestedLabel(acct.name);
   };
 
@@ -20119,10 +19710,8 @@ function YapilyBankFeeds({ companyId, company, isActive, isBusinessOwner = false
     if (institutions.length) return; // already loaded
     setInstLoading(true);
     try {
-      const res  = await fetch('/api/yapily/institutions?country=IE');
-      const data = await res.json();
-      if (!res.ok) { setError(data.error || 'Could not load banks'); setShowPicker(false); }
-      else { setInstitutions(data.institutions ?? []); setYapilyEnv(data.environment ?? null); }
+      const { institutions: list, environment } = await fetchInstitutions('IE');
+      setInstitutions(list); setYapilyEnv(environment);
     } catch (e) { setError(e.message); setShowPicker(false); }
     setInstLoading(false);
   };
@@ -20140,21 +19729,7 @@ function YapilyBankFeeds({ companyId, company, isActive, isBusinessOwner = false
     if (!companyId || !inst) return;
     setConnecting(true); setShowPicker(false); setError(null);
     try {
-      const res  = await fetch('/api/yapily/connect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json', 'Authorization': `Bearer ${await window.Clerk?.session?.getToken()}` },
-        body: JSON.stringify({
-          company_id:            companyId,
-          institution:           inst.id,
-          institutionCountryCode: inst.countryCode,
-        }),
-      });
-      const data = await res.json();
-      if (!res.ok || !data.hostedUrl) {
-        setError(data.error || 'Failed to initiate connection');
-        setConnecting(false); return;
-      }
-      window.location.href = data.hostedUrl;
+      window.location.href = await startBankConnect(companyId, inst); // src/shared/bankConnect.js
     } catch (e) {
       setError(e.message);
       setConnecting(false);
@@ -20269,50 +19844,16 @@ function YapilyBankFeeds({ companyId, company, isActive, isBusinessOwner = false
     loadConnections();
   };
 
-  // Reconnect — for EU 180-day (UK 90-day) consents the user re-authorises via a fresh
-  // hosted consent flow after expiry, rather than extending the old one.
+  // Reconnect a lapsed consent via a fresh hosted flow (src/shared/bankConnect.js).
   const reconnectConnection = async (conn) => {
     if (!companyId) return;
-    // Mark the lapsed row expired so it doesn't keep showing as active once the fresh
-    // consent (a new bank_connections row) is created by /api/yapily/connect.
-    if (conn.status !== 'expired' && conn.status !== 'revoked') {
-      await supabase.from('bank_connections').update({ status: 'expired', yapily_consent_token: null, updated_at: new Date().toISOString() }).eq('id', conn.id);
-    }
-    const known = institutions.find(i => i.id === conn.institution_id);
-    selectInstitution(known || {
-      id:          conn.institution_id,
-      name:        conn.institution_id,
-      countryCode: conn.institution_id === 'modelo-sandbox' ? 'GB' : 'IE',
-    });
+    selectInstitution(await prepareReconnect(conn, institutions));
   };
 
   const fmtD = (d) => d ? new Date(d).toLocaleDateString('en-IE', { day: '2-digit', month: 'short', year: 'numeric' }) : '—';
 
-  // Surface a warning within this many days of the expiry deadline — but the check itself
-  // is date-based so sandbox's ~10-minute window still correctly falls straight into
-  // "expiring"/"expired" for quick end-to-end testing.
-  const EXPIRY_WARNING_DAYS = 14;
-
-  // Derive the user-facing lifecycle state from the stored dates — independent of whatever
-  // `status` last got written by a sync attempt, since reconfirmBy can lapse with no sync
-  // having run at all.
-  const connectionState = (c) => {
-    if (c.status === 'revoked') return { key: 'revoked', label: 'Revoked', tone: 'faint' };
-    if (c.status === 'pending') return { key: 'pending', label: 'Pending', tone: 'warn' };
-    if (c.status === 'failed')  return { key: 'failed',  label: 'Failed',  tone: 'danger' };
-
-    const deadline = c.yapily_reconfirm_by || c.consent_expires_at;
-    const deadlineMs = deadline ? new Date(deadline).getTime() : null;
-    const now = Date.now();
-
-    if (c.status === 'expired' || (deadlineMs && now >= deadlineMs)) {
-      return { key: 'expired', label: 'Expired — reconnect needed', tone: 'danger' };
-    }
-    if (deadlineMs && now >= deadlineMs - EXPIRY_WARNING_DAYS * 24 * 60 * 60 * 1000) {
-      return { key: 'expiring', label: `Expires ${fmtD(deadline)}`, tone: 'warn' };
-    }
-    return { key: 'active', label: 'Active', tone: 'accent' };
-  };
+  // Lifecycle state from the stored dates — src/shared/bankConnect.js (shared with /mobile).
+  const connectionState = (c) => connectionStateOf(c, fmtD);
   const toneColor = { accent: 'var(--accent)', warn: 'var(--warn)', danger: 'var(--danger)', faint: 'var(--text-faint)' };
   const toneBg    = { accent: 'var(--accent-dim)', warn: 'var(--warn-dim)', danger: 'var(--danger-dim)', faint: 'var(--surface-2)' };
 
@@ -20404,10 +19945,7 @@ function YapilyBankFeeds({ companyId, company, isActive, isBusinessOwner = false
               {instLoading ? (
                 <div style={{ padding: 32, textAlign: 'center', color: 'var(--text-faint)', fontSize: 12 }}>Loading banks…</div>
               ) : (() => {
-                const q = instSearch.trim().toLowerCase();
-                const filtered = institutions.filter(i =>
-                  !q || i.name.toLowerCase().includes(q) || i.id.toLowerCase().includes(q)
-                );
+                const filtered = filterInstitutions(institutions, instSearch);
                 if (!filtered.length) return (
                   <div style={{ padding: 24, textAlign: 'center', color: 'var(--text-faint)', fontSize: 12 }}>No banks match "{instSearch}"</div>
                 );

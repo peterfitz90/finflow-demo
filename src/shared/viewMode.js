@@ -23,5 +23,11 @@ export function setViewPref(v) {
 // Should this visit to the full app be sent to /mobile instead?
 export const shouldUseMobile = () => isPhone() && getViewPref() !== 'full';
 
+// A bank-connection callback (/?bank_connected=… or ?bank_error=…) returns to /mobile when the
+// user chose mobile view on this device — they started the connection from /mobile even if the
+// device isn't phone-sized (Stage 2 bank connect).
+export const isBankCallback = (search) => /[?&](bank_connected|bank_error)=/.test(search || '');
+export const shouldRouteToMobile = (search) => shouldUseMobile() || (isBankCallback(search) && getViewPref() === 'mobile');
+
 export function goToFullSite() { setViewPref('full'); window.location.assign('/'); }
 export function goToMobile()   { setViewPref('mobile'); window.location.assign('/mobile'); }

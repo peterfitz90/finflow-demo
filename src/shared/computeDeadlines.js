@@ -58,3 +58,14 @@ export function computeDeadlines(company) {
   }
   return deadlines.sort((a,b) => a.due - b.due);
 }
+
+// First day ('YYYY-MM-DD') of the VAT period a VAT3 deadline's period_val names —
+// 'b-<year>-<pair 0-5>' (bi-monthly) or 'm-<year>-<month 0-11>' (monthly). Lets callers match
+// a deadline against filed periods given as date ranges (get_locked_periods — the RPC a
+// business_owner must use, since vat_returns SELECT is accountant-only).
+export function vatPeriodStartOf(periodVal) {
+  const [kind, y, n] = String(periodVal || '').split('-');
+  if (!y || n === undefined) return null;
+  const month = kind === 'b' ? Number(n) * 2 + 1 : Number(n) + 1;
+  return `${y}-${String(month).padStart(2, '0')}-01`;
+}

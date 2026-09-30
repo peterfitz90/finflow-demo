@@ -5,7 +5,7 @@ import { BrowserRouter, Routes, Route, Navigate, useNavigate, useLocation } from
 import App from './App.jsx'
 import Mobile from './Mobile.jsx'
 import { initSentry, Sentry } from './sentry.js'
-import { shouldUseMobile } from './shared/viewMode.js'
+import { shouldRouteToMobile } from './shared/viewMode.js'
 
 // Phones get /mobile by default (src/shared/viewMode.js); tablets and desktops the full app.
 // The query string is carried over, so the Yapily bank-connection callback
@@ -13,7 +13,7 @@ import { shouldUseMobile } from './shared/viewMode.js'
 // started from — /mobile on a phone in mobile view, the full app if they chose the full site.
 function RootRoute() {
   const location = useLocation();
-  if (shouldUseMobile()) return <Navigate to={`/mobile${location.search}`} replace />;
+  if (shouldRouteToMobile(location.search)) return <Navigate to={`/mobile${location.search}`} replace />;
   return <App />;
 }
 
