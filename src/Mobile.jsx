@@ -8,7 +8,7 @@ import { supabase } from './supabase.js';
 import { approveApBill, confirmBankTxn } from './shared/approvals.js';
 import { InboxZeroCelebration } from './shared/InboxZeroCelebration.jsx';
 import { recScoreCandidate } from './shared/recScore.js';
-import { computeDeadlines, vatPeriodStartOf } from './shared/computeDeadlines.js';
+import { computeDeadlines, filedVatPeriodVals } from './shared/computeDeadlines.js';
 import { fetchAllRows } from './shared/fetchAllRows.js';
 import { monthEnd, todayStr as localToday } from './shared/dates.js';
 import { useHealthy } from './shared/useHealthy.js';
@@ -330,10 +330,7 @@ function useApplicableDeadlines(company) {
   return useMemo(() => {
     if (!company || !locked) return null;
     const all = computeDeadlines(company);
-    const vatFiled = new Set(all
-      .filter(dl => dl.type === 'VAT3' && dl.period_val)
-      .filter(dl => { const st = vatPeriodStartOf(dl.period_val); return locked.some(p => st >= p.period_start && st <= p.period_end); })
-      .map(dl => dl.period_val));
+    const vatFiled = filedVatPeriodVals(all, locked);
     return all.filter(dl => deadlineApplies(company, dl, vatFiled));
   }, [company, locked]);
 }

@@ -20,8 +20,14 @@ export function calcJournalVAT(amount, vatCode) {
   return { vat, net: abs - vat };
 }
 
+// Revenue due days — the one rule every deadline list and VAT screen uses (companies.ros_efiler).
+// Filing and paying through ROS extends both the VAT3 and the P30 deadline to the 23rd of the
+// month after the period; otherwise VAT3 is due the 19th and P30 the 14th.
+export const vatDueDay = rosEfiler => (rosEfiler ? 23 : 19);
+export const p30DueDay = rosEfiler => (rosEfiler ? 23 : 14);
+
 export function getVATPeriods(vatPeriodType, rosEfiler = false) {
-  const dueDay = rosEfiler ? 23 : 19;
+  const dueDay = vatDueDay(rosEfiler);
   const now = new Date();
   const year = now.getFullYear();
   const month = now.getMonth();

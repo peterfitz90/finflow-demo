@@ -19,6 +19,7 @@ import { useCompanyContext, resolvePendingAccess } from './shared/useCompanyCont
 import {
   VAT_RATES, calcJournalVAT, MONTH_NAMES_LONG, MONTH_NAMES_SHORT, getVATPeriods,
   fetchVat3PeriodData, computeVat3, vat3Blockers, buildFilingFigures,
+  vatDueDay, p30DueDay,
 } from './shared/vat3.js';
 import { NARROW_QUERY, matches as matchesMedia, goToMobile } from './shared/viewMode.js';
 import { BANK_NOMINAL_CODE, fetchNominalBalanceAsOf, fetchActiveBankNominals } from './shared/bankBalance.js';
@@ -5155,7 +5156,7 @@ function Compliance({ company, onNavigate }) {
   if (company?.paye_registered) {
     for (let i = -1; i <= 2; i++) {
       const m = new Date(today.getFullYear(), today.getMonth() + i, 1);
-      const due = new Date(today.getFullYear(), today.getMonth() + i + 1, 14);
+      const due = new Date(today.getFullYear(), today.getMonth() + i + 1, p30DueDay(company?.ros_efiler));
       if (daysDiff(due) >= -60)
         deadlines.push({ type: "P30", desc: `PAYE/PRSI — ${MONTH_NAMES_LONG[m.getMonth()]} ${m.getFullYear()}`, detail: "Monthly employer payroll return to Revenue", due });
     }
@@ -5170,7 +5171,7 @@ function Compliance({ company, onNavigate }) {
       ];
       for (let y = today.getFullYear() - 1; y <= today.getFullYear() + 1; y++) {
         periods.forEach(p => {
-          const due = new Date(p.ny ? y+1 : y, p.dm, 19);
+          const due = new Date(p.ny ? y+1 : y, p.dm, vatDueDay(company?.ros_efiler));
           const d = daysDiff(due);
           if (d >= -60 && d <= 150)
             deadlines.push({ type: "VAT3", desc: `VAT3 Return — ${MONTH_NAMES_SHORT[p.m[0]]}/${MONTH_NAMES_SHORT[p.m[1]]} ${y}`, detail: "Bi-monthly VAT return and payment to Revenue", due });
@@ -5179,7 +5180,7 @@ function Compliance({ company, onNavigate }) {
     } else {
       for (let i = -1; i <= 3; i++) {
         const m = new Date(today.getFullYear(), today.getMonth() + i, 1);
-        const due = new Date(today.getFullYear(), today.getMonth() + i + 1, 19);
+        const due = new Date(today.getFullYear(), today.getMonth() + i + 1, vatDueDay(company?.ros_efiler));
         const d = daysDiff(due);
         if (d >= -60 && d <= 150)
           deadlines.push({ type: "VAT3", desc: `VAT3 Return — ${MONTH_NAMES_LONG[m.getMonth()]} ${m.getFullYear()}`, detail: "Monthly VAT return and payment to Revenue", due });
@@ -5964,7 +5965,7 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
   const [checklistItems, setChecklistItems] = useState([]);
   const [automationStats, setAutomationStats] = useState({ total: 0, processed: 0, review: 0 });
   const [reconcStats, setReconcStats]         = useState({ suggested: 0, balance: 0, autoCount: 0, avgConf: 0 });
-  const [vatFiledSet, setVatFiledSet]         = useState(new Set());
+  const [lockedVat, setLockedVat]             = useState([]); // filed VAT periods (get_locked_periods)
   const [layout, setLayout]                  = useState(DEFAULT_DASHBOARD_LAYOUT);
   const [editLayout, setEditLayout]          = useState(false);
   const [dragId, setDragId]                  = useState(null);
@@ -6234,8 +6235,9 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
 
   useEffect(() => {
     if (!companyId) return;
-    supabase.from('vat_returns').select('period_val').eq('company_id', companyId).eq('status', 'filed')
-      .then(({ data }) => { if (data) setVatFiledSet(new Set(data.map(r => r.period_val))); });
+    // Via get_locked_periods, not vat_returns (accountant-only SELECT — a business_owner would
+    // see every ended period as an unfiled "draft ready").
+    getLockedPeriods(companyId).then(setLockedVat).catch(() => {});
   }, [companyId]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Load persisted dashboard layout for this user
@@ -6290,7 +6292,7 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
   if (cs.paye_registered) {
     for (let i = 0; i <= 3; i++) {
       const m   = new Date(today.getFullYear(), today.getMonth() + i, 1);
-      const due = new Date(today.getFullYear(), today.getMonth() + i + 1, 14);
+      const due = new Date(today.getFullYear(), today.getMonth() + i + 1, p30DueDay(company?.ros_efiler));
       if (daysDiff(due) >= -14) deadlines.push({ type: "P30", desc: `PAYE/PRSI — ${MONTH_NAMES_SHORT[m.getMonth()]}`, due });
     }
   }
@@ -6299,7 +6301,7 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
       const vp = [{ m:[0,1],dm:2 },{ m:[2,3],dm:4 },{ m:[4,5],dm:6 },{ m:[6,7],dm:8 },{ m:[8,9],dm:10 },{ m:[10,11],dm:0,ny:true }];
       for (let y = today.getFullYear(); y <= today.getFullYear() + 1; y++) {
         vp.forEach(p => {
-          const due = new Date(p.ny ? y+1 : y, p.dm, 19);
+          const due = new Date(p.ny ? y+1 : y, p.dm, vatDueDay(company?.ros_efiler));
           const d = daysDiff(due);
           if (d >= -14 && d <= 150) deadlines.push({ type: "VAT3", desc: `VAT3 — ${MONTH_NAMES_SHORT[p.m[0]]}/${MONTH_NAMES_SHORT[p.m[1]]}`, due });
         });
@@ -6307,7 +6309,7 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
     } else {
       for (let i = 0; i <= 3; i++) {
         const m   = new Date(today.getFullYear(), today.getMonth() + i, 1);
-        const due = new Date(today.getFullYear(), today.getMonth() + i + 1, 19);
+        const due = new Date(today.getFullYear(), today.getMonth() + i + 1, vatDueDay(company?.ros_efiler));
         const d   = daysDiff(due);
         if (d >= -14 && d <= 150) deadlines.push({ type: "VAT3", desc: `VAT3 — ${MONTH_NAMES_SHORT[m.getMonth()]}`, due });
       }
@@ -6386,10 +6388,10 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
       subtitle: `Due in ${days} day${days !== 1 ? 's' : ''} · Draft ready for review.`,
     });
   });
-  // VAT3 draft ready: period ended but not yet filed
+  // VAT3 draft ready: period ended but not yet filed — VAT-registered companies only
   const todayStr = localDateStr(today);
-  getVATPeriods(cs.vat_period || 'bimonthly', company?.ros_efiler || false)
-    .filter(p => p.end < todayStr && !vatFiledSet.has(p.val))
+  (cs.vat_registered ? getVATPeriods(cs.vat_period || 'bimonthly', company?.ros_efiler || false) : [])
+    .filter(p => p.end < todayStr && !isDateLocked(p.start, lockedVat))
     .slice(0, 1)
     .forEach(p => {
       if (wq.some(w => w.page === 'vat-returns')) return; // already added by deadline check
@@ -15820,7 +15822,7 @@ function PracticeDashboard({ companies, onSelectCompany, onAddCompany }) {
     const type   = company.vat_period || 'bimonthly';
     const now    = new Date(); now.setHours(0, 0, 0, 0);
     const year   = now.getFullYear(), month = now.getMonth();
-    const dueDay = company.ros_efiler ? 23 : 19;
+    const dueDay = vatDueDay(company.ros_efiler); // src/shared/vat3.js — same rule as every deadline list
     const periods = [];
     if (type === 'monthly') {
       for (let i = 0; i < 3; i++) {
