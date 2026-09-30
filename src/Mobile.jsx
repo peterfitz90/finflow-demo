@@ -1141,10 +1141,11 @@ function VatReturnCard({ company, isBusinessOwner }) {
         {loadErr ? <div className="qi-err" style={{ margin: '10px 0 0' }}>{loadErr}</div> : (
           <>
             <div className="m-vat-grid">
-              {box('T1', 'VAT on sales', v?.t1, 'var(--mtx)')}
-              {box('T2', 'VAT on purchases', v?.t2, 'var(--mtx)')}
-              {box('T3', 'Payable', v?.t3, v && v.t3 > 0 ? 'var(--gold)' : 'var(--mm)')}
-              {box('T4', 'Repayable', v?.t4, v && v.t4 > 0 ? 'var(--teal2)' : 'var(--mm)')}
+              {/* Final figures — what the desktop screen shows and what gets filed (T3 = T1 − T2 after rounding) */}
+              {box('T1', 'VAT on sales', v?.t1Final, 'var(--mtx)')}
+              {box('T2', 'VAT on purchases', v?.t2Final, 'var(--mtx)')}
+              {box('T3', 'Payable', v?.t3Final, v && v.t3Final > 0 ? 'var(--gold)' : 'var(--mm)')}
+              {box('T4', 'Repayable', v?.t4Final, v && v.t4Final > 0 ? 'var(--teal2)' : 'var(--mm)')}
             </div>
             {v && <div className="m-vat-sub" style={{ marginTop: 6 }}>{plural(v.t1DrillRows.length, 'sales journal')} · {plural(v.t2DrillRows.length, 'purchase journal')}</div>}
 
@@ -1168,7 +1169,7 @@ function VatReturnCard({ company, isBusinessOwner }) {
                 <div className="m-vat-confirm">
                   <div>Send the {vatPeriod.label} return to your accountant to file?</div>
                   <div className="m-vat-sub" style={{ marginTop: 4 }}>
-                    {v.t4 > 0 ? `${fmtVat(v.t4)} repayable` : `${fmtVat(v.t3)} payable`} · T1 {fmtVat(v.t1)} · T2 {fmtVat(v.t2)}
+                    {v.t4Final > 0 ? `${fmtVat(v.t4Final)} repayable` : `${fmtVat(v.t3Final)} payable`} · T1 {fmtVat(v.t1Final)} · T2 {fmtVat(v.t2Final)}
                   </div>
                   <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
                     <button type="button" className="m-btn m-btn-p" style={{ flex: 2, minHeight: 44, padding: 10 }} onClick={send} disabled={sending}>{sending ? 'Sending…' : 'Confirm request'}</button>
