@@ -19,6 +19,8 @@ import { useTransactionRules } from './shared/txRules.js';
 import { suggestExpenseAccount, expenseAccountOptions } from './shared/expenseSuggest.js';
 import { fetchInstitutions, filterInstitutions, startBankConnect, prepareReconnect, connectionState } from './shared/bankConnect.js';
 import { AutomationHero, HealthPulseDot } from './shared/AutomationHero.jsx';
+import { getVATPeriods, fetchVat3PeriodData, computeVat3, vat3Blockers, buildFilingFigures, isPeriodLocked } from './shared/vat3.js';
+import { captureError } from './sentry.js';
 import {
   INV_VAT_LABELS, calcLineAmounts, calcInvTotals, vatCodeForRate,
   createInvoiceDraft, finaliseInvoice,
@@ -164,6 +166,15 @@ const M_CSS = `
   .m-seg button.active { color: var(--teal2); border-color: var(--teal); background: rgba(16,185,129,0.08); }
   .m-bank-logo { width: 32px; height: 32px; border-radius: 8px; background: var(--mc); border: 1px solid var(--mbd); display: flex; align-items: center; justify-content: center; font-size: 11px; color: var(--mm); overflow: hidden; flex-shrink: 0; }
   .m-bank-logo img { width: 28px; height: 28px; object-fit: contain; }
+  .m-vat-due { font-size: 11px; color: var(--mm); font-family: 'Source Code Pro', monospace; margin: 8px 0 12px; }
+  .m-vat-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+  .m-vat-box { background: var(--ms); border: 1px solid var(--mbd); border-radius: var(--rsm); padding: 10px 12px; }
+  .m-vat-lbl { font-size: 10px; font-weight: 700; color: var(--teal2); font-family: 'Source Code Pro', monospace; }
+  .m-vat-val { font-family: 'Playfair Display', serif; font-size: 20px; font-weight: 700; margin-top: 2px; }
+  .m-vat-sub { font-size: 10px; color: var(--mm); font-family: 'Source Code Pro', monospace; }
+  .m-vat-notes { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; font-size: 12px; line-height: 1.4; }
+  .m-vat-ok { margin-top: 12px; padding: 10px 12px; border-radius: var(--rsm); background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.25); color: var(--teal2); font-size: 12px; }
+  .m-vat-confirm { margin-top: 12px; padding: 12px; border-radius: var(--rsm); border: 1px solid var(--teal); background: rgba(16,185,129,0.06); font-size: 13px; }
   .m-frow { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
 
   /* Buttons */
@@ -1022,8 +1033,168 @@ function ApprovalsTab({ companyId, user }) {
   );
 }
 
+// ─── VAT return (UX-03) — Compliance tab card ─────────────────────────────────
+// The period's VAT3 figures and blockers, from the desktop VAT Returns screen's own functions
+// (src/shared/vat3.js), and — for a business_owner — Request Filing: the same
+// request_vat_filing RPC and figures snapshot desktop sends. No adjustment / E1–ES2 / PA entry
+// on the phone: those go as zero, exactly what desktop sends when nobody touches those fields;
+// a return that needs them is done on the full site. Accountants file on the full site.
+const VAT_INPUTS_UNTOUCHED = { paCustomsValue: '0', paVatAmount: '0', adjT1: '', adjT2: '' };
+const fmtVat = n => `€${(Math.round((Number(n) || 0) * 100) / 100).toLocaleString('en-IE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+const plural = (n, one, many = `${one}s`) => `${n} ${n === 1 ? one : many}`;
+
+function VatReturnCard({ company, isBusinessOwner }) {
+  const companyId = company?.id;
+  const periods = useMemo(() => getVATPeriods(company?.vat_period || 'bimonthly', company?.ros_efiler || false),
+    [company?.vat_period, company?.ros_efiler]);
+  const [locked, setLocked]     = useState(null);       // get_locked_periods rows
+  const [selVal, setSelVal]     = useState(null);
+  const [data, setData]         = useState(null);       // fetchVat3PeriodData result
+  const [loadErr, setLoadErr]   = useState(null);
+  const [request, setRequest]   = useState(undefined);  // latest filing request | null; undefined = loading
+  const [confirming, setConfirming] = useState(false);
+  const [sending, setSending]   = useState(false);
+  const [sendErr, setSendErr]   = useState(null);
+  const today = localToday();
+
+  useEffect(() => {
+    if (!companyId) return;
+    let cancelled = false;
+    supabase.rpc('get_locked_periods', { p_company_id: companyId })
+      .then(({ data: rows, error }) => { if (!cancelled) setLocked(error ? [] : (rows || [])); });
+    return () => { cancelled = true; };
+  }, [companyId]);
+
+  // Default to the latest period that has ended and isn't filed — the one a return is due
+  // for — else the current one (the desktop screen's default).
+  useEffect(() => {
+    if (selVal || !locked || !periods.length) return;
+    const due = periods.find(p => p.end < today && !isPeriodLocked(p, locked));
+    setSelVal((due || periods[0]).val);
+  }, [locked, periods, selVal, today]);
+
+  const vatPeriod = periods.find(p => p.val === selVal) || null;
+
+  useEffect(() => {
+    if (!companyId || !vatPeriod) return;
+    let cancelled = false;
+    setData(null); setLoadErr(null); setRequest(undefined); setConfirming(false); setSendErr(null);
+    fetchVat3PeriodData(companyId, vatPeriod)
+      .then(d => { if (!cancelled) setData(d); })
+      .catch(e => { if (!cancelled) setLoadErr(e.message); });
+    // Most recent filing request for this period (same query as desktop).
+    supabase.from('vat_filing_requests')
+      .select('status, requested_at, figures, vat_control_balance, vat_control_delta')
+      .eq('company_id', companyId).eq('period_val', vatPeriod.val)
+      .order('requested_at', { ascending: false }).limit(1)
+      .then(({ data: rows }) => { if (!cancelled) setRequest(rows?.[0] ?? null); });
+    return () => { cancelled = true; };
+  }, [companyId, vatPeriod?.val]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  if (!company?.vat_registered) return null;
+
+  const v = data ? computeVat3(data.journals, VAT_INPUTS_UNTOUCHED) : null;
+  const isBizLocked = isPeriodLocked(vatPeriod, locked);
+  const b = data && request !== undefined
+    ? vat3Blockers({ pendingBills: data.pendingBills, unreconciledBt: data.unreconciledBt, isLocked: isBizLocked, isBizLocked, existingRequest: request })
+    : null;
+  const notEnded = vatPeriod && vatPeriod.end >= today;
+
+  const send = async () => {
+    if (!v || !b?.canRequest || sending) return;
+    setSending(true); setSendErr(null);
+    const figures = buildFilingFigures({ ...v, adjT1Comment: '', adjT2Comment: '', e1: '0', e2: '0', es1: '0', es2: '0' });
+    const { data: res, error } = await supabase.rpc('request_vat_filing', {
+      p_company_id: companyId, p_period_val: vatPeriod.val,
+      p_period_start: vatPeriod.start, p_period_end: vatPeriod.end, p_figures: figures,
+    });
+    if (error) {
+      captureError(error, { company_id: companyId, operation: 'vat-request-filing-mobile', period: vatPeriod.val });
+      setSendErr(error.message);
+    } else {
+      setRequest({ status: 'pending', requested_at: res?.requested_at, figures,
+        vat_control_balance: res?.vat_control_balance, vat_control_delta: res?.vat_control_delta });
+    }
+    setSending(false); setConfirming(false);
+  };
+
+  const box = (label, sub, val, colour) => (
+    <div className="m-vat-box">
+      <div className="m-vat-lbl">{label}</div>
+      <div className="m-vat-val" style={{ color: colour }}>{v ? fmtVat(val) : '…'}</div>
+      <div className="m-vat-sub">{sub}</div>
+    </div>
+  );
+
+  return (
+    <>
+      <div className="m-sec-title">VAT return</div>
+      <div className="m-card">
+        <select className="m-fselect" value={selVal || ''} onChange={e => setSelVal(e.target.value)} aria-label="VAT period">
+          {periods.map(p => <option key={p.val} value={p.val}>{p.label}{isPeriodLocked(p, locked) ? ' — filed' : ''}</option>)}
+        </select>
+        <div className="m-vat-due">
+          {isBizLocked ? '✓ Filed — this period is locked'
+            : vatPeriod ? `Due ${vatPeriod.due}${notEnded ? ' · period not ended yet — figures will change' : ''}` : ''}
+        </div>
+
+        {loadErr ? <div className="qi-err" style={{ margin: '10px 0 0' }}>{loadErr}</div> : (
+          <>
+            <div className="m-vat-grid">
+              {box('T1', 'VAT on sales', v?.t1, 'var(--mtx)')}
+              {box('T2', 'VAT on purchases', v?.t2, 'var(--mtx)')}
+              {box('T3', 'Payable', v?.t3, v && v.t3 > 0 ? 'var(--gold)' : 'var(--mm)')}
+              {box('T4', 'Repayable', v?.t4, v && v.t4 > 0 ? 'var(--teal2)' : 'var(--mm)')}
+            </div>
+            {v && <div className="m-vat-sub" style={{ marginTop: 6 }}>{plural(v.t1DrillRows.length, 'sales journal')} · {plural(v.t2DrillRows.length, 'purchase journal')}</div>}
+
+            {data && (b?.hardBlockCount > 0 || data.pendingExpenses.length > 0 || data.draftArInvoices.length > 0 || v.codeExceptions.length > 0 || v.rcExceptions.length > 0) && (
+              <div className="m-vat-notes">
+                {data.pendingBills.length > 0 && <div className="c-red">⚠ {plural(data.pendingBills.length, 'bill')} awaiting review — blocks filing</div>}
+                {data.unreconciledBt.length > 0 && <div className="c-red">⚠ {plural(data.unreconciledBt.length, 'bank line')} not reconciled — blocks filing</div>}
+                {data.pendingExpenses.length > 0 && <div className="c-gold">{plural(data.pendingExpenses.length, 'expense')} not yet approved — not in these figures</div>}
+                {data.draftArInvoices.length > 0 && <div className="c-gold">{plural(data.draftArInvoices.length, 'draft invoice')} — not in these figures until finalised</div>}
+                {v.codeExceptions.length > 0 && <div className="c-dim">{plural(v.codeExceptions.length, 'journal')} with no VAT code — may affect T1/T2</div>}
+                {v.rcExceptions.length > 0 && <div className="c-dim">{plural(v.rcExceptions.length, 'reverse-charge item')} — declared separately on ROS</div>}
+              </div>
+            )}
+
+            {isBusinessOwner ? (
+              isBizLocked ? null
+              : request === undefined || !b ? <div className="m-empty" style={{ padding: '12px 0 0' }}>Loading…</div>
+              : b.hasPendingRequest ? (
+                <div className="m-vat-ok">✓ Filing requested{request?.requested_at ? ` ${new Date(request.requested_at).toLocaleDateString('en-IE')}` : ''} — awaiting accountant review</div>
+              ) : confirming ? (
+                <div className="m-vat-confirm">
+                  <div>Send the {vatPeriod.label} return to your accountant to file?</div>
+                  <div className="m-vat-sub" style={{ marginTop: 4 }}>
+                    {v.t4 > 0 ? `${fmtVat(v.t4)} repayable` : `${fmtVat(v.t3)} payable`} · T1 {fmtVat(v.t1)} · T2 {fmtVat(v.t2)}
+                  </div>
+                  <div style={{ display: 'flex', gap: 8, marginTop: 10 }}>
+                    <button type="button" className="m-btn m-btn-p" style={{ flex: 2, minHeight: 44, padding: 10 }} onClick={send} disabled={sending}>{sending ? 'Sending…' : 'Confirm request'}</button>
+                    <button type="button" className="m-btn m-btn-s" style={{ flex: 1, minHeight: 44, padding: 10, marginTop: 0 }} onClick={() => setConfirming(false)} disabled={sending}>Cancel</button>
+                  </div>
+                </div>
+              ) : (
+                <button type="button" className="m-btn m-btn-p" style={{ marginTop: 12 }} disabled={!b.canRequest} onClick={() => { setSendErr(null); setConfirming(true); }}>
+                  Request filing
+                </button>
+              )
+            ) : !isBizLocked && (
+              <div className="m-vat-sub" style={{ marginTop: 12 }}>
+                Review and file this return on the full site. <button type="button" className="m-link-btn" style={{ padding: 0, fontSize: 12 }} onClick={goToFullSite}>View full site</button>
+              </div>
+            )}
+            {sendErr && <div className="qi-err" style={{ margin: '10px 0 0' }}>{sendErr}</div>}
+          </>
+        )}
+      </div>
+    </>
+  );
+}
+
 // ─── Compliance tab ───────────────────────────────────────────────────────────
-function ComplianceTab({ company }) {
+function ComplianceTab({ company, isBusinessOwner }) {
   const [expanded, setExpanded] = useState(null);
   const deadlines = useApplicableDeadlines(company);
   const shown = (deadlines || []).filter(isCurrent).slice(0, 12);
@@ -1034,6 +1205,8 @@ function ComplianceTab({ company }) {
         <div className="m-company-name">Compliance</div>
         <div className="m-date-str">Tax · CRO · Revenue deadlines</div>
       </div>
+      <VatReturnCard company={company} isBusinessOwner={isBusinessOwner} />
+      <div className="m-sec-title">Deadlines</div>
       <div className="m-card">
         {deadlines === null
           ? <div className="m-empty">Loading…</div>
@@ -1642,7 +1815,7 @@ export default function Mobile() {
   const [tab, setTab] = useState('home');
   // One source of truth for company / role / access, shared with the full app — this is what
   // makes /mobile work for business owners (access via user_company_access, not ownership).
-  const { user, companies, company, setCompany, onboarding, companyLoading, zeroCompanyCheck } = useCompanyContext();
+  const { user, companies, company, setCompany, onboarding, companyLoading, zeroCompanyCheck, isBusinessOwner } = useCompanyContext();
   const companyId = company?.id ?? null;
   const [bankMsg, setBankMsg] = useState(null); // { ok, text } from the Yapily callback
 
@@ -1722,7 +1895,7 @@ export default function Mobile() {
         {tab === 'home'       && <HomeTab          key={companyId} companyId={companyId} company={company} setTab={setTab} />}
         {tab === 'approvals'  && <ApprovalsTab     key={companyId} companyId={companyId} user={user} />}
         {tab === 'cash'       && <CashTab          key={companyId} companyId={companyId} company={company} />}
-        {tab === 'compliance' && <ComplianceTab    key={companyId} company={company} />}
+        {tab === 'compliance' && <ComplianceTab    key={companyId} company={company} isBusinessOwner={isBusinessOwner} />}
         {tab === 'invoice'    && <InvoicesTab      key={companyId} companyId={companyId} company={company} />}
       </div>
       <BottomNav tab={tab} setTab={setTab} />

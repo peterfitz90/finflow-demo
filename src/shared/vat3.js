@@ -284,3 +284,10 @@ export function buildFilingFigures({ t1, t2, t3, t4, pa1, paVat, adjT1Num, adjT2
   };
   return figures;
 }
+
+// Is this VAT period filed? `lockedPeriods` are get_locked_periods rows ({ period_start,
+// period_end }) — the RPC a business_owner must use, since vat_returns SELECT is
+// accountant-only. Same test as desktop VATReturns' isDateLocked(vatPeriod.start, …).
+export function isPeriodLocked(vatPeriod, lockedPeriods) {
+  return !!vatPeriod && (lockedPeriods || []).some(p => vatPeriod.start >= p.period_start && vatPeriod.start <= p.period_end);
+}
