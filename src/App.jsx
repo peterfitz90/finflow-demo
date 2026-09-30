@@ -27,6 +27,7 @@ import { GL_ACCOUNTS, COA_SEED_SOLE_TRADER, COA_STATIC_FALLBACK, useChartOfAccou
 import { useTransactionRules, preCleanDesc, applyRules } from './shared/txRules.js';
 import { suggestExpenseAccount } from './shared/expenseSuggest.js';
 import { CURRENCY_SYMBOLS, fmtCurrencyFull } from './shared/currency.js';
+import { burnWindow, netBurn, runwayState } from './shared/cashBurn.js';
 import { orgRoleFor } from './shared/orgRole.js';
 import { CHAT_SUGGESTIONS, buildChatContext, buildChatSystemPrompt, chatGreeting, sendChatMessage } from './shared/chatContext.js';
 import { fetchInstitutions, filterInstitutions, startBankConnect, prepareReconnect, connectionState as connectionStateOf } from './shared/bankConnect.js';
@@ -5954,7 +5955,8 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
   const [overdueAR, setOverdueAR]           = useState([]);
   const [pendingExpenses, setPendingExpenses] = useState(0);
   const [checklistData, setChecklistData]   = useState({ total: 0, done: 0 });
-  const [monthlyBurn, setMonthlyBurn]       = useState(null);
+  const [monthlyBurn, setMonthlyBurn]       = useState(null); // selected month's gross expenses — payroll-share insight only
+  const [burn, setBurn]                     = useState(null); // 3-month net burn (src/shared/cashBurn.js)
   const [hasJournalData, setHasJournalData] = useState(false);
   const [uncategorised, setUncategorised]   = useState(0);
   const [payrollPct, setPayrollPct]         = useState(0);
@@ -6090,6 +6092,19 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
       ]);
 
       setCurrentBalance(periodEndBal);
+
+      // Net burn over the last 3 complete months — every page of journals (no 1,000-row cap).
+      {
+        const win = burnWindow(selPeriod);
+        const [{ data: winJ }, { data: firstJ }] = await Promise.all([
+          fetchAllRows(() => supabase.from('journals')
+            .select('debit_account, credit_account, amount, date')
+            .eq('company_id', companyId).gte('date', win.start).lte('date', win.end)
+            .order('date').order('id')),
+          supabase.from('journals').select('date').eq('company_id', companyId).order('date').limit(1),
+        ]);
+        setBurn(winJ ? { ...netBurn(winJ, win.months, { firstJournalDate: firstJ?.[0]?.date ?? null }), window: win } : null);
+      }
 
       if (btRecent.data && btRecent.data.length > 0) {
         // Running balance, oldest → newest: opening anchor + each transaction's amount.
@@ -6257,6 +6272,10 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
       });
   }, [user?.id]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  // Runway from the 3-month net burn (src/shared/cashBurn.js): no figure when a month in the
+  // window has no journals, "Cash-generative" when income covers costs — never a false alarm.
+  const runway = useMemo(() => runwayState(currentBalance, burn), [currentBalance, burn]);
+
   // Fix 4: rule-based insights using specific signals
   useEffect(() => {
     if (loading) return;
@@ -6267,11 +6286,11 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
       const tot = overdueAR.reduce((s, r) => s + Number(r.amount), 0);
       ins.push(`${overdueAR.length} invoice${overdueAR.length > 1 ? 's' : ''} overdue totalling ${fmtEUR(tot)}`);
     }
-    if (currentBalance !== null && monthlyBurn > 0 && (currentBalance / monthlyBurn) < 3)
-      ins.push("Cash runway is under 3 months — review expenses");
+    if (runway.warn)
+      ins.push(`Cash runway is under 3 months (${runway.months.toFixed(1)} at the 3-month average net burn) — review expenses`);
     if (ins.length === 0) ins.push("No unusual activity detected this period");
     setAiInsights(ins.slice(0, 3));
-  }, [loading, payrollPct, overdueAR, currentBalance, monthlyBurn]);
+  }, [loading, payrollPct, overdueAR, runway.warn, runway.months]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Compliance deadlines (same logic as Compliance component)
   const today = new Date(); today.setHours(0, 0, 0, 0);
@@ -6344,11 +6363,6 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
   const overdueDeadlines = deadlines.filter(d => daysDiff(d.due) < 0).length;
   const soonestDays      = isHistorical ? null : (next3[0] ? Math.max(0, daysDiff(next3[0].due)) : null);
 
-  // Fix 3: show runway only when we have journal-derived burn; null = no journal data
-  const cashRunway = currentBalance !== null && hasJournalData && monthlyBurn > 0
-    ? (currentBalance / monthlyBurn).toFixed(1) : null;
-  const runwayLabel = !hasJournalData ? 'Import data to calculate'
-    : cashRunway ? `${cashRunway}mo runway` : 'Runway: —';
 
   // VAT deadline insight — computed here so we can use next3/daysDiff above
   useEffect(() => {
@@ -6835,7 +6849,7 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
           <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
             {[
               { text: `${btSparkline.length} transactions`, ok: true },
-              { text: runwayLabel, ok: cashRunway ? Number(cashRunway) >= 3 : null },
+              { text: runway.label, ok: runway.ok },
               { text: soonestDays !== null ? `Deadline in ${soonestDays}d` : "No deadlines", ok: soonestDays === null || soonestDays > 14 },
               { text: overdueDeadlines > 0 ? `${overdueDeadlines} overdue` : "On track", ok: overdueDeadlines === 0 },
               ...(reconcStats.autoCount > 0 ? [{ text: `${reconcStats.autoCount} reconciled`, ok: true }] : []),
@@ -6969,11 +6983,13 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
                     )}
                     <div style={{ marginTop: 12, paddingTop: 12, borderTop: "1px solid var(--border)" }}>
                       <div style={{ fontSize: 12, color: "var(--text)", fontWeight: 500 }}>
-                        {!hasJournalData ? "Import journal data to calculate runway" : monthlyBurn > 0 ? `${cashRunway}mo runway` : "No expense journals in last 30 days"}
+                        {runway.kind === 'burning' ? runway.label
+                          : runway.kind === 'generative' ? 'Cash-generative — no burn'
+                          : 'Runway: not enough history (needs 3 complete months of journals)'}
                       </div>
-                      {hasJournalData && monthlyBurn > 0 && (
+                      {runway.kind !== 'insufficient' && (
                         <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
-                          Burn rate · {fmt(monthlyBurn)}/mo
+                          {runway.kind === 'burning' ? `Net burn · ${fmt(burn.avgNetBurn)}/mo` : `Net inflow · ${fmt(-burn.avgNetBurn)}/mo`} (3-month average)
                         </div>
                       )}
                     </div>
