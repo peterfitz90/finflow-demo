@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback } from 'react';
+import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import { useUser, useAuth, useClerk } from '@clerk/clerk-react';
 import { useCompanyContext } from './shared/useCompanyContext.js';
 import { goToFullSite } from './shared/viewMode.js';
@@ -10,8 +10,10 @@ import { InboxZeroCelebration } from './shared/InboxZeroCelebration.jsx';
 import { recScoreCandidate } from './shared/recScore.js';
 import { computeDeadlines } from './shared/computeDeadlines.js';
 import { fetchAllRows } from './shared/fetchAllRows.js';
-import { monthEnd, monthStart, todayStr as localToday } from './shared/dates.js';
+import { monthEnd, todayStr as localToday } from './shared/dates.js';
 import { useHealthy } from './shared/useHealthy.js';
+import { fetchCashBalance } from './shared/bankBalance.js';
+import { deadlineApplies } from './shared/practicePortfolio.js';
 import { AutomationHero, HealthPulseDot } from './shared/AutomationHero.jsx';
 import {
   INV_VAT_LABELS, calcLineAmounts, calcInvTotals, vatCodeForRate,
@@ -29,9 +31,9 @@ const M_CSS = `
   @import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@400;500;600;700&family=Inter:wght@300;400;500;600&family=Source+Code+Pro:wght@400;500&display=swap');
   *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
   :root {
-    --mb: #070d1a; --ms: #0d1526; --mc: #111d30; --mbd: #192338;
-    --mt: var(--mb); --mtx: #e4eaf4; --mm: #6d7f9c; --md: #3d506a;
-    --teal: #10b981; --teal2: #34d399; --gold: #d4a017; --red: #e05555;
+    --mb: #0c1210; --ms: #141b18; --mc: #1a2320; --mbd: rgba(255,255,255,0.08);
+    --mt: var(--mb); --mtx: #e8edeb; --mm: #8b9591; --md: #5c6662;
+    --teal: #10b981; --teal2: #34d399; --gold: #fbbf24; --red: #f87171;
     --green: #10b981; --r: 14px; --rsm: 10px;
   }
   html, body { background: var(--mb); min-height: 100%; -webkit-font-smoothing: antialiased; }
@@ -72,7 +74,7 @@ const M_CSS = `
   .m-sheet-item:active { background: var(--mc); }
   .m-banner { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin: 10px 12px 0; padding: 10px 12px; border-radius: 10px; font-size: 13px; }
   .m-banner.ok { background: rgba(16,185,129,0.12); color: var(--teal2); border: 1px solid rgba(16,185,129,0.3); }
-  .m-banner.err { background: rgba(224,85,85,0.12); color: var(--red); border: 1px solid rgba(224,85,85,0.3); }
+  .m-banner.err { background: rgba(248,113,113,0.12); color: var(--red); border: 1px solid rgba(248,113,113,0.3); }
   .m-banner button { background: none; border: none; color: inherit; font-size: 14px; cursor: pointer; }
   .m-notice { flex: 1; display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px; text-align: center; padding: 40px 28px; }
   .m-notice-title { font-size: 17px; font-weight: 600; color: var(--mtx); }
@@ -84,6 +86,8 @@ const M_CSS = `
   /* Cards */
   .m-card { background: var(--mc); border: 1px solid var(--mbd); border-radius: var(--r); padding: 18px; margin: 0 16px 12px; }
   .m-card-hdr { display: flex; align-items: center; justify-content: space-between; margin-bottom: 12px; }
+  .m-card-btn { font: inherit; color: inherit; text-align: left; cursor: pointer; }
+  button.m-card { display: block; width: calc(100% - 32px); }
   .m-card-title { font-size: 11px; font-family: 'Source Code Pro', monospace; text-transform: uppercase; letter-spacing: 0.1em; color: var(--mm); }
 
   /* Cash card */
@@ -100,7 +104,7 @@ const M_CSS = `
   /* Quick action row */
   .m-quick-row { display: flex; gap: 10px; padding: 0 16px 12px; }
   .m-quick-btn { flex: 1; background: var(--mc); border: 1px solid var(--mbd); border-radius: var(--r); padding: 14px 8px 12px; display: flex; flex-direction: column; align-items: center; gap: 6px; cursor: pointer; min-height: 76px; transition: background 0.14s; }
-  .m-quick-btn:active { background: rgba(29,138,147,0.12); border-color: var(--teal); }
+  .m-quick-btn:active { background: rgba(16,185,129,0.12); border-color: var(--teal); }
   .m-quick-btn-icon { font-size: 22px; line-height: 1; }
   .m-quick-btn-lbl { font-size: 11px; font-weight: 600; text-align: center; color: var(--mtx); font-family: 'Source Code Pro', monospace; letter-spacing: 0.03em; }
 
@@ -131,8 +135,8 @@ const M_CSS = `
   .m-dl-days { font-family: 'Playfair Display', serif; font-size: 20px; font-weight: 700; flex-shrink: 0; }
 
   /* Receipt upload */
-  .m-upload-zone { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; margin: 0 16px 14px; height: 150px; border: 2px dashed var(--teal); border-radius: var(--r); background: rgba(29,138,147,0.05); cursor: pointer; transition: background 0.15s; }
-  .m-upload-zone:active { background: rgba(29,138,147,0.12); }
+  .m-upload-zone { display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 10px; margin: 0 16px 14px; height: 150px; border: 2px dashed var(--teal); border-radius: var(--r); background: rgba(16,185,129,0.05); cursor: pointer; transition: background 0.15s; }
+  .m-upload-zone:active { background: rgba(16,185,129,0.12); }
   .m-upload-icon { font-size: 40px; line-height: 1; }
   .m-upload-label { font-size: 15px; font-weight: 600; color: var(--teal2); }
   .m-upload-sub { font-size: 11px; color: var(--mm); }
@@ -196,8 +200,8 @@ const M_CSS = `
   .qi-line-del:active { color: var(--red); }
   .qi-line-gross { font-family: 'Source Code Pro', monospace; font-size: 13px; font-weight: 600; color: var(--teal2); white-space: nowrap; padding-left: 8px; flex-shrink: 0; }
   .qi-add-line { display: block; width: calc(100% - 32px); margin: 0 16px 10px; background: none; border: 1px dashed var(--mbd); border-radius: var(--r); padding: 12px; font-size: 13px; font-weight: 600; color: var(--mm); font-family: 'Inter', system-ui, sans-serif; cursor: pointer; text-align: center; }
-  .qi-add-line:active { background: rgba(29,138,147,0.06); border-color: var(--teal); color: var(--teal2); }
-  .qi-total-bar { margin: 0 16px 14px; padding: 14px 18px; background: rgba(29,138,147,0.07); border: 1px solid rgba(29,138,147,0.25); border-radius: var(--r); display: flex; justify-content: space-between; align-items: center; }
+  .qi-add-line:active { background: rgba(16,185,129,0.06); border-color: var(--teal); color: var(--teal2); }
+  .qi-total-bar { margin: 0 16px 14px; padding: 14px 18px; background: rgba(16,185,129,0.07); border: 1px solid rgba(16,185,129,0.25); border-radius: var(--r); display: flex; justify-content: space-between; align-items: center; }
   .qi-total-lbl { font-size: 11px; font-family: 'Source Code Pro', monospace; text-transform: uppercase; letter-spacing: 0.08em; color: var(--mm); }
   .qi-total-sub { font-size: 10px; color: var(--mm); font-family: 'Source Code Pro', monospace; margin-top: 3px; }
   .qi-total-val { font-family: 'Playfair Display', serif; font-size: 30px; font-weight: 700; color: var(--teal2); letter-spacing: -0.01em; }
@@ -209,7 +213,7 @@ const M_CSS = `
   .qi-cust-sel { flex: 1; background: var(--ms); border: 1px solid var(--mbd); border-radius: var(--rsm); padding: 11px 13px; font-size: 14px; color: var(--mtx); outline: none; -webkit-appearance: none; min-height: 46px; }
   .qi-cust-sel:focus { border-color: var(--teal); }
   .qi-new-btn { background: var(--mc); border: 1px solid var(--teal); border-radius: var(--rsm); padding: 11px 14px; font-size: 12px; font-weight: 700; color: var(--teal2); cursor: pointer; font-family: 'Inter', system-ui, sans-serif; white-space: nowrap; flex-shrink: 0; min-height: 46px; }
-  .qi-err { margin: 0 16px 12px; padding: 12px 14px; background: rgba(224,85,85,0.08); border: 1px solid rgba(224,85,85,0.2); border-radius: 10px; font-size: 12px; color: var(--red); line-height: 1.5; }
+  .qi-err { margin: 0 16px 12px; padding: 12px 14px; background: rgba(248,113,113,0.08); border: 1px solid rgba(248,113,113,0.2); border-radius: 10px; font-size: 12px; color: var(--red); line-height: 1.5; }
   .qi-ok  { margin: 0 16px 10px; padding: 10px 14px; background: rgba(52,211,153,0.08); border: 1px solid rgba(52,211,153,0.2); border-radius: 10px; font-size: 12px; color: var(--green); }
 `;
 
@@ -228,7 +232,7 @@ function MobileAuth() {
       </div>
       <div className="m-auth-sub">Mobile · Finance OS</div>
       <p className="m-auth-hint">Sign in to access your dashboard, deadlines, and expense capture on the go.</p>
-      <SignIn routing="hash" afterSignInUrl="/mobile" afterSignUpUrl="/mobile" appearance={{ variables: { colorBackground: '#0d1526', colorText: '#e4eaf4', colorInputBackground: '#111d30', colorInputText: '#e4eaf4' } }} />
+      <SignIn routing="hash" afterSignInUrl="/mobile" afterSignUpUrl="/mobile" appearance={{ variables: { colorBackground: '#141b18', colorText: '#e8edeb', colorInputBackground: '#1a2320', colorInputText: '#e8edeb', colorPrimary: '#10b981' } }} />
       <button type="button" className="m-auth-link m-link-btn" onClick={goToFullSite}>← View full site</button>
     </div>
   );
@@ -255,27 +259,86 @@ function BottomNav({ tab, setTab }) {
   );
 }
 
+// ─── Shared figures (UX-03 Stage 1) ───────────────────────────────────────────
+// Same sources and rules as the full app, so a number on the phone matches the one on the
+// desktop: cash = ledger balance of the active bank accounts (Overview / Practice Dashboard),
+// overdue = the Invoices page's rule, deadlines = the Practice Dashboard's applicability rule.
+
+// Whole days from local midnight today to `d` (a local-midnight Date, as computeDeadlines
+// builds them). Rounded, not floored: across a clock change a day is 23 or 25 hours.
+const daysFromToday = d => { const t = new Date(); t.setHours(0, 0, 0, 0); return Math.round((d - t) / 86400000); };
+
+// Overdue invoices, same rule as the Invoices page (statusOf/outstanding): drafts, voids,
+// credited invoices and credit notes aside, still owed after payments and credit notes, and
+// past the calculated due date (due_date_calc) where there is one. Oldest first.
+async function fetchOverdueInvoices(companyId, today) {
+  const { data, error } = await fetchAllRows(() => supabase.from('invoices')
+    .select('id,client,invoice_ref,status,total,amount_paid,due_date,due_date_calc,credit_note_for')
+    .eq('company_id', companyId).not('status', 'in', '(draft,void)').order('id'));
+  if (error) throw new Error(error.message);
+  const credited = {};
+  for (const r of data) if (r.credit_note_for) credited[r.credit_note_for] = (credited[r.credit_note_for] || 0) + Number(r.total || 0);
+  return data
+    .filter(r => !r.credit_note_for && r.status !== 'credited' && r.status !== 'paid')
+    .map(r => ({ ...r, owed: Math.max(0, Number(r.total || 0) - Number(r.amount_paid || 0) - (credited[r.id] || 0)), due: r.due_date_calc || r.due_date }))
+    .filter(r => r.owed > 0.005 && r.due && r.due < today)
+    .sort((a, b) => (a.due < b.due ? -1 : a.due > b.due ? 1 : 0));
+}
+
+// The company's deadlines that actually apply — VAT3 only if VAT-registered and that period
+// isn't filed, P30/P35 only if PAYE-registered, no CT1 for a sole trader (deadlineApplies).
+// null while the filed VAT periods load.
+function useApplicableDeadlines(company) {
+  const companyId = company?.id;
+  const [vatFiled, setVatFiled] = useState(null);
+  useEffect(() => {
+    if (!companyId) return;
+    let cancelled = false;
+    supabase.from('vat_returns').select('period_val').eq('company_id', companyId).eq('status', 'filed')
+      .then(({ data }) => { if (!cancelled) setVatFiled(new Set((data || []).map(r => r.period_val))); });
+    return () => { cancelled = true; };
+  }, [companyId]);
+  return useMemo(() => (company && vatFiled
+    ? computeDeadlines(company).filter(dl => deadlineApplies(company, dl, vatFiled))
+    : null), [company, vatFiled]);
+}
+
+// Only an unfiled VAT3 is known to be late. Filing isn't tracked for P30 / P35 / CT1 / CRO, so a
+// passed date there may well have been filed — those drop off once due rather than show as late.
+const isLate = dl => dl.type === 'VAT3' && daysFromToday(dl.due) < 0;
+const isCurrent = dl => isLate(dl) || daysFromToday(dl.due) >= 0;
+
+// Most urgent: a late VAT3, else the next deadline ahead.
+const nextDeadline = deadlines => deadlines.find(isLate) || deadlines.find(dl => daysFromToday(dl.due) >= 0) || null;
+
+const dueLabel = dl => { const n = daysFromToday(dl.due); return n < 0 ? `${-n}d late` : n === 0 ? 'Today' : `${n}d`; };
+const dueColour = dl => { const n = daysFromToday(dl.due); return n <= 7 ? 'var(--red)' : n <= 14 ? 'var(--gold)' : 'var(--teal2)'; };
+
+// Cash to the cent, with its sign (fmt drops both).
+const fmtCash = n => `${Number(n) < 0 ? '−' : ''}€${Math.abs(Number(n) || 0).toLocaleString('en-IE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+
 // ─── Home tab ─────────────────────────────────────────────────────────────────
 function HomeTab({ companyId, company, setTab }) {
-  const [overdue, setOverdue]       = useState(0);
-  const [pending, setPending]       = useState(0);
-  const [txns, setTxns]             = useState([]);
+  const [cash, setCash]               = useState(null);   // number | null (unavailable)
   const [overdueInvs, setOverdueInvs] = useState([]);
-  const [loading, setLoading]       = useState(true);
+  const [pending, setPending]         = useState(0);
+  const [txns, setTxns]               = useState([]);
+  const [loading, setLoading]         = useState(true);
+  const deadlines = useApplicableDeadlines(company);
 
   const load = useCallback(async () => {
     if (!companyId) return;
     const today = localToday();
-    const [inv, exp, recent, overdueList] = await Promise.all([
-      supabase.from('invoices').select('id').eq('company_id', companyId).lt('due_date', today).neq('status','paid'),
+    const [bal, overdue, exp, recent] = await Promise.all([
+      fetchCashBalance(companyId, today).catch(() => null),
+      fetchOverdueInvoices(companyId, today).catch(() => []),
       supabase.from('expenses').select('id').eq('company_id', companyId).eq('status','submitted'),
       supabase.from('bank_transactions').select('date,description,amount').eq('company_id', companyId).order('date',{ascending:false}).limit(4),
-      supabase.from('invoices').select('id,client,amount,due_date,invoice_ref').eq('company_id', companyId).lt('due_date', today).neq('status','paid').order('due_date').limit(3),
     ]);
-    if (inv.data)         setOverdue(inv.data.length);
-    if (exp.data)         setPending(exp.data.length);
-    if (recent.data)      setTxns(recent.data);
-    if (overdueList.data) setOverdueInvs(overdueList.data);
+    setCash(bal);
+    setOverdueInvs(overdue);
+    if (exp.data)    setPending(exp.data.length);
+    if (recent.data) setTxns(recent.data);
     setLoading(false);
   }, [companyId]);
 
@@ -283,11 +346,9 @@ function HomeTab({ companyId, company, setTab }) {
 
   const { healthy, loading: healthLoading } = useHealthy(companyId);
 
-  const today = new Date();
-  const dateStr = today.toLocaleDateString('en-IE', { weekday:'long', day:'numeric', month:'long' });
-  const deadlines = computeDeadlines(company);
-  const nextDl = deadlines.find(d => Math.floor((d.due - today) / 86400000) >= 0);
-  const nextDlDays = nextDl ? Math.floor((nextDl.due - today) / 86400000) : null;
+  const dateStr = new Date().toLocaleDateString('en-IE', { weekday:'long', day:'numeric', month:'long' });
+  const nextDl = deadlines && nextDeadline(deadlines);
+  const overdueTotal = overdueInvs.reduce((s, r) => s + r.owed, 0);
 
   return (
     <div>
@@ -296,18 +357,28 @@ function HomeTab({ companyId, company, setTab }) {
         <div className="m-date-str">{dateStr}</div>
       </div>
 
+      {/* Cash — the ledger balance Overview shows */}
+      <button type="button" className="m-card m-card-btn" onClick={() => setTab('cash')}>
+        <div className="m-cash-label">Cash in bank</div>
+        {loading ? <div style={{ height:40, background:'var(--ms)', borderRadius:8, opacity:0.4 }} /> : (
+          <div className="m-cash-val" style={{ color: cash === null ? 'var(--mm)' : cash >= 0 ? 'var(--mtx)' : 'var(--red)' }}>
+            {cash === null ? '—' : fmtCash(cash)}
+          </div>
+        )}
+      </button>
+
       {/* Stat pills */}
       <div className="m-pills">
         <div className="m-pill">
-          <div className={`m-pill-val ${overdue > 0 ? 'c-red' : 'c-green'}`}>{loading ? '…' : overdue}</div>
-          <div className="m-pill-lbl">Overdue invoices</div>
+          <div className={`m-pill-val ${overdueInvs.length > 0 ? 'c-red' : 'c-green'}`}>{loading ? '…' : overdueInvs.length}</div>
+          <div className="m-pill-lbl">{!loading && overdueInvs.length > 0 ? `Overdue · ${fmt(overdueTotal)}` : 'Overdue invoices'}</div>
         </div>
-        <div className="m-pill">
-          <div className={`m-pill-val ${nextDlDays !== null && nextDlDays <= 7 ? 'c-red' : nextDlDays !== null && nextDlDays <= 14 ? 'c-gold' : 'c-teal'}`}>
-            {nextDlDays !== null ? `${nextDlDays}d` : '—'}
+        <button type="button" className="m-pill m-card-btn" onClick={() => setTab('compliance')}>
+          <div className="m-pill-val" style={{ color: nextDl ? dueColour(nextDl) : 'var(--mm)' }}>
+            {deadlines === null ? '…' : nextDl ? dueLabel(nextDl) : '—'}
           </div>
-          <div className="m-pill-lbl">Next deadline</div>
-        </div>
+          <div className="m-pill-lbl">{nextDl ? `Next · ${nextDl.type}` : 'Next deadline'}</div>
+        </button>
         <div className="m-pill">
           <div className={`m-pill-val ${pending > 0 ? 'c-gold' : 'c-dim'}`}>{loading ? '…' : pending}</div>
           <div className="m-pill-lbl">Expenses pending</div>
@@ -316,7 +387,7 @@ function HomeTab({ companyId, company, setTab }) {
 
       {/* Health indicator */}
       {!healthLoading && healthy !== null && (
-        <div style={{ display:'flex', alignItems:'center', gap:6, padding:'6px 0 4px', fontSize:11, fontFamily:'Source Code Pro,monospace', color:'var(--mm)', letterSpacing:'0.04em' }}>
+        <div style={{ display:'flex', alignItems:'center', gap:6, padding:'2px 18px 10px', fontSize:11, fontFamily:'Source Code Pro,monospace', color:'var(--mm)', letterSpacing:'0.04em' }}>
           <HealthPulseDot healthy={healthy} size={8} />
           <span>{healthy ? 'Books healthy' : 'Needs attention'}</span>
         </div>
@@ -347,15 +418,16 @@ function HomeTab({ companyId, company, setTab }) {
         <>
           <div className="m-sec-title">Overdue Invoices</div>
           <div className="m-card">
-            {overdueInvs.map((inv, i) => (
-              <div key={i} className="m-inv">
+            {overdueInvs.slice(0, 3).map(inv => (
+              <div key={inv.id} className="m-inv">
                 <div className="m-inv-info">
                   <div className="m-inv-client">{inv.client}</div>
-                  <div className="m-inv-meta">{inv.invoice_ref} · Due {fmtD(inv.due_date)}</div>
+                  <div className="m-inv-meta">{inv.invoice_ref} · Due {fmtD(inv.due)}</div>
                 </div>
-                <span style={{ fontFamily:'Source Code Pro,monospace', fontSize:13, fontWeight:600, color:'var(--red)' }}>{fmt(inv.amount)}</span>
+                <span style={{ fontFamily:'Source Code Pro,monospace', fontSize:13, fontWeight:600, color:'var(--red)' }}>{fmt(inv.owed)}</span>
               </div>
             ))}
+            {overdueInvs.length > 3 && <div className="m-inv-meta" style={{ paddingTop: 10 }}>+ {overdueInvs.length - 3} more</div>}
           </div>
         </>
       )}
@@ -388,7 +460,7 @@ function HomeTab({ companyId, company, setTab }) {
 // ─── Cash tab ─────────────────────────────────────────────────────────────────
 function CashTab({ companyId }) {
   const [cash, setCash]         = useState(null);
-  const [cashLm, setCashLm]     = useState(null);
+  const [cashLm, setCashLm]     = useState(null);   // balance at the end of last month
   const [txns, setTxns]         = useState([]);
   const [loading, setLoading]   = useState(true);
   const [refreshing, setRefreshing] = useState(false);
@@ -397,17 +469,17 @@ function CashTab({ companyId }) {
 
   const load = useCallback(async () => {
     if (!companyId) return;
-    const now    = new Date();
-    const lmStart = monthStart(now.getFullYear(), now.getMonth()); // previous month (1-based m = getMonth())
-    const lmEnd   = monthEnd(now.getFullYear(), now.getMonth());
-    const [btAll, btLm, recent] = await Promise.all([
-      // All-time sum → cash figure; paged past the 1,000-row response cap (id-ordered).
-      fetchAllRows(() => supabase.from('bank_transactions').select('amount').eq('company_id', companyId).order('id')),
-      supabase.from('bank_transactions').select('amount').eq('company_id', companyId).gte('date', lmStart).lte('date', lmEnd),
+    const now   = new Date();
+    const lmEnd = monthEnd(now.getFullYear(), now.getMonth()); // last day of the previous month (1-based m = getMonth())
+    // Ledger balances (the Overview figure), not a sum of raw bank-feed rows — the feed misses
+    // opening balances, manual journals and anything posted outside the feed.
+    const [bal, balLm, recent] = await Promise.all([
+      fetchCashBalance(companyId, localToday()).catch(() => null),
+      fetchCashBalance(companyId, lmEnd).catch(() => null),
       supabase.from('bank_transactions').select('date,description,amount').eq('company_id', companyId).order('date',{ascending:false}).limit(20),
     ]);
-    if (btAll.data)  setCash(btAll.data.reduce((s,r) => s + Number(r.amount), 0));
-    if (btLm.data)   setCashLm(btLm.data.reduce((s,r) => s + Number(r.amount), 0));
+    setCash(bal);
+    setCashLm(balLm);
     if (recent.data) setTxns(recent.data);
     setLoading(false);
   }, [companyId]);
@@ -423,7 +495,8 @@ function CashTab({ companyId }) {
   };
 
   const cashColour = cash === null ? 'var(--mtx)' : cash >= 0 ? 'var(--green)' : 'var(--red)';
-  const trendPct   = cashLm && cash !== null ? ((cash - cashLm) / Math.abs(cashLm) * 100).toFixed(0) : null;
+  const change = cash !== null && cashLm !== null ? Math.round((cash - cashLm) * 100) / 100 : null;
+  const lmLabel = new Date(new Date().getFullYear(), new Date().getMonth(), 0).toLocaleDateString('en-IE', { day:'numeric', month:'short' });
 
   return (
     <div ref={scrollRef} onTouchStart={handleTouchStart} onTouchEnd={handleTouchEnd}>
@@ -439,11 +512,11 @@ function CashTab({ companyId }) {
         {loading ? <div style={{ height:48, background:'var(--ms)', borderRadius:8, opacity:0.4 }} /> : (
           <>
             <div className="m-cash-val" style={{ color: cashColour }}>
-              {cash === null ? '—' : fmt(Math.abs(cash))}
+              {cash === null ? '—' : fmtCash(cash)}
             </div>
-            {trendPct !== null && (
-              <div className={`m-cash-trend ${Number(trendPct) >= 0 ? 'c-green' : 'c-red'}`}>
-                {Number(trendPct) >= 0 ? '▲' : '▼'} {Math.abs(trendPct)}% vs last month
+            {change !== null && (
+              <div className={`m-cash-trend ${change >= 0 ? 'c-green' : 'c-red'}`}>
+                {change >= 0 ? '▲' : '▼'} {fmtCash(Math.abs(change))} since {lmLabel}
               </div>
             )}
           </>
@@ -614,7 +687,7 @@ function ApprovalCard({ item, approving, onApprove, onReview }) {
     <div style={{ margin:'0 16px 10px', background:'var(--mc)', border:'1px solid var(--mbd)', borderRadius:'var(--r)', padding:'14px 16px' }}>
       {/* Header row */}
       <div style={{ display:'flex', alignItems:'flex-start', gap:10, marginBottom:10 }}>
-        <div style={{ width:34, height:34, borderRadius:8, background: isBill ? 'rgba(29,138,147,0.1)' : 'rgba(52,211,153,0.07)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:16, flexShrink:0 }}>
+        <div style={{ width:34, height:34, borderRadius:8, background: isBill ? 'rgba(16,185,129,0.1)' : 'rgba(52,211,153,0.07)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:16, flexShrink:0 }}>
           {isBill ? '🧾' : '🏦'}
         </div>
         <div style={{ flex:1, minWidth:0 }}>
@@ -652,7 +725,7 @@ function ApprovalCard({ item, approving, onApprove, onReview }) {
           Review on web
         </button>
         <button onClick={onApprove} disabled={!!approving}
-          style={{ flex:2, padding:'10px', background: busy ? 'rgba(29,138,147,0.5)' : 'var(--teal)', border:'none', borderRadius:'var(--rsm)', fontSize:13, fontWeight:600, color:'white', cursor: busy ? 'default' : 'pointer', fontFamily:'Inter,system-ui,sans-serif' }}>
+          style={{ flex:2, padding:'10px', background: busy ? 'rgba(16,185,129,0.5)' : 'var(--teal)', border:'none', borderRadius:'var(--rsm)', fontSize:13, fontWeight:600, color:'white', cursor: busy ? 'default' : 'pointer', fontFamily:'Inter,system-ui,sans-serif' }}>
           {busy ? '…' : '✓ Approve'}
         </button>
       </div>
@@ -842,7 +915,7 @@ function ApprovalsTab({ companyId, user }) {
       </div>
 
       {loadErr && (
-        <div style={{ margin:'0 16px 12px', padding:'12px', background:'rgba(224,85,85,0.08)', border:'1px solid rgba(224,85,85,0.2)', borderRadius:10, fontSize:12, color:'var(--red)' }}>
+        <div style={{ margin:'0 16px 12px', padding:'12px', background:'rgba(248,113,113,0.08)', border:'1px solid rgba(248,113,113,0.2)', borderRadius:10, fontSize:12, color:'var(--red)' }}>
           {loadErr}
         </div>
       )}
@@ -876,10 +949,8 @@ function ApprovalsTab({ companyId, user }) {
 // ─── Compliance tab ───────────────────────────────────────────────────────────
 function ComplianceTab({ company }) {
   const [expanded, setExpanded] = useState(null);
-  const today = new Date(); today.setHours(0,0,0,0);
-  const deadlines = computeDeadlines(company);
-  const diff   = d => Math.floor((d - today) / 86400000);
-  const colour = d => { const n = diff(d); return n < 0 ? 'var(--red)' : n <= 7 ? 'var(--red)' : n <= 14 ? 'var(--gold)' : 'var(--teal2)'; };
+  const deadlines = useApplicableDeadlines(company);
+  const shown = (deadlines || []).filter(isCurrent).slice(0, 12);
 
   return (
     <div>
@@ -888,14 +959,15 @@ function ComplianceTab({ company }) {
         <div className="m-date-str">Tax · CRO · Revenue deadlines</div>
       </div>
       <div className="m-card">
-        {deadlines.length === 0
+        {deadlines === null
+          ? <div className="m-empty">Loading…</div>
+          : shown.length === 0
           ? <div className="m-empty">No upcoming deadlines</div>
-          : deadlines.slice(0, 12).map((dl, i) => {
-            const d = diff(dl.due);
-            const c = colour(dl.due);
+          : shown.map((dl, i) => {
+            const c = dueColour(dl);
             const isExp = expanded === i;
             return (
-              <div key={i}>
+              <div key={`${dl.type}-${+dl.due}`}>
                 <div className="m-dl" style={{ cursor: 'pointer' }} onClick={() => setExpanded(isExp ? null : i)}>
                   <div className="m-dl-dot" style={{ background: c }} />
                   <div className="m-dl-type">{dl.type}</div>
@@ -903,9 +975,7 @@ function ComplianceTab({ company }) {
                     <div className="m-dl-desc">{dl.desc}</div>
                     {isExp && <div className="m-dl-date" style={{ marginTop: 4 }}>Due: {dl.due.toLocaleDateString('en-IE',{day:'numeric',month:'long',year:'numeric'})}</div>}
                   </div>
-                  <div className="m-dl-days" style={{ color: c }}>
-                    {d < 0 ? `${Math.abs(d)}d` : d === 0 ? 'Today' : `${d}d`}
-                  </div>
+                  <div className="m-dl-days" style={{ color: c }}>{dueLabel(dl)}</div>
                 </div>
               </div>
             );

@@ -49,8 +49,9 @@ export function portfolioTotals(companies, data, statusOf, deadlineRows = []) {
 }
 
 // Which computeDeadlines() entries actually apply to this company. computeDeadlines lists every
-// type for everyone; the dashboard already has the flags to tell.
-function applies(company, dl, vatFiled) {
+// type for everyone; the dashboard already has the flags to tell. Also used by /mobile's Home and
+// Compliance tabs. vatFiled = Set of filed vat_returns.period_val.
+export function deadlineApplies(company, dl, vatFiled) {
   switch (dl.type) {
     case 'VAT3': return !!company.vat_registered && !(dl.period_val && vatFiled?.has(dl.period_val));
     case 'P30':
@@ -70,7 +71,7 @@ export function crossClientDeadlines(companies, data, computeDeadlines, { today 
     for (const dl of computeDeadlines(c)) {
       const daysUntil = Math.floor((dl.due - t0) / 86400000);
       if (daysUntil < -pastDays || daysUntil > aheadDays) continue;
-      if (!applies(c, dl, vatFiled)) continue;
+      if (!deadlineApplies(c, dl, vatFiled)) continue;
       out.push({ companyId: c.id, companyName: c.name, type: dl.type, desc: dl.desc, due: dl.due, daysUntil });
     }
   }

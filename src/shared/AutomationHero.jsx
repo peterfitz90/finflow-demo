@@ -47,15 +47,15 @@ export function AutomationHero({ companyId, theme = 'dark' }) {
   const dark = theme !== 'light';
 
   const wrap = dark
-    ? { background: '#111d30', border: '1px solid #192338', borderRadius: 14, padding: '18px 20px', marginBottom: 12 }
+    ? { background: 'var(--mc)', border: '1px solid var(--mbd)', borderRadius: 14, padding: '18px 20px', margin: '0 16px 12px' }
     : { background: 'var(--surface)', border: '1px solid var(--border)', borderRadius: 'var(--radius-card)', padding: '14px 18px', marginBottom: 12 };
 
-  const heroColor   = dark ? '#26a9b3' : '#1d6b72';
-  const labelColor  = dark ? '#6d7f9c' : 'var(--text-muted)';
-  const tallyColor  = dark ? '#6d7f9c' : 'var(--text-muted)';
-  const streakBg    = dark ? 'rgba(29,138,147,0.12)' : 'rgba(29,107,114,0.07)';
-  const streakBdr   = dark ? 'rgba(38,169,179,0.28)' : 'rgba(29,107,114,0.22)';
-  const streakTxt   = dark ? '#26a9b3' : '#1d6b72';
+  const heroColor   = dark ? '#34d399' : '#1d6b72';
+  const labelColor  = dark ? 'var(--mm)' : 'var(--text-muted)';
+  const tallyColor  = dark ? 'var(--mm)' : 'var(--text-muted)';
+  const streakBg    = dark ? 'rgba(16,185,129,0.12)' : 'rgba(29,107,114,0.07)';
+  const streakBdr   = dark ? 'rgba(52,211,153,0.28)' : 'rgba(29,107,114,0.22)';
+  const streakTxt   = dark ? '#34d399' : '#1d6b72';
   const heroFont    = dark ? "'Playfair Display', serif" : "'Playfair Display', Georgia, serif";
   const monoFont    = dark ? "'Source Code Pro', monospace" : "'Source Code Pro', monospace";
 
