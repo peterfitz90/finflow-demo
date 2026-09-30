@@ -32,3 +32,18 @@ export const addDaysStr = (ymd, n) => {
   const [y, m, d] = String(ymd).slice(0, 10).split('-').map(Number);
   return utcStr(new Date(Date.UTC(y, m - 1, d + n)));
 };
+
+// Guard against YYYY-DD-MM dates that can appear when day and month were swapped during parsing.
+// If the month part (positions 5-6) is > 12, we know day/month are reversed and swap them back.
+export function sanitiseDate(date) {
+  const s = String(date || "").trim();
+  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
+  if (!m) return s;
+  const [, y, mo, d] = m;
+  if (parseInt(mo, 10) > 12 && parseInt(d, 10) <= 12) {
+    const fixed = `${y}-${d}-${mo}`;
+    console.warn(`[sanitiseDate] corrected swapped date ${s} → ${fixed}`);
+    return fixed;
+  }
+  return s;
+}

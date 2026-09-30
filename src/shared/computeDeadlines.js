@@ -1,4 +1,5 @@
 import { vatDueDay, p30DueDay } from './vat3.js';
+import { deadlineApplies } from './practicePortfolio.js';
 
 const MONTH_SHORT = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
@@ -83,4 +84,25 @@ export function filedVatPeriodVals(deadlines, lockedPeriods) {
     .filter(dl => dl.type === 'VAT3' && dl.period_val)
     .filter(dl => { const st = vatPeriodStartOf(dl.period_val); return (lockedPeriods || []).some(p => st >= p.period_start && st <= p.period_end); })
     .map(dl => dl.period_val));
+}
+
+// Whole days from local midnight today to `d` (a local-midnight Date, as computeDeadlines builds
+// them). Rounded, not floored: across a clock change a day is 23 or 25 hours.
+export const daysFromToday = d => { const t = new Date(); t.setHours(0, 0, 0, 0); return Math.round((d - t) / 86400000); };
+
+// Only an unfiled VAT3 is known to be late. Filing isn't tracked for P30 / P35 / CT1 / CRO, so a
+// passed date there may well have been filed — those drop off once due rather than show as late.
+export const isLateDeadline = dl => dl.type === 'VAT3' && daysFromToday(dl.due) < 0;
+export const isCurrentDeadline = dl => isLateDeadline(dl) || daysFromToday(dl.due) >= 0;
+
+// Most urgent: a late VAT3, else the next deadline ahead.
+export const nextDeadline = deadlines => deadlines.find(isLateDeadline) || deadlines.find(dl => daysFromToday(dl.due) >= 0) || null;
+
+// The company's deadlines that actually apply — VAT3 only if VAT-registered and that period isn't
+// filed, P30/P35 only if PAYE-registered, no CT1 for a sole trader (deadlineApplies).
+// lockedPeriods = get_locked_periods rows. Used by /mobile and the AI chat context.
+export function applicableDeadlines(company, lockedPeriods) {
+  const all = computeDeadlines(company);
+  const vatFiled = filedVatPeriodVals(all, lockedPeriods);
+  return all.filter(dl => deadlineApplies(company, dl, vatFiled));
 }

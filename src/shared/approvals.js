@@ -1,4 +1,5 @@
-import { todayStr } from './dates.js';
+import { todayStr, sanitiseDate } from './dates.js';
+import { captureError } from '../sentry.js';
 /**
  * Shared approval functions — used by both mobile and web.
  * Each function is a thin wrapper over a single Postgres RPC that executes
@@ -61,4 +62,60 @@ export async function markApBillPaid(companyId, billId, paidAmt, date, bankAccou
   });
   if (error) throw new Error(error.message);
   if (data?.error) throw new Error(data.error);
+}
+
+// ── Expenses — moved verbatim from the full app's Expenses page (approve / reject /
+// updateNominal) so /mobile's Approvals tab posts exactly the same journal. Each returns
+// { ok: true, … } or { ok: false, message } with the message the page shows.
+
+// Credit leg: the company's bank for a company card / bank transfer, else 2000 (owed to the
+// person who paid). Debit leg: the expense's nominal. No VAT code on the journal (unchanged).
+export const expenseCreditAccount = (exp, bankNominal) =>
+  ["company_card", "bank_transfer"].includes(exp.payment_method) ? bankNominal : "2000";
+
+export async function approveExpense(companyId, exp, bankNominal) {
+  const db = supabase;
+  const creditAcct = expenseCreditAccount(exp, bankNominal);
+  const ref = `EXP-${exp.id.slice(0, 6).toUpperCase()}`;
+  const { data: jnl, error: jErr } = await db.from("journals").insert({
+    company_id: companyId, date: sanitiseDate(exp.receipt_date),
+    description: `Expense: ${exp.supplier}${exp.description ? ` — ${exp.description}` : ""}`,
+    debit_account: exp.nominal_account, credit_account: creditAcct,
+    amount: exp.amount, reference: ref,
+  }).select("id").single();
+  if (jErr) {
+    // Do NOT mark the expense posted — a blocked insert must not look like a success.
+    captureError(jErr, { company_id: companyId, operation: 'expense-approve' });
+    return { ok: false, message: /period is locked/i.test(jErr.message)
+      ? "This expense's receipt date falls in a locked (filed) period — it can't be posted until the period is unlocked."
+      : `Approval failed: ${jErr.message}` };
+  }
+  const journalId = jnl?.id || null;
+  const { error: updErr } = await db.from("expenses").update({ status: "posted", journal_id: journalId }).eq("id", exp.id);
+  if (updErr) {
+    captureError(updErr, { company_id: companyId, operation: 'expense-approve-status' });
+    return { ok: false, message: `Journal posted (ref ${ref}) but marking the expense as posted failed: ${updErr.message} — please refresh and check before re-approving.` };
+  }
+  return { ok: true, journalId, ref };
+}
+
+export async function rejectExpense(exp) {
+  const { error } = await supabase.from("expenses").update({ status: "rejected" }).eq("id", exp.id);
+  return error ? { ok: false, message: `Couldn't reject: ${error.message}` } : { ok: true };
+}
+
+// Corrects an expense's nominal account while it's still status: 'submitted' — persists
+// immediately (no draft/save step), so by the time approveExpense reads exp.nominal_account it's
+// already right. `acct` = { code, name } from the company's chart.
+export async function updateExpenseNominal(exp, acct) {
+  const { error } = await supabase.from("expenses")
+    .update({ nominal_account: acct.code, nominal_name: acct.name }).eq("id", exp.id);
+  return error ? { ok: false, message: `Couldn't update nominal account: ${error.message}` } : { ok: true };
+}
+
+// The company's bank nominal for crediting expenses: its active bank account (every live company
+// has exactly one), else 1000 — the Expenses page's defaultBankNominal.
+export async function fetchExpenseBankNominal(companyId) {
+  const { data } = await supabase.from('bank_accounts').select('id, nominal_code').eq('company_id', companyId).eq('is_active', true);
+  return data?.[0]?.nominal_code || '1000';
 }

@@ -297,3 +297,9 @@ export function buildFilingFigures({ t1, t2, t3, t4, pa1, paVat, adjT1Num, adjT2
 export function isPeriodLocked(vatPeriod, lockedPeriods) {
   return !!vatPeriod && (lockedPeriods || []).some(p => vatPeriod.start >= p.period_start && vatPeriod.start <= p.period_end);
 }
+
+// The period a return is due for: the latest that has ended and isn't filed, else the current
+// one (the desktop screen's default). periods = getVATPeriods(…) (newest first), today = 'YYYY-MM-DD'.
+export function defaultVatPeriod(periods, lockedPeriods, today) {
+  return periods.find(p => p.end < today && !isPeriodLocked(p, lockedPeriods)) || periods[0] || null;
+}

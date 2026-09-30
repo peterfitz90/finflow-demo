@@ -1,4 +1,5 @@
 import { todayStr, addDaysStr } from './dates.js';
+import { fetchAllRows } from './fetchAllRows.js';
 // AR invoice engine — shared between web (InvoicesTab) and mobile.
 // Logic is verbatim from App.jsx; only the closure state (cid, customers) has been
 // converted to explicit parameters.
@@ -190,4 +191,34 @@ export function invoiceStatus(inv, credited, today = new Date()) {
   if (invoiceDaysDue(inv, today) > 0) return 'overdue';
   if (owed < Number(inv.total) - 0.005) return 'part_paid';
   return inv.status || 'sent';
+}
+
+// All invoices rows (invoices and credit notes) for a company, past the 1,000-row cap.
+export async function fetchInvoiceDocs(db, companyId) {
+  const { data, error } = await fetchAllRows(() => db.from('invoices')
+    .select('id,type,customer_id,client,invoice_number,invoice_ref,status,total,amount_paid,issue_date,invoice_date,due_date,due_date_calc,credit_note_for')
+    .eq('company_id', companyId).order('id'));
+  if (error) throw new Error(error.message);
+  return data;
+}
+
+// Overdue invoices — invoiceStatus 'overdue' (still owed after payments and issued credit notes,
+// past the calculated due date where there is one), with what's owed. Oldest first.
+export function overdueInvoices(docs, today = new Date()) {
+  const credited = creditedByInvoice(docs);
+  return docs
+    .filter(d => d.type === 'invoice' && invoiceStatus(d, credited, today) === 'overdue')
+    .map(d => ({ ...d, owed: invoiceOutstanding(d, credited), due: d.due_date_calc || d.due_date }))
+    .sort((a, b) => (a.due < b.due ? -1 : a.due > b.due ? 1 : 0));
+}
+
+// Open invoices falling due within `days` from today (today inclusive) — not yet overdue, still owed.
+export function dueSoonInvoices(docs, today = new Date(), days = 30) {
+  const credited = creditedByInvoice(docs);
+  const from = todayStr(), to = addDaysStr(from, days);
+  return docs
+    .filter(d => d.type === 'invoice' && !['draft', 'void', 'credited', 'paid', 'overdue'].includes(invoiceStatus(d, credited, today)))
+    .map(d => ({ ...d, owed: invoiceOutstanding(d, credited), due: d.due_date_calc || d.due_date }))
+    .filter(d => d.owed > 0.005 && d.due && d.due >= from && d.due <= to)
+    .sort((a, b) => (a.due < b.due ? -1 : a.due > b.due ? 1 : 0));
 }

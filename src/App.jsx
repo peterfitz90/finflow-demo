@@ -8,12 +8,12 @@ import { can, limit, isPending, planLabel, planFor, FEATURE_LABELS, FEATURE_VALU
 import { InboxZeroCelebration } from './shared/InboxZeroCelebration.jsx';
 import { useHealthy } from './shared/useHealthy.js';
 import { AutomationHero, HealthPulseDot } from './shared/AutomationHero.jsx';
-import { confirmBankTxn, approveApBill, markApBillPaid } from './shared/approvals.js';
+import { confirmBankTxn, approveApBill, markApBillPaid, approveExpense, rejectExpense, updateExpenseNominal } from './shared/approvals.js';
 import { computeDeadlines } from './shared/computeDeadlines.js';
 import { isAccountantFor, portfolioTotals, crossClientDeadlines } from './shared/practicePortfolio.js';
 import { fetchAllRows } from './shared/fetchAllRows.js';
 import { findContentDuplicates, postImportBatch } from './shared/importDedup.js';
-import { localDateStr, monthEnd, monthStart, todayStr as localToday, thisMonthStr, addDaysStr } from './shared/dates.js';
+import { localDateStr, monthEnd, monthStart, todayStr as localToday, thisMonthStr, addDaysStr, sanitiseDate } from './shared/dates.js';
 import { useSavedViews, ViewsMenu } from './shared/SavedViews.jsx';
 import { useCompanyContext, resolvePendingAccess } from './shared/useCompanyContext.js';
 import {
@@ -26,6 +26,9 @@ import { BANK_NOMINAL_CODE, fetchNominalBalanceAsOf, fetchActiveBankNominals } f
 import { GL_ACCOUNTS, COA_SEED_SOLE_TRADER, COA_STATIC_FALLBACK, useChartOfAccounts } from './shared/chartOfAccounts.js';
 import { useTransactionRules, preCleanDesc, applyRules } from './shared/txRules.js';
 import { suggestExpenseAccount } from './shared/expenseSuggest.js';
+import { CURRENCY_SYMBOLS, fmtCurrencyFull } from './shared/currency.js';
+import { orgRoleFor } from './shared/orgRole.js';
+import { CHAT_SUGGESTIONS, buildChatContext, buildChatSystemPrompt, chatGreeting, sendChatMessage } from './shared/chatContext.js';
 import { fetchInstitutions, filterInstitutions, startBankConnect, prepareReconnect, connectionState as connectionStateOf } from './shared/bankConnect.js';
 import {
   INV_VAT_RATES, INV_VAT_LABELS,
@@ -217,15 +220,9 @@ function requireCompanyId(id) {
 // ── Currency-aware formatters ─────────────────────────────────────────────────
 // Components that have access to company.base_currency shadow fmt/fmtK/fmtEUR
 // with these helpers. Everything else keeps the EUR-hardcoded module-level versions.
-const CURRENCY_SYMBOLS = { EUR: "€", GBP: "£", USD: "$" };
 function fmtCurrency(n, currency) {
   const sym = CURRENCY_SYMBOLS[currency] ?? (currency + " ");
   return `${sym}${Math.abs(Number(n) || 0).toLocaleString("en-IE")}`;
-}
-function fmtCurrencyFull(n, currency) {
-  const sym = CURRENCY_SYMBOLS[currency] ?? (currency + " ");
-  const v = Number(n) || 0;
-  return `${sym}${Math.abs(v).toLocaleString("en-IE", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}${v < 0 ? " CR" : ""}`;
 }
 function fmtCurrencyK(n, currency) {
   const abs = Math.abs(Number(n) || 0);
@@ -11029,20 +11026,6 @@ function parseRevolutCSV(text) {
   return rows;
 }
 
-// Guard against YYYY-DD-MM dates that can appear when day and month were swapped during parsing.
-// If the month part (positions 5-6) is > 12, we know day/month are reversed and swap them back.
-function sanitiseDate(date) {
-  const s = String(date || "").trim();
-  const m = s.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (!m) return s;
-  const [, y, mo, d] = m;
-  if (parseInt(mo, 10) > 12 && parseInt(d, 10) <= 12) {
-    const fixed = `${y}-${d}-${mo}`;
-    console.warn(`[sanitiseDate] corrected swapped date ${s} → ${fixed}`);
-    return fixed;
-  }
-  return s;
-}
 
 function detectCSVFormat(text) {
   const first = text.split("\n")[0].replace(/\r/g, "") || "";
@@ -13118,7 +13101,6 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
   );
 }, (prev, next) => prev.companyId === next.companyId && prev.isActive === next.isActive); // React.memo(BankImport)
 
-const SUGGS = ["Will I have enough cash for payroll?", "What journals should I post at month end?", "What's net profit vs budget?", "Which invoices are most at risk?"];
 
 function Chat({ page, companyName, period, selPeriod, companyId, company, onClose }) {
   const [ctxLoading, setCtxLoading] = useState(true);
@@ -13134,122 +13116,14 @@ function Chat({ page, companyName, period, selPeriod, companyId, company, onClos
   useEffect(() => {
     (async () => {
       setCtxLoading(true);
-      let ctx = "";
+      let ctx;
 
-      try {
-        if (companyId) {
-          const db = supabase;
-          const today  = localToday();
-          const in30   = addDaysStr(localToday(), 30);
+      ctx = await buildChatContext({ companyId, company, companyName, period, selPeriod }); // src/shared/chatContext.js
 
-          // Derive period bounds from YYYY-MM selPeriod
-          const sp = selPeriod || (() => { const n = new Date(); return `${n.getFullYear()}-${String(n.getMonth()+1).padStart(2,'0')}`; })();
-          const [pYear, pMonth] = sp.split('-').map(Number);
-          const periodStart = `${sp}-01`;
-          const periodEnd   = monthEnd(pYear, pMonth);
-
-          // Trailing 12 months range for monthly summary
-          const trail12Start = (() => {
-            const d = new Date(pYear, pMonth - 13, 1);
-            return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`;
-          })();
-
-          const [btLatest, overdueInvs, upcomingInvs, periodJournals, trail12Journals] = await Promise.all([
-            // Bank balance = ledger balance of the active bank nominals at period end (the same source
-            // as Overview / Practice Dashboard). Was bank_transactions.balance of the latest row, which
-            // the live feed never populates — so the AI was told €0.00.
-            fetchActiveBankNominals(companyId).then(codes => fetchNominalBalanceAsOf(companyId, codes.length ? codes : [BANK_NOMINAL_CODE], periodEnd)).catch(() => null),
-            db.from('invoices').select('amount,client,invoice_ref').eq('company_id', companyId).lt('due_date', today).neq('status', 'paid'),
-            db.from('invoices').select('amount,due_date,client').eq('company_id', companyId).gte('due_date', today).lte('due_date', in30).in('status', ['pending','chased']),
-            db.from('journals').select('debit_account,credit_account,amount,date,description,reference').eq('company_id', companyId).gte('date', periodStart).lte('date', periodEnd).order('date'),
-            fetchAllRows(() => db.from('journals').select('debit_account,credit_account,amount,date').eq('company_id', companyId).gte('date', trail12Start).lte('date', periodEnd).order('date').order('id')),
-          ]);
-
-          const currentBal = btLatest ?? null;
-          const overdueAmt = (overdueInvs.data || []).reduce((s, i) => s + Number(i.amount), 0);
-          const overdueN   = overdueInvs.data?.length || 0;
-          const upcomingAmt= (upcomingInvs.data || []).reduce((s, i) => s + Number(i.amount), 0);
-          const upcomingN  = upcomingInvs.data?.length || 0;
-          const yem        = company?.year_end_month ? MONTH_NAMES_LONG[company.year_end_month - 1] : "December";
-          const vatPeriod  = company?.vat_period === 'monthly' ? 'Monthly' : 'Bi-monthly';
-          // baseCurrency was never declared in Chat (lost in 61a88b8, 2026-06-27): every fmtE call threw,
-          // the catch below swallowed it, and the AI silently got "live account data could not be loaded"
-          // instead of the company figures on every chat since then.
-          const baseCurrency = company?.base_currency || company?.currency || "EUR";
-          const fmtE = n => fmtCurrencyFull(n, baseCurrency);
-
-          // Build trailing-12-month monthly summary from journals
-          const monthMap = {};
-          for (const j of (trail12Journals.data || [])) {
-            const mo = j.date.slice(0, 7); // YYYY-MM
-            if (!monthMap[mo]) monthMap[mo] = { income: 0, expenses: 0, byAcct: {} };
-            const amt = Math.abs(Number(j.amount));
-            if (j.credit_account >= '4000' && j.credit_account < '5000') monthMap[mo].income += amt;
-            if (j.debit_account  >= '5000' && j.debit_account  < '7000') {
-              monthMap[mo].expenses += amt;
-              monthMap[mo].byAcct[j.debit_account] = (monthMap[mo].byAcct[j.debit_account] || 0) + amt;
-            }
-          }
-          const months12 = Object.entries(monthMap).sort(([a], [b]) => a.localeCompare(b));
-          const chatAcctName = code => GL_ACCOUNTS.find(a => a.code === code)?.name || code;
-          const monthly12Table = months12.length > 0
-            ? months12.map(([mo, v]) => {
-                const top5 = Object.entries(v.byAcct).sort(([,x],[,y]) => y - x).slice(0, 5)
-                  .map(([acct, total]) => `    ${acct} ${chatAcctName(acct)}: ${fmtE(total)}`).join('\n');
-                return `  ${mo}: income ${fmtE(v.income)}, expenses ${fmtE(v.expenses)}, net ${fmtE(v.income - v.expenses)}${top5 ? '\n  top expense accounts:\n' + top5 : ''}`;
-              }).join('\n')
-            : "  No journal data in trailing 12 months";
-
-          // Period journal detail
-          const pJnls = periodJournals.data || [];
-          const pIncome   = pJnls.filter(j => j.credit_account >= '4000' && j.credit_account < '5000').reduce((s, j) => s + Math.abs(Number(j.amount)), 0);
-          const pExpenses = pJnls.filter(j => j.debit_account  >= '5000' && j.debit_account  < '7000').reduce((s, j) => s + Math.abs(Number(j.amount)), 0);
-          const pJnlDetail = pJnls.length > 0
-            ? pJnls.slice(0, 30).map(j => `  ${j.date} | DR:${j.debit_account} CR:${j.credit_account} | ${fmtE(j.amount)} | ${j.description || j.reference || ''}`).join('\n')
-            : "  No journals posted for this period";
-
-          ctx = `
-LIVE ACCOUNT DATA for ${companyName} (as of ${today}):
-
-SELECTED PERIOD: ${period} (${periodStart} → ${periodEnd})
-- Bank balance at period end: ${currentBal !== null ? fmtE(currentBal) : "No bank data imported yet"}
-- Period income (4xxx credit journals): ${fmtE(pIncome)}
-- Period expenses (5xxx-6xxx debit journals): ${fmtE(pExpenses)}
-- Period net: ${fmtE(pIncome - pExpenses)}
-- Overdue invoices (AR): ${overdueN} invoice${overdueN !== 1 ? 's' : ''} totalling ${fmtE(overdueAmt)}
-- Invoices due in next 30 days: ${upcomingN} invoice${upcomingN !== 1 ? 's' : ''} totalling ${fmtE(upcomingAmt)}
-- Company: ${companyName} | VAT period: ${vatPeriod} | Accounting year end: ${yem}
-
-TRAILING 12-MONTH SUMMARY (monthly):
-${monthly12Table}
-
-JOURNAL DETAIL FOR ${period} (up to 30 entries):
-${pJnlDetail}
-
-Use these figures when answering questions. For periods not shown, state that data is unavailable.`.trim();
-        } else {
-          ctx = "No company data available yet — the user has not imported any bank transactions.";
-        }
-      } catch (e) {
-        ctx = "Live account data could not be loaded. Help with general Irish accounting questions only.";
-      }
-
-      const prompt = `You are Ledgrly AI — a concise Irish SME finance assistant built into Ledgrly. You are helping the team at ${companyName}.
-
-${ctx}
-
-You can also help with:
-- Irish accounting questions (double-entry, nominal accounts, chart of accounts)
-- VAT — VAT3 returns, VAT rates, ROS filing, thresholds
-- Payroll compliance — P30, PAYE/PRSI/USC, Revenue Commissioners
-- CRO filings — annual returns, B1
-- Corporation Tax — CT1, preliminary tax, deadlines
-- Journal entries — accruals, prepayments, depreciation
-
-RULES: Max 2–3 sentences per reply unless the user asks for detail. Be direct and practical. Use Irish accounting terminology (ROS, CRO, CT1, P30, VAT3, Revenue). Current page: ${page}.`;
+      const prompt = buildChatSystemPrompt({ companyName, ctx, page });
 
       setSystemPrompt(prompt);
-      setMsgs([{ role: "assistant", text: `Good morning. I'm Ledgrly AI — your Irish finance assistant. I've loaded your account data for ${period}. What do you need?` }]);
+      setMsgs([{ role: "assistant", text: chatGreeting(period) }]);
       setCtxLoading(false);
     })();
   }, [companyId, selPeriod]); // eslint-disable-line
@@ -13258,18 +13132,8 @@ RULES: Max 2–3 sentences per reply unless the user asks for detail. Be direct 
     const msg = text || inp;
     if (!msg.trim() || ctxLoading) return;
     setInp(""); setMsgs(p => [...p, { role: "user", text: msg }]); setTyping(true);
-    try {
-      const res = await fetch("/api/chat", { method: "POST", headers: { "Content-Type": "application/json", 'Authorization': `Bearer ${await window.Clerk?.session?.getToken()}` },
-        body: JSON.stringify({ company_id: companyId, max_tokens: 1000, // model is fixed server-side
-          system: systemPrompt,
-          messages: [...msgs.map(m => ({ role: m.role, content: m.text })), { role: "user", content: msg }] }) });
-      const data = await res.json();
-      if (!res.ok) {
-        setMsgs(p => [...p, { role: "assistant", text: `Error: ${data.error || "Unable to reach AI. Please try again."}` }]);
-      } else {
-        setMsgs(p => [...p, { role: "assistant", text: data.content?.[0]?.text || "No response received." }]);
-      }
-    } catch (e) { setMsgs(p => [...p, { role: "assistant", text: `Connection error: ${e.message}` }]); }
+    const reply = await sendChatMessage({ companyId, systemPrompt, history: msgs, msg }); // src/shared/chatContext.js
+    setMsgs(p => [...p, { role: "assistant", text: reply }]);
     setTyping(false);
   };
 
@@ -13295,7 +13159,7 @@ RULES: Max 2–3 sentences per reply unless the user asks for detail. Be direct 
         <div ref={endRef} />
       </div>
       <div className="chat-sugg">
-        {!ctxLoading && SUGGS.map((s, i) => <button key={i} className="sugg" onClick={() => send(s)}>{s}</button>)}
+        {!ctxLoading && CHAT_SUGGESTIONS.map((s, i) => <button key={i} className="sugg" onClick={() => send(s)}>{s}</button>)}
       </div>
       <div className="chat-inp-area">
         <input className="chat-inp" value={inp} onChange={e => setInp(e.target.value)}
@@ -16293,55 +16157,31 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
     setNominalTouched(false); setSuggestedLabel(null);
   };
 
+  // Approve / reject / re-code — src/shared/approvals.js (shared with /mobile's Approvals tab).
   const approve = async exp => {
     if (!companyId) return;
     setApprovingId(exp.id);
     setSaveError(null);
-    const db = supabase;
-    const creditAcct = ["company_card","bank_transfer"].includes(exp.payment_method) ? defaultBankNominal : "2000";
-    const ref = `EXP-${exp.id.slice(0, 6).toUpperCase()}`;
-    const { data: jnl, error: jErr } = await db.from("journals").insert({
-      company_id: companyId, date: sanitiseDate(exp.receipt_date),
-      description: `Expense: ${exp.supplier}${exp.description ? ` — ${exp.description}` : ""}`,
-      debit_account: exp.nominal_account, credit_account: creditAcct,
-      amount: exp.amount, reference: ref,
-    }).select("id").single();
-    if (jErr) {
-      // Do NOT mark the expense posted — a blocked insert must not look like a success.
-      captureError(jErr, { company_id: companyId, operation: 'expense-approve' });
-      setSaveError(/period is locked/i.test(jErr.message)
-        ? "This expense's receipt date falls in a locked (filed) period — it can't be posted until the period is unlocked."
-        : `Approval failed: ${jErr.message}`);
-      setApprovingId(null);
-      return;
-    }
-    const journalId = jnl?.id || null;
-    const { error: updErr } = await db.from("expenses").update({ status: "posted", journal_id: journalId }).eq("id", exp.id);
-    if (updErr) {
-      captureError(updErr, { company_id: companyId, operation: 'expense-approve-status' });
-      setSaveError(`Journal posted (ref ${ref}) but marking the expense as posted failed: ${updErr.message} — please refresh and check before re-approving.`);
-      setApprovingId(null);
-      return;
-    }
-    setExpenses(p => p.map(e => e.id === exp.id ? { ...e, status: "posted", journal_id: journalId } : e));
+    const r = await approveExpense(companyId, exp, defaultBankNominal);
+    if (!r.ok) { setSaveError(r.message); setApprovingId(null); return; }
+    setExpenses(p => p.map(e => e.id === exp.id ? { ...e, status: "posted", journal_id: r.journalId } : e));
     setApprovingId(null);
   };
 
   const reject = async exp => {
     if (!companyId) return;
-    await supabase.from("expenses").update({ status: "rejected" }).eq("id", exp.id);
+    const r = await rejectExpense(exp);
+    if (!r.ok) { setSaveError(r.message); return; }
     setExpenses(p => p.map(e => e.id === exp.id ? { ...e, status: "rejected" } : e));
   };
 
   // Corrects an expense's nominal account while it's still status: 'submitted' — persists
-  // immediately (no draft/save step), so by the time approve() reads exp.nominal_account it's
-  // already right. No change needed there: it just reads whatever this last wrote.
+  // immediately, so by the time approve() reads exp.nominal_account it's already right.
   const updateNominal = async (exp, code) => {
     const acct = acctOptions.find(a => a.code === code);
     if (!acct) return;
-    const { error } = await supabase.from("expenses")
-      .update({ nominal_account: code, nominal_name: acct.name }).eq("id", exp.id);
-    if (error) { setSaveError(`Couldn't update nominal account: ${error.message}`); return; }
+    const r = await updateExpenseNominal(exp, acct);
+    if (!r.ok) { setSaveError(r.message); return; }
     setExpenses(p => p.map(e => e.id === exp.id ? { ...e, nominal_account: code, nominal_name: acct.name } : e));
   };
 
@@ -21135,14 +20975,8 @@ export default function App() {
 
   // Compute user's role in active company's org (colleague read-only distinction —
   // unrelated to, and unchanged by, the accountant/business_owner permission model below).
-  const userRole = useMemo(() => {
-    if (!company?.clerk_org_id) return 'owner';
-    if (company.clerk_user_id === user?.id) return 'owner';
-    const membership = (userMemberships?.data || []).find(
-      m => m.organization.id === company.clerk_org_id
-    );
-    return membership?.role || 'org:member';
-  }, [company, user, userMemberships?.data]);
+  const userRole = useMemo(() => orgRoleFor(company, user?.id, userMemberships?.data), // src/shared/orgRole.js
+    [company, user, userMemberships?.data]);
 
   const isReadOnly = userRole === 'org:member';
 

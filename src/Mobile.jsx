@@ -1,30 +1,30 @@
 import { useState, useEffect, useRef, useCallback, useMemo } from 'react';
-import { useUser, useAuth, useClerk } from '@clerk/clerk-react';
+import { useUser, useAuth, useClerk, useOrganizationList } from '@clerk/clerk-react';
 import { useCompanyContext } from './shared/useCompanyContext.js';
 import { goToFullSite } from './shared/viewMode.js';
 import { isPending, can } from './entitlements.js';
 import { SignIn } from '@clerk/clerk-react';
 import { supabase } from './supabase.js';
-import { approveApBill, confirmBankTxn } from './shared/approvals.js';
+import { approveApBill, confirmBankTxn, approveExpense, rejectExpense, updateExpenseNominal, fetchExpenseBankNominal } from './shared/approvals.js';
+import { orgRoleFor } from './shared/orgRole.js';
+import { CHAT_SUGGESTIONS, buildChatContext, buildChatSystemPrompt, chatGreeting, sendChatMessage, chatPeriodLabel } from './shared/chatContext.js';
 import { InboxZeroCelebration } from './shared/InboxZeroCelebration.jsx';
 import { recScoreCandidate } from './shared/recScore.js';
-import { computeDeadlines, filedVatPeriodVals } from './shared/computeDeadlines.js';
-import { fetchAllRows } from './shared/fetchAllRows.js';
-import { monthEnd, todayStr as localToday } from './shared/dates.js';
+import { daysFromToday, isLateDeadline, isCurrentDeadline, nextDeadline, applicableDeadlines } from './shared/computeDeadlines.js';
+import { monthEnd, todayStr as localToday, thisMonthStr } from './shared/dates.js';
 import { useHealthy } from './shared/useHealthy.js';
 import { fetchCashBalance } from './shared/bankBalance.js';
-import { deadlineApplies } from './shared/practicePortfolio.js';
 import { useChartOfAccounts } from './shared/chartOfAccounts.js';
 import { useTransactionRules } from './shared/txRules.js';
 import { suggestExpenseAccount, expenseAccountOptions } from './shared/expenseSuggest.js';
 import { fetchInstitutions, filterInstitutions, startBankConnect, prepareReconnect, connectionState } from './shared/bankConnect.js';
 import { AutomationHero, HealthPulseDot } from './shared/AutomationHero.jsx';
-import { getVATPeriods, fetchVat3PeriodData, computeVat3, vat3Blockers, buildFilingFigures, isPeriodLocked } from './shared/vat3.js';
+import { getVATPeriods, fetchVat3PeriodData, computeVat3, vat3Blockers, buildFilingFigures, isPeriodLocked, defaultVatPeriod } from './shared/vat3.js';
 import { captureError } from './sentry.js';
 import {
   INV_VAT_LABELS, calcLineAmounts, calcInvTotals, vatCodeForRate,
   createInvoiceDraft, finaliseInvoice,
-  creditedByInvoice, invoiceOutstanding, invoiceStatus,
+  creditedByInvoice, invoiceOutstanding, invoiceStatus, fetchInvoiceDocs, overdueInvoices,
 } from './shared/invoice.js';
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -175,6 +175,27 @@ const M_CSS = `
   .m-vat-notes { display: flex; flex-direction: column; gap: 4px; margin-top: 12px; font-size: 12px; line-height: 1.4; }
   .m-vat-ok { margin-top: 12px; padding: 10px 12px; border-radius: var(--rsm); background: rgba(16,185,129,0.08); border: 1px solid rgba(16,185,129,0.25); color: var(--teal2); font-size: 12px; }
   .m-vat-confirm { margin-top: 12px; padding: 12px; border-radius: var(--rsm); border: 1px solid var(--teal); background: rgba(16,185,129,0.06); font-size: 13px; }
+  .m-appr-edit { display: flex; gap: 8px; margin-bottom: 12px; }
+  .m-appr-edit .m-fselect { flex: 1; min-width: 0; padding: 9px 10px; font-size: 12px; }
+  .m-appr-vat { flex: 0 0 92px !important; }
+  .m-appr-vat-fixed { display: flex; align-items: center; justify-content: center; border: 1px dashed var(--mbd); border-radius: var(--rsm); font: 600 12px 'Source Code Pro', monospace; color: var(--mm); }
+  .m-ai-btn { color: var(--teal2); font-size: 16px; }
+  .m-chat { position: fixed; inset: 0; z-index: 60; max-width: 430px; margin: 0 auto; background: var(--mb); display: flex; flex-direction: column; padding: env(safe-area-inset-top, 0px) 0 env(safe-area-inset-bottom, 0px); }
+  .m-chat-hdr { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border-bottom: 1px solid var(--mbd); }
+  .m-chat-av { width: 34px; height: 34px; border-radius: 10px; background: rgba(16,185,129,0.12); color: var(--teal2); display: flex; align-items: center; justify-content: center; font-size: 16px; flex-shrink: 0; }
+  .m-chat-ttl { font-weight: 600; font-size: 14px; }
+  .m-chat-st { font-size: 11px; color: var(--mm); font-family: 'Source Code Pro', monospace; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .m-chat-msgs { flex: 1; overflow-y: auto; -webkit-overflow-scrolling: touch; padding: 14px 12px; display: flex; flex-direction: column; gap: 8px; }
+  .m-chat-msg { max-width: 85%; padding: 10px 12px; border-radius: 14px; font-size: 14px; line-height: 1.45; white-space: pre-wrap; word-wrap: break-word; }
+  .m-chat-msg.a { align-self: flex-start; background: var(--mc); border: 1px solid var(--mbd); border-bottom-left-radius: 4px; }
+  .m-chat-msg.u { align-self: flex-end; background: var(--teal); color: white; border-bottom-right-radius: 4px; }
+  .m-chat-dim { color: var(--mm); }
+  .m-chat-sugg { display: flex; gap: 6px; overflow-x: auto; padding: 0 12px 8px; }
+  .m-chat-sugg button { flex-shrink: 0; background: var(--mc); border: 1px solid var(--mbd); color: var(--mtx); border-radius: 16px; padding: 7px 11px; font: 500 12px 'Inter', system-ui, sans-serif; cursor: pointer; }
+  .m-chat-inp { display: flex; gap: 8px; padding: 8px 12px 12px; border-top: 1px solid var(--mbd); }
+  .m-chat-inp .m-finput { flex: 1; }
+  .m-chat-send { width: 44px; border-radius: var(--rsm); border: none; background: var(--teal); color: white; font-size: 18px; cursor: pointer; }
+  .m-chat-send:disabled { opacity: 0.4; }
   .m-frow { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px; }
 
   /* Buttons */
@@ -286,31 +307,10 @@ function BottomNav({ tab, setTab }) {
 // desktop: cash = ledger balance of the active bank accounts (Overview / Practice Dashboard),
 // overdue = the Invoices page's rule, deadlines = the Practice Dashboard's applicability rule.
 
-// Whole days from local midnight today to `d` (a local-midnight Date, as computeDeadlines
-// builds them). Rounded, not floored: across a clock change a day is 23 or 25 hours.
-const daysFromToday = d => { const t = new Date(); t.setHours(0, 0, 0, 0); return Math.round((d - t) / 86400000); };
-
-// All invoices rows (invoices and credit notes) for a company, past the 1,000-row cap.
-async function fetchInvoiceDocs(companyId) {
-  const { data, error } = await fetchAllRows(() => supabase.from('invoices')
-    .select('id,type,customer_id,client,invoice_number,invoice_ref,status,total,amount_paid,issue_date,invoice_date,due_date,due_date_calc,credit_note_for')
-    .eq('company_id', companyId).order('id'));
-  if (error) throw new Error(error.message);
-  return data;
-}
-
-// Overdue invoices — the Invoices page's status rule (invoiceStatus, src/shared/invoice.js):
-// still owed after payments and issued credit notes, past the calculated due date where there
-// is one; drafts, voids and credited invoices never count. Oldest first.
-async function fetchOverdueInvoices(companyId) {
-  const docs = await fetchInvoiceDocs(companyId);
-  const credited = creditedByInvoice(docs);
-  const today = new Date();
-  return docs
-    .filter(d => d.type === 'invoice' && invoiceStatus(d, credited, today) === 'overdue')
-    .map(d => ({ ...d, owed: invoiceOutstanding(d, credited), due: d.due_date_calc || d.due_date }))
-    .sort((a, b) => (a.due < b.due ? -1 : a.due > b.due ? 1 : 0));
-}
+// Invoices (fetchInvoiceDocs / overdueInvoices), deadlines (daysFromToday, isLateDeadline,
+// isCurrentDeadline, nextDeadline, applicableDeadlines) and the VAT period default come from the
+// shared modules — the same rules the desktop and the AI chat context use.
+const fetchOverdueInvoices = async companyId => overdueInvoices(await fetchInvoiceDocs(supabase, companyId));
 
 // The company's deadlines that actually apply — VAT3 only if VAT-registered and that period
 // isn't filed, P30/P35 only if PAYE-registered, no CT1 for a sole trader (deadlineApplies).
@@ -329,19 +329,12 @@ function useApplicableDeadlines(company) {
   }, [companyId]);
   return useMemo(() => {
     if (!company || !locked) return null;
-    const all = computeDeadlines(company);
-    const vatFiled = filedVatPeriodVals(all, locked);
-    return all.filter(dl => deadlineApplies(company, dl, vatFiled));
+    return applicableDeadlines(company, locked);
   }, [company, locked]);
 }
 
-// Only an unfiled VAT3 is known to be late. Filing isn't tracked for P30 / P35 / CT1 / CRO, so a
-// passed date there may well have been filed — those drop off once due rather than show as late.
-const isLate = dl => dl.type === 'VAT3' && daysFromToday(dl.due) < 0;
-const isCurrent = dl => isLate(dl) || daysFromToday(dl.due) >= 0;
-
-// Most urgent: a late VAT3, else the next deadline ahead.
-const nextDeadline = deadlines => deadlines.find(isLate) || deadlines.find(dl => daysFromToday(dl.due) >= 0) || null;
+const isLate = isLateDeadline;
+const isCurrent = isCurrentDeadline;
 
 const dueLabel = dl => { const n = daysFromToday(dl.due); return n < 0 ? `${-n}d late` : n === 0 ? 'Today' : `${n}d`; };
 const dueColour = dl => { const n = daysFromToday(dl.due); return n <= 7 ? 'var(--red)' : n <= 14 ? 'var(--gold)' : 'var(--teal2)'; };
@@ -759,10 +752,17 @@ function ReceiptCapture({ companyId, user }) {
 }
 
 // ─── Approval card ─────────────────────────────────────────────────────────────
-function ApprovalCard({ item, approving, onApprove, onReview }) {
+// Bills: the nominal is editable by anyone who can approve; the VAT code only by the accountant —
+// the desktop bill form's rule, which approve_ap_bill also enforces server-side (a
+// business_owner's VAT code is ignored and the bill's own kept).
+const BILL_VAT_CODES = ['STD23', 'RED13', 'RED9', 'ZERO', 'EXEMPT', 'NONE']; // the desktop bill form's list
+
+function ApprovalCard({ item, approving, onApprove, onReview, acctOptions, canEditVat }) {
   const isBill = item._type === 'ap_bill';
   const isIn   = Number(item.amount) >= 0;
   const busy   = approving === item.id;
+  const [nominal, setNominal] = useState(item.suggestedNominal);
+  const [vatCode, setVatCode] = useState(item.vatCode || 'STD23');
 
   return (
     <div style={{ margin:'0 16px 10px', background:'var(--mc)', border:'1px solid var(--mbd)', borderRadius:'var(--r)', padding:'14px 16px' }}>
@@ -784,20 +784,37 @@ function ApprovalCard({ item, approving, onApprove, onReview }) {
         </div>
       </div>
 
-      {/* AI suggestion pill */}
-      <div style={{ background:'var(--ms)', borderRadius:8, padding:'7px 10px', marginBottom:12, display:'flex', flexWrap:'wrap', gap:'4px 8px', fontSize:11, alignItems:'center' }}>
-        <span style={{ color:'var(--mm)', fontFamily:'Source Code Pro,monospace' }}>Category</span>
-        <span style={{ color:'var(--teal2)', fontWeight:600, fontFamily:'Source Code Pro,monospace' }}>{item.suggestedNominal}</span>
-        {item.nominalName && <span style={{ color:'var(--mm)' }}>{item.nominalName}</span>}
-        {item.vatCode && item.vatCode !== 'NONE' && (
-          <span style={{ color:'var(--mm)', fontFamily:'Source Code Pro,monospace' }}>· {item.vatCode}</span>
-        )}
-        {item.confidence != null && (
-          <span style={{ marginLeft:'auto', fontFamily:'Source Code Pro,monospace', color: item.confidence >= 80 ? 'var(--green)' : 'var(--gold)', fontWeight:600 }}>
-            {item.confidence}%
-          </span>
-        )}
-      </div>
+      {isBill ? (
+        <div className="m-appr-edit">
+          <select className="m-fselect" value={nominal} onChange={e => setNominal(e.target.value)} aria-label="Nominal account" disabled={!!approving}>
+            {!acctOptions.some(a => a.code === nominal) && <option value={nominal}>{nominal}{item.nominalName ? ` — ${item.nominalName}` : ''}</option>}
+            {acctOptions.map(a => <option key={a.code} value={a.code}>{a.code} — {a.name}</option>)}
+          </select>
+          {canEditVat ? (
+            <select className="m-fselect m-appr-vat" value={vatCode} onChange={e => setVatCode(e.target.value)} aria-label="VAT rate" disabled={!!approving}>
+              {!BILL_VAT_CODES.includes(vatCode) && <option value={vatCode}>{vatCode}</option>}
+              {BILL_VAT_CODES.map(c => <option key={c} value={c}>{c}</option>)}
+            </select>
+          ) : (
+            <div className="m-appr-vat m-appr-vat-fixed" title="VAT rate is set by your accountant">{vatCode}</div>
+          )}
+        </div>
+      ) : (
+        /* AI suggestion pill */
+        <div style={{ background:'var(--ms)', borderRadius:8, padding:'7px 10px', marginBottom:12, display:'flex', flexWrap:'wrap', gap:'4px 8px', fontSize:11, alignItems:'center' }}>
+          <span style={{ color:'var(--mm)', fontFamily:'Source Code Pro,monospace' }}>Category</span>
+          <span style={{ color:'var(--teal2)', fontWeight:600, fontFamily:'Source Code Pro,monospace' }}>{item.suggestedNominal}</span>
+          {item.nominalName && <span style={{ color:'var(--mm)' }}>{item.nominalName}</span>}
+          {item.vatCode && item.vatCode !== 'NONE' && (
+            <span style={{ color:'var(--mm)', fontFamily:'Source Code Pro,monospace' }}>· {item.vatCode}</span>
+          )}
+          {item.confidence != null && (
+            <span style={{ marginLeft:'auto', fontFamily:'Source Code Pro,monospace', color: item.confidence >= 80 ? 'var(--green)' : 'var(--gold)', fontWeight:600 }}>
+              {item.confidence}%
+            </span>
+          )}
+        </div>
+      )}
 
       {/* Actions */}
       <div style={{ display:'flex', gap:10 }}>
@@ -805,7 +822,7 @@ function ApprovalCard({ item, approving, onApprove, onReview }) {
           style={{ flex:1, padding:'10px', background:'var(--ms)', border:'1px solid var(--mbd)', borderRadius:'var(--rsm)', fontSize:13, fontWeight:600, color:'var(--mm)', cursor:'pointer', fontFamily:'Inter,system-ui,sans-serif', opacity: approving ? 0.5 : 1 }}>
           Review on web
         </button>
-        <button onClick={onApprove} disabled={!!approving}
+        <button onClick={() => onApprove(isBill ? { nominal, vatCode } : undefined)} disabled={!!approving}
           style={{ flex:2, padding:'10px', background: busy ? 'rgba(16,185,129,0.5)' : 'var(--teal)', border:'none', borderRadius:'var(--rsm)', fontSize:13, fontWeight:600, color:'white', cursor: busy ? 'default' : 'pointer', fontFamily:'Inter,system-ui,sans-serif' }}>
           {busy ? '…' : '✓ Approve'}
         </button>
@@ -814,8 +831,61 @@ function ApprovalCard({ item, approving, onApprove, onReview }) {
   );
 }
 
+// ─── Expense card (admins — the Expenses page's isAdmin rule) ───────────────────
+// A submitted expense: category editable (persists at once, as on desktop), Approve posts the
+// Expenses page's journal (src/shared/approvals.js), Reject marks it rejected.
+const PM_LABEL = { company_card: 'Company card', personal_card: 'Personal card', cash: 'Cash', bank_transfer: 'Bank transfer' };
+
+function ExpenseCard({ exp, busy, onCategory, onApprove, onReject, acctOptions }) {
+  const [confirmReject, setConfirmReject] = useState(false);
+  return (
+    <div style={{ margin:'0 16px 10px', background:'var(--mc)', border:'1px solid var(--mbd)', borderRadius:'var(--r)', padding:'14px 16px' }}>
+      <div style={{ display:'flex', alignItems:'flex-start', gap:10, marginBottom:10 }}>
+        <div style={{ width:34, height:34, borderRadius:8, background:'rgba(251,191,36,0.1)', display:'flex', alignItems:'center', justifyContent:'center', fontSize:16, flexShrink:0 }}>🧾</div>
+        <div style={{ flex:1, minWidth:0 }}>
+          <div style={{ fontSize:13, fontWeight:600, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{exp.supplier}</div>
+          <div style={{ fontSize:10, color:'var(--mm)', fontFamily:'Source Code Pro,monospace', marginTop:2 }}>
+            {[fmtD(exp.receipt_date), exp.submitted_by_name, PM_LABEL[exp.payment_method] || exp.payment_method].filter(Boolean).join(' · ')}
+          </div>
+          {exp.description && <div style={{ fontSize:11, color:'var(--mm)', marginTop:2 }}>{exp.description}</div>}
+        </div>
+        <div style={{ fontSize:14, fontWeight:700, fontFamily:'Source Code Pro,monospace', flexShrink:0 }}>{fmtCash(exp.amount)}</div>
+      </div>
+      <div className="m-appr-edit">
+        <select className="m-fselect" value={exp.nominal_account} onChange={e => onCategory(exp, e.target.value)} aria-label="Category" disabled={busy}>
+          {!acctOptions.some(a => a.code === exp.nominal_account) && <option value={exp.nominal_account}>{exp.nominal_account} — {exp.nominal_name}</option>}
+          {acctOptions.map(a => <option key={a.code} value={a.code}>{a.code} — {a.name}</option>)}
+        </select>
+      </div>
+      {confirmReject ? (
+        <div style={{ display:'flex', gap:10, alignItems:'center' }}>
+          <span style={{ flex:1, fontSize:12, color:'var(--mm)' }}>Reject this expense?</span>
+          <button className="m-btn-sm" style={{ background:'var(--red)', color:'white' }} disabled={busy} onClick={() => onReject(exp)}>Reject</button>
+          <button className="m-btn-sm" style={{ background:'var(--ms)', color:'var(--mm)', border:'1px solid var(--mbd)' }} disabled={busy} onClick={() => setConfirmReject(false)}>Keep</button>
+        </div>
+      ) : (
+        <div style={{ display:'flex', gap:10 }}>
+          <button onClick={() => setConfirmReject(true)} disabled={busy}
+            style={{ flex:1, padding:'10px', background:'var(--ms)', border:'1px solid var(--mbd)', borderRadius:'var(--rsm)', fontSize:13, fontWeight:600, color:'var(--red)', cursor:'pointer', fontFamily:'Inter,system-ui,sans-serif' }}>
+            ✗ Reject
+          </button>
+          <button onClick={() => onApprove(exp)} disabled={busy}
+            style={{ flex:2, padding:'10px', background: busy ? 'rgba(16,185,129,0.5)' : 'var(--teal)', border:'none', borderRadius:'var(--rsm)', fontSize:13, fontWeight:600, color:'white', cursor: busy ? 'default' : 'pointer', fontFamily:'Inter,system-ui,sans-serif' }}>
+            {busy ? '…' : '✓ Approve & post'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── Approvals tab ────────────────────────────────────────────────────────────
-function ApprovalsTab({ companyId, user }) {
+function ApprovalsTab({ companyId, user, isBusinessOwner, isAdmin }) {
+  const { accounts: coaAccounts } = useChartOfAccounts(companyId);
+  const acctOptions = expenseAccountOptions(coaAccounts);
+  const [expenses, setExpenses]       = useState([]);   // submitted expenses (admins only)
+  const [bankNominal, setBankNominal] = useState('1000');
+  const [expBusy, setExpBusy]         = useState(null);
   const [items, setItems]           = useState([]);
   const [loading, setLoading]       = useState(true);
   const [loadErr, setLoadErr]       = useState(null);
@@ -961,11 +1031,52 @@ function ApprovalsTab({ companyId, user }) {
 
   useEffect(() => { load(); }, [load]);
 
-  const handleApprove = async (item) => {
+  // Submitted expenses — approve / reject / re-code: the Expenses page's isAdmin rule and journal.
+  const loadExpenses = useCallback(async () => {
+    if (!companyId || !isAdmin) { setExpenses([]); return; }
+    const [{ data, error }, nominal] = await Promise.all([
+      supabase.from('expenses').select('*').eq('company_id', companyId).eq('status', 'submitted').order('receipt_date', { ascending: false }),
+      fetchExpenseBankNominal(companyId),
+    ]);
+    if (error) setActionErr(`Couldn't load expenses: ${error.message}`);
+    setExpenses(data || []);
+    setBankNominal(nominal);
+  }, [companyId, isAdmin]);
+  useEffect(() => { loadExpenses(); }, [loadExpenses]);
+
+  const expCategory = async (exp, code) => {
+    const acct = acctOptions.find(a => a.code === code);
+    if (!acct) return;
+    setExpBusy(exp.id); setActionErr(null);
+    const r = await updateExpenseNominal(exp, acct);
+    if (!r.ok) setActionErr(r.message);
+    else setExpenses(p => p.map(e => e.id === exp.id ? { ...e, nominal_account: code, nominal_name: acct.name } : e));
+    setExpBusy(null);
+  };
+  const expApprove = async (exp) => {
+    setExpBusy(exp.id); setActionErr(null);
+    const r = await approveExpense(companyId, exp, bankNominal);
+    if (!r.ok) setActionErr(r.message);
+    else setExpenses(p => { const next = p.filter(e => e.id !== exp.id); if (!next.length && !items.length) setJustCleared(true); return next; });
+    setExpBusy(null);
+  };
+  const expReject = async (exp) => {
+    setExpBusy(exp.id); setActionErr(null);
+    const r = await rejectExpense(exp);
+    if (!r.ok) setActionErr(r.message);
+    else setExpenses(p => p.filter(e => e.id !== exp.id));
+    setExpBusy(null);
+  };
+
+  const handleApprove = async (item, overrides) => {
     setApproving(item.id); setActionErr(null);
     try {
       if (item._type === 'ap_bill') {
-        await approveApBill(item._raw);
+        // Nominal as chosen on the card; VAT code only the accountant's choice (the server keeps
+        // the bill's own for a business_owner regardless).
+        await approveApBill({ ...item._raw,
+          suggested_nominal: overrides?.nominal ?? item.suggestedNominal,
+          vat_code: isBusinessOwner ? item._raw.vat_code : (overrides?.vatCode ?? item._raw.vat_code) });
       } else {
         await confirmBankTxn(item.company_id, item.matchId, item.id);
       }
@@ -993,7 +1104,7 @@ function ApprovalsTab({ companyId, user }) {
       <div className="m-page-hdr">
         <div className="m-company-name">Approvals</div>
         <div className="m-date-str">
-          {loading ? 'Loading…' : items.length === 0 ? dateStr : `${items.length} item${items.length !== 1 ? 's' : ''} need your review`}
+          {loading ? 'Loading…' : items.length + expenses.length === 0 ? dateStr : `${items.length + expenses.length} item${items.length + expenses.length !== 1 ? 's' : ''} need your review`}
         </div>
       </div>
 
@@ -1006,7 +1117,7 @@ function ApprovalsTab({ companyId, user }) {
 
       {loading ? (
         <div className="m-empty">Loading queue…</div>
-      ) : items.length === 0 ? (
+      ) : items.length + expenses.length === 0 ? (
         <>
           {/* Celebration / calm empty state */}
           <InboxZeroCelebration companyId={companyId} justCleared={justCleared} theme="dark" />
@@ -1016,9 +1127,15 @@ function ApprovalsTab({ companyId, user }) {
         </>
       ) : (
         <>
+          {expenses.length > 0 && <div className="m-sec-title">Expenses to approve</div>}
+          {expenses.map(exp => (
+            <ExpenseCard key={exp.id} exp={exp} busy={expBusy === exp.id} acctOptions={acctOptions}
+              onCategory={expCategory} onApprove={expApprove} onReject={expReject} />
+          ))}
+          {expenses.length > 0 && items.length > 0 && <div className="m-sec-title">Bills &amp; bank</div>}
           {items.map(item => (
-            <ApprovalCard key={item.id} item={item} approving={approving}
-              onApprove={() => handleApprove(item)} onReview={() => handleReview(item)} />
+            <ApprovalCard key={item.id} item={item} approving={approving} acctOptions={acctOptions} canEditVat={!isBusinessOwner}
+              onApprove={overrides => handleApprove(item, overrides)} onReview={() => handleReview(item)} />
           ))}
 
           {/* Receipt capture below queue */}
@@ -1066,8 +1183,7 @@ function VatReturnCard({ company, isBusinessOwner }) {
   // for — else the current one (the desktop screen's default).
   useEffect(() => {
     if (selVal || !locked || !periods.length) return;
-    const due = periods.find(p => p.end < today && !isPeriodLocked(p, locked));
-    setSelVal((due || periods[0]).val);
+    setSelVal(defaultVatPeriod(periods, locked, today)?.val ?? null);
   }, [locked, periods, selVal, today]);
 
   const vatPeriod = periods.find(p => p.val === selVal) || null;
@@ -1180,6 +1296,11 @@ function VatReturnCard({ company, isBusinessOwner }) {
               )
             ) : !isBizLocked && (
               <div className="m-vat-sub" style={{ marginTop: 12 }}>
+                {request?.status === 'pending' && (
+                  <div className="m-vat-ok" style={{ marginTop: 0, marginBottom: 8 }}>
+                    Filing requested by client{request.requested_at ? ` ${new Date(request.requested_at).toLocaleDateString('en-IE')}` : ''} — review and file on the full site.
+                  </div>
+                )}
                 Review and file this return on the full site. <button type="button" className="m-link-btn" style={{ padding: 0, fontSize: 12 }} onClick={goToFullSite}>View full site</button>
               </div>
             )}
@@ -1545,7 +1666,7 @@ function InvoicesTab({ companyId, company }) {
     setLoadErr(null);
     try {
       const [docs, cust] = await Promise.all([
-        fetchInvoiceDocs(companyId),
+        fetchInvoiceDocs(supabase, companyId),
         supabase.from('customers').select('id,name').eq('company_id', companyId),
       ]);
       const credited = creditedByInvoice(docs);
@@ -1726,26 +1847,80 @@ function BankFeeds({ companyId, company }) {
   );
 }
 
-// ─── Ask AI tab ───────────────────────────────────────────────────────────────
-function AskAiTab() {
+// ─── Ask AI (UX-03 Stage 3) — full-screen chat from the top bar ───────────────
+// The full app's chat panel on the phone: the same live-data context, system prompt, greeting and
+// /api/chat request (src/shared/chatContext.js), for the current month — what the desktop panel
+// sends for its default period.
+function MobileChat({ company, onClose }) {
+  const companyId = company?.id;
+  const companyName = company?.name || '';
+  const selPeriod = thisMonthStr();
+  const period = chatPeriodLabel(selPeriod);
+  const [ctxLoading, setCtxLoading] = useState(true);
+  const [systemPrompt, setSystemPrompt] = useState('');
+  const [msgs, setMsgs]     = useState([]);
+  const [inp, setInp]       = useState('');
+  const [typing, setTyping] = useState(false);
+  const endRef = useRef(null);
+
+  useEffect(() => { endRef.current?.scrollIntoView({ behavior: 'smooth' }); }, [msgs, typing]);
+
+  useEffect(() => {
+    let cancelled = false;
+    (async () => {
+      setCtxLoading(true);
+      const ctx = await buildChatContext({ companyId, company, companyName, period, selPeriod });
+      if (cancelled) return;
+      setSystemPrompt(buildChatSystemPrompt({ companyName, ctx, page: 'Mobile' }));
+      setMsgs([{ role: 'assistant', text: chatGreeting(period) }]);
+      setCtxLoading(false);
+    })();
+    return () => { cancelled = true; };
+  }, [companyId]); // eslint-disable-line react-hooks/exhaustive-deps
+
+  const send = async (text) => {
+    const msg = text || inp;
+    if (!msg.trim() || ctxLoading || typing) return;
+    const history = msgs;
+    setInp(''); setMsgs(p => [...p, { role: 'user', text: msg }]); setTyping(true);
+    const reply = await sendChatMessage({ companyId, systemPrompt, history, msg });
+    setMsgs(p => [...p, { role: 'assistant', text: reply }]);
+    setTyping(false);
+  };
+
   return (
-    <div>
-      <div className="m-page-hdr">
-        <div className="m-company-name">Ask AI</div>
-        <div className="m-date-str">Your finance assistant</div>
+    <div className="m-chat" role="dialog" aria-label="Ledgrly AI">
+      <div className="m-chat-hdr">
+        <div className="m-chat-av">✦</div>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div className="m-chat-ttl">Ledgrly AI</div>
+          <div className="m-chat-st">{ctxLoading ? 'Loading your data…' : `${companyName} · ${period}`}</div>
+        </div>
+        <button type="button" className="m-menu-btn" aria-label="Close" onClick={onClose}>✕</button>
       </div>
-      <div className="m-stub">
-        <div className="m-stub-icon">✦</div>
-        <div className="m-stub-title">Coming Next</div>
-        <div className="m-stub-sub">Ask questions about your accounts, get VAT guidance, explain transactions, forecast cash flow, and more — your AI finance assistant is on the way.</div>
+      <div className="m-chat-msgs">
+        {ctxLoading ? <div className="m-chat-msg a m-chat-dim">Loading your account data…</div>
+          : msgs.map((m, i) => <div key={i} className={`m-chat-msg ${m.role === 'assistant' ? 'a' : 'u'}`}>{m.text}</div>)}
+        {typing && <div className="m-chat-msg a m-chat-dim">…</div>}
+        <div ref={endRef} />
       </div>
+      {!ctxLoading && msgs.length <= 1 && (
+        <div className="m-chat-sugg">
+          {CHAT_SUGGESTIONS.map((s, i) => <button key={i} type="button" onClick={() => send(s)}>{s}</button>)}
+        </div>
+      )}
+      <form className="m-chat-inp" onSubmit={e => { e.preventDefault(); send(); }}>
+        <input className="m-finput" value={inp} onChange={e => setInp(e.target.value)}
+          placeholder={ctxLoading ? 'Loading…' : 'Ask about your accounts…'} disabled={ctxLoading} enterKeyHint="send" />
+        <button type="submit" className="m-chat-send" disabled={ctxLoading || typing || !inp.trim()} aria-label="Send">↑</button>
+      </form>
     </div>
   );
 }
 
 // ─── Main Mobile component ────────────────────────────────────────────────────
 // ─── Top bar: company switcher + menu (UX-03 Stage 0) ─────────────────────────
-function MobileTopBar({ companies, company, onSwitch }) {
+function MobileTopBar({ companies, company, onSwitch, onOpenChat }) {
   const { signOut } = useClerk();
   const [picker, setPicker] = useState(false);
   const [menu, setMenu]     = useState(false);
@@ -1763,6 +1938,7 @@ function MobileTopBar({ companies, company, onSwitch }) {
           <span className="m-co-btn-name">{company?.name || '—'}</span>
           {many && <span className="m-co-btn-caret">▾</span>}
         </button>
+        {onOpenChat && <button type="button" className="m-menu-btn m-ai-btn" aria-label="Ask Ledgrly AI" onClick={() => { onOpenChat(); close(); }}>✦</button>}
         <button type="button" className="m-menu-btn" aria-label="Menu" aria-expanded={menu}
           onClick={() => { setMenu(m => !m); setPicker(false); }}>⋯</button>
       </div>
@@ -1814,6 +1990,11 @@ export default function Mobile() {
   // One source of truth for company / role / access, shared with the full app — this is what
   // makes /mobile work for business owners (access via user_company_access, not ownership).
   const { user, companies, company, setCompany, onboarding, companyLoading, zeroCompanyCheck, isBusinessOwner } = useCompanyContext();
+  // Desktop's colleague read-only rule (src/shared/orgRole.js) — gates expense approval.
+  const { userMemberships } = useOrganizationList({ userMemberships: { pageSize: 50 } });
+  const isAdmin = orgRoleFor(company, user?.id, userMemberships?.data) !== 'org:member';
+  const [chatOpen, setChatOpen] = useState(false);
+  const canChat = !!company && can(company, 'ai_chat'); // same gate as the full app's chat
   const companyId = company?.id ?? null;
   const [bankMsg, setBankMsg] = useState(null); // { ok, text } from the Yapily callback
 
@@ -1882,7 +2063,8 @@ export default function Mobile() {
 
   return shell(
     <>
-      <MobileTopBar companies={companies} company={company} onSwitch={switchCompany} />
+      <MobileTopBar companies={companies} company={company} onSwitch={switchCompany} onOpenChat={canChat ? () => setChatOpen(true) : undefined} />
+      {chatOpen && company && <MobileChat key={companyId} company={company} onClose={() => setChatOpen(false)} />}
       {bankMsg && (
         <div className={`m-banner ${bankMsg.ok ? 'ok' : 'err'}`} role="status">
           <span>{bankMsg.text}</span>
@@ -1891,7 +2073,7 @@ export default function Mobile() {
       )}
       <div className="m-content">
         {tab === 'home'       && <HomeTab          key={companyId} companyId={companyId} company={company} setTab={setTab} />}
-        {tab === 'approvals'  && <ApprovalsTab     key={companyId} companyId={companyId} user={user} />}
+        {tab === 'approvals'  && <ApprovalsTab     key={companyId} companyId={companyId} user={user} isBusinessOwner={isBusinessOwner} isAdmin={isAdmin} />}
         {tab === 'cash'       && <CashTab          key={companyId} companyId={companyId} company={company} />}
         {tab === 'compliance' && <ComplianceTab    key={companyId} company={company} isBusinessOwner={isBusinessOwner} />}
         {tab === 'invoice'    && <InvoicesTab      key={companyId} companyId={companyId} company={company} />}
