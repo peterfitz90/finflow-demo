@@ -24,7 +24,7 @@ export default async function handler(req, res) {
   const supportedTypes = ["image/jpeg", "image/jpg", "image/png", "image/gif", "image/webp"];
   const mt = (mediaType || "image/jpeg").toLowerCase();
   if (!supportedTypes.includes(mt)) {
-    return res.status(200).json({ supplier: "", date: "", total_amount: 0, vat_amount: 0, net_amount: 0, description: "", line_items: [] });
+    return res.status(200).json({ supplier: "", date: "", total_amount: 0, vat_amount: 0, vat_rate: null, net_amount: 0, description: "", line_items: [] });
   }
 
   console.log("[extract-receipt] processing", mt, "image, base64 length:", base64.length);
@@ -51,6 +51,7 @@ export default async function handler(req, res) {
 - date: string (ISO YYYY-MM-DD format, empty string if not found)
 - total_amount: number (total amount charged including VAT, 0 if not found)
 - vat_amount: number (VAT/tax amount shown, 0 if not found or not shown)
+- vat_rate: number or null (the VAT rate % printed on the receipt, e.g. 23, 13.5 or 9; null if no rate is shown — do not infer it)
 - net_amount: number (total minus VAT, 0 if not found)
 - description: string (brief description: what was purchased, e.g. "Office supplies", "Business lunch", "Fuel")
 - line_items: array of objects with { description: string, amount: number }
@@ -72,7 +73,7 @@ Return only the JSON object, no other text.`,
     const m = stripped.match(/\{[\s\S]*\}/);
     if (!m) {
       console.warn("[extract-receipt] no JSON found in response");
-      return res.status(200).json({ supplier: "", date: "", total_amount: 0, vat_amount: 0, net_amount: 0, description: "", line_items: [] });
+      return res.status(200).json({ supplier: "", date: "", total_amount: 0, vat_amount: 0, vat_rate: null, net_amount: 0, description: "", line_items: [] });
     }
 
     const parsed = JSON.parse(m[0]);
@@ -81,6 +82,8 @@ Return only the JSON object, no other text.`,
       date:          String(parsed.date         || ""),
       total_amount:  Number(parsed.total_amount || 0),
       vat_amount:    Number(parsed.vat_amount   || 0),
+      // The printed rate, like the emailed-bill reader's vat_rate — feeds the VAT-code suggestion.
+      vat_rate:      parsed.vat_rate === null || parsed.vat_rate === undefined || parsed.vat_rate === "" || !Number.isFinite(Number(parsed.vat_rate)) ? null : Number(parsed.vat_rate),
       net_amount:    Number(parsed.net_amount   || 0),
       description:   String(parsed.description  || ""),
       line_items:    Array.isArray(parsed.line_items) ? parsed.line_items : [],

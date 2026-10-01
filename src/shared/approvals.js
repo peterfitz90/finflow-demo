@@ -69,7 +69,7 @@ export async function markApBillPaid(companyId, billId, paidAmt, date, bankAccou
 // { ok: true, … } or { ok: false, message } with the message the page shows.
 
 // Credit leg: the company's bank for a company card / bank transfer, else 2000 (owed to the
-// person who paid). Debit leg: the expense's nominal. No VAT code on the journal (unchanged).
+// person who paid). Debit leg: the expense's nominal, with its VAT code.
 export const expenseCreditAccount = (exp, bankNominal) =>
   ["company_card", "bank_transfer"].includes(exp.payment_method) ? bankNominal : "2000";
 
@@ -81,7 +81,8 @@ export async function approveExpense(companyId, exp, bankNominal) {
     company_id: companyId, date: sanitiseDate(exp.receipt_date),
     description: `Expense: ${exp.supplier}${exp.description ? ` — ${exp.description}` : ""}`,
     debit_account: exp.nominal_account, credit_account: creditAcct,
-    amount: exp.amount, reference: ref,
+    // The expense's VAT code, so T2 counts its input VAT (null = not counted, as before).
+    amount: exp.amount, reference: ref, vat_code: exp.vat_code || null,
   }).select("id").single();
   if (jErr) {
     // Do NOT mark the expense posted — a blocked insert must not look like a success.
@@ -118,4 +119,11 @@ export async function updateExpenseNominal(exp, acct) {
 export async function fetchExpenseBankNominal(companyId) {
   const { data } = await supabase.from('bank_accounts').select('id, nominal_code').eq('company_id', companyId).eq('is_active', true);
   return data?.[0]?.nominal_code || '1000';
+}
+
+// Sets an expense's VAT code while it's still 'submitted' (accountant — the database keeps the
+// old code for anyone else, expenses_vat_code_lock). Persists immediately, like the nominal.
+export async function updateExpenseVatCode(exp, vatCode) {
+  const { error } = await supabase.from("expenses").update({ vat_code: vatCode || null }).eq("id", exp.id);
+  return error ? { ok: false, message: `Couldn't update VAT code: ${error.message}` } : { ok: true };
 }

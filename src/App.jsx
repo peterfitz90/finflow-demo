@@ -8,7 +8,7 @@ import { can, limit, isPending, planLabel, planFor, FEATURE_LABELS, FEATURE_VALU
 import { InboxZeroCelebration } from './shared/InboxZeroCelebration.jsx';
 import { useHealthy } from './shared/useHealthy.js';
 import { AutomationHero, HealthPulseDot } from './shared/AutomationHero.jsx';
-import { confirmBankTxn, approveApBill, markApBillPaid, approveExpense, rejectExpense, updateExpenseNominal } from './shared/approvals.js';
+import { confirmBankTxn, approveApBill, markApBillPaid, approveExpense, rejectExpense, updateExpenseNominal, updateExpenseVatCode } from './shared/approvals.js';
 import { computeDeadlines } from './shared/computeDeadlines.js';
 import { isAccountantFor, portfolioTotals, crossClientDeadlines } from './shared/practicePortfolio.js';
 import { fetchAllRows } from './shared/fetchAllRows.js';
@@ -25,7 +25,7 @@ import { NARROW_QUERY, matches as matchesMedia, goToMobile } from './shared/view
 import { BANK_NOMINAL_CODE, fetchNominalBalanceAsOf, fetchActiveBankNominals } from './shared/bankBalance.js';
 import { GL_ACCOUNTS, COA_SEED_SOLE_TRADER, COA_STATIC_FALLBACK, useChartOfAccounts } from './shared/chartOfAccounts.js';
 import { useTransactionRules, preCleanDesc, applyRules } from './shared/txRules.js';
-import { suggestExpenseAccount } from './shared/expenseSuggest.js';
+import { suggestExpenseAccount, suggestExpenseVatCode, EXPENSE_VAT_CODES, VAT_SOURCE_LABEL } from './shared/expenseSuggest.js';
 import { CURRENCY_SYMBOLS, fmtCurrencyFull } from './shared/currency.js';
 import { burnWindow, netBurn, runwayState } from './shared/cashBurn.js';
 import { orgRoleFor } from './shared/orgRole.js';
@@ -16024,7 +16024,7 @@ function PracticeDashboard({ companies, onSelectCompany, onAddCompany }) {
 }
 
 // ─── EXPENSES PAGE ───────────────────────────────────────────────────────────
-function Expenses({ companyName = "Company", isAdmin = false, companyId, isActive }) {
+function Expenses({ companyName = "Company", isAdmin = false, companyId, isActive, isBusinessOwner = false }) {
   const { user } = useUser();
   const { accounts: coaAccounts, refetch: coaRefetch }   = useChartOfAccounts(companyId);
   const { rules: txRules }           = useTransactionRules(companyId);
@@ -16040,6 +16040,12 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
   // "Suggested: X" hint so it's clear why the dropdown changed on its own.
   const [nominalTouched, setNominalTouched] = useState(false);
   const [suggestedLabel, setSuggestedLabel] = useState(null);
+  // VAT code (src/shared/expenseSuggest.js): follows the suggestion — matched rule's code, then the
+  // account's default, then the receipt's own rate — until someone picks one (vatTouched). Only an
+  // accountant can pick; anyone else gets the suggestion (the database enforces the same).
+  const [vatTouched, setVatTouched]   = useState(false);
+  const [lastRule, setLastRule]       = useState(null); // { nominal, vatCode } from the last rule match
+  const [vatSuggestion, setVatSuggestion] = useState(null);
   const [selected, setSelected]     = useState(null);
   const [matchData, setMatchData]   = useState(null); // { expenseId, rows }
   const [approvingId, setApprovingId] = useState(null);
@@ -16063,7 +16069,7 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
   const emptyForm = () => ({
     receipt_date: localDateStr(today), supplier:"", description:"",
     amount:"", vat_amount:"0", net_amount:"",
-    nominal_account:"6600", nominal_name:"Sundry Expenses", category:"Overheads",
+    nominal_account:"6600", nominal_name:"Sundry Expenses", category:"Overheads", vat_code:"", vat_rate:null,
     payment_method:"company_card", notes:"", receipt_text:"",
   });
   const [form, setForm] = useState(emptyForm());
@@ -16086,6 +16092,7 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
     // A manual nominal-account change is a deliberate choice — stop auto-suggesting over it,
     // and drop the "Suggested: X" hint since it no longer describes the current value.
     if (f === "nominal_account") { setNominalTouched(true); setSuggestedLabel(null); }
+    if (f === "vat_code") setVatTouched(true);
   };
 
   // Stage 2 — suggests a nominal account from vendor/description text (suggestExpenseAccount,
@@ -16099,7 +16106,17 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
     if (!acct) return;
     setForm(p => ({ ...p, nominal_account: acct.code, nominal_name: acct.name, category: acct.category }));
     setSuggestedLabel(acct.name);
+    setLastRule({ nominal: acct.code, vatCode: acct.ruleVatCode });
   };
+
+  useEffect(() => {
+    const sug = suggestExpenseVatCode({
+      ruleVatCode: lastRule?.nominal === form.nominal_account ? lastRule.vatCode : null,
+      nominal: form.nominal_account, coaAccounts, vatAmount: form.vat_amount, total: form.amount, vatRate: form.vat_rate,
+    });
+    setVatSuggestion(sug);
+    if (!vatTouched) setForm(p => (p.vat_code === (sug?.code || "") ? p : { ...p, vat_code: sug?.code || "" }));
+  }, [form.nominal_account, form.vat_amount, form.amount, form.vat_rate, lastRule, coaAccounts, vatTouched]);
 
   useEffect(() => {
     if (!companyId) { setExpenses([]); return; }
@@ -16145,6 +16162,7 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
         amount:       d.total_amount ? String(d.total_amount) : p.amount,
         vat_amount:   d.vat_amount   ? String(d.vat_amount)   : p.vat_amount,
         net_amount:   d.net_amount   ? String(d.net_amount)   : p.net_amount,
+        vat_rate:     d.vat_rate ?? p.vat_rate,
         description:  d.description  || p.description,
         receipt_text: JSON.stringify(d),
       }));
@@ -16165,12 +16183,13 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
       amount: parseFloat(form.amount) || 0, vat_amount: parseFloat(form.vat_amount) || 0,
       net_amount: parseFloat(form.net_amount) || 0, nominal_account: form.nominal_account,
       nominal_name: form.nominal_name, category: form.category, payment_method: form.payment_method,
+      vat_code: form.vat_code || null,
       status: "submitted", receipt_text: form.receipt_text, notes: form.notes,
     }).select().single();
     if (error) { setSaveError(`Save failed: ${error.message}`); return; }
     setExpenses(p => [ins, ...p]);
     setForm(emptyForm()); setReceiptUrl(null); setShowForm(false);
-    setNominalTouched(false); setSuggestedLabel(null);
+    setNominalTouched(false); setSuggestedLabel(null); setVatTouched(false); setLastRule(null);
   };
 
   // Approve / reject / re-code — src/shared/approvals.js (shared with /mobile's Approvals tab).
@@ -16189,6 +16208,12 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
     const r = await rejectExpense(exp);
     if (!r.ok) { setSaveError(r.message); return; }
     setExpenses(p => p.map(e => e.id === exp.id ? { ...e, status: "rejected" } : e));
+  };
+
+  const updateVatCode = async (exp, code) => {
+    const r = await updateExpenseVatCode(exp, code);
+    if (!r.ok) { setSaveError(r.message); return; }
+    setExpenses(p => p.map(e => e.id === exp.id ? { ...e, vat_code: code || null } : e));
   };
 
   // Corrects an expense's nominal account while it's still status: 'submitted' — persists
@@ -16298,13 +16323,22 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
                 </div>
               </div>
             </div>
-            <div className="f-row" style={{gridTemplateColumns:"2fr 1fr 1fr"}}>
+            <div className="f-row" style={{gridTemplateColumns:"2fr 1fr 1fr 1fr"}}>
               <div className="f-group">
                 <label className="f-label">Nominal Account</label>
                 <select className="f-input" value={form.nominal_account} onChange={ff("nominal_account")}>
                   {acctOptions.map(a => <option key={a.code} value={a.code}>{a.code} — {a.name}</option>)}
                 </select>
                 {suggestedLabel && <div style={{fontSize:10,color:"var(--teal)",marginTop:3}}>Suggested: {suggestedLabel}</div>}
+              </div>
+              <div className="f-group">
+                <label className="f-label">VAT Code</label>
+                <select className="f-input" value={form.vat_code} onChange={ff("vat_code")} disabled={isBusinessOwner}
+                  title={isBusinessOwner ? "VAT code is set by your accountant" : undefined}>
+                  <option value="">— none —</option>
+                  {EXPENSE_VAT_CODES.map(c => <option key={c} value={c}>{c}</option>)}
+                </select>
+                {vatSuggestion && form.vat_code === vatSuggestion.code && <div style={{fontSize:10,color:"var(--teal)",marginTop:3}}>Suggested {VAT_SOURCE_LABEL[vatSuggestion.source]}</div>}
               </div>
               <div className="f-group">
                 <label className="f-label">Payment Method</label>
@@ -16361,10 +16395,18 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
                     <td style={{fontSize:12,color:"var(--muted)",maxWidth:160,overflow:"hidden",textOverflow:"ellipsis",whiteSpace:"nowrap"}}>{e.description||"—"}</td>
                     <td style={{fontSize:11,color:"var(--dim)",fontFamily:"Source Code Pro,monospace"}} onClick={ev=>ev.stopPropagation()}>
                       {e.status === "submitted" && (isAdmin || e.submitted_by_clerk_id === user?.id) ? (
-                        <select className="f-input" style={{fontSize:11,padding:"2px 6px",fontFamily:"inherit"}} value={e.nominal_account} onChange={ev => updateNominal(e, ev.target.value)}>
-                          {acctOptions.map(a => <option key={a.code} value={a.code}>{a.code} — {a.name}</option>)}
-                        </select>
-                      ) : e.nominal_account}
+                        <div style={{display:"flex",gap:4}}>
+                          <select className="f-input" style={{fontSize:11,padding:"2px 6px",fontFamily:"inherit"}} value={e.nominal_account} onChange={ev => updateNominal(e, ev.target.value)}>
+                            {acctOptions.map(a => <option key={a.code} value={a.code}>{a.code} — {a.name}</option>)}
+                          </select>
+                          {!isBusinessOwner ? (
+                            <select className="f-input" style={{fontSize:11,padding:"2px 6px",fontFamily:"inherit",width:84}} value={e.vat_code || ""} onChange={ev => updateVatCode(e, ev.target.value)} title="VAT code">
+                              <option value="">no VAT</option>
+                              {EXPENSE_VAT_CODES.map(c => <option key={c} value={c}>{c}</option>)}
+                            </select>
+                          ) : <span style={{alignSelf:"center"}}>{e.vat_code || "no VAT"}</span>}
+                        </div>
+                      ) : <>{e.nominal_account}{e.vat_code ? ` · ${e.vat_code}` : ""}</>}
                     </td>
                     <td style={{fontSize:11}}>{pmIcon(e.payment_method)} <span style={{color:"var(--dim)",fontSize:10}}>{e.payment_method?.replace(/_/g," ")}</span></td>
                     <td><SPill status={e.status} /></td>
@@ -16399,7 +16441,7 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
             <div style={{padding:"14px 18px",background:"rgba(26,39,68,0.02)",borderTop:"1px solid var(--border)"}}>
               <div style={{fontSize:11,color:"var(--dim)",fontFamily:"Source Code Pro,monospace",marginBottom:10}}>EXPENSE DETAILS — {e.supplier}</div>
               <div style={{display:"grid",gridTemplateColumns:"1fr 1fr 1fr 1fr",gap:14,marginBottom:10}}>
-                {[["NOMINAL",`${e.nominal_account} ${e.nominal_name}`],["VAT",e.vat_amount?fmt(e.vat_amount):"—"],["NET",e.net_amount?fmt(e.net_amount):"—"],["PAYMENT",e.payment_method?.replace(/_/g," ")]].map(([l,v],i)=>(
+                {[["NOMINAL",`${e.nominal_account} ${e.nominal_name}`],["VAT",e.vat_amount?`${fmt(e.vat_amount)}${e.vat_code ? ` · ${e.vat_code}` : ""}`:(e.vat_code||"—")],["NET",e.net_amount?fmt(e.net_amount):"—"],["PAYMENT",e.payment_method?.replace(/_/g," ")]].map(([l,v],i)=>(
                   <div key={i}><div style={{fontSize:10,color:"var(--dim)",fontFamily:"Source Code Pro,monospace",marginBottom:2}}>{l}</div><div style={{fontSize:12,textTransform:"capitalize"}}>{v}</div></div>
                 ))}
               </div>
@@ -21372,7 +21414,7 @@ export default function App() {
                   {page === "ap-invoices"  && <APInvoices companyName={companyName} company={company} onNavigate={setPage} isBusinessOwner={isBusinessOwner} />}
                   {page === "contracts"    && <Contracts companyName={companyName} companyId={company?.id} />}
                   <div style={{display: page === "expenses" ? "block" : "none"}}>
-                    <Expenses companyName={companyName} isAdmin={!isReadOnly} companyId={company?.id} isActive={page === "expenses"} />
+                    <Expenses companyName={companyName} isAdmin={!isReadOnly} companyId={company?.id} isActive={page === "expenses"} isBusinessOwner={isBusinessOwner} />
                   </div>
                   {page === "checklist"    && <Checklist period={period} selPeriod={selPeriod} companyId={company?.id} company={company} />}
                   {page === "checklist"    && <SuggestedJournals period={selPeriod || period} companyId={company?.id} company={company} />}

@@ -5,7 +5,7 @@ import { goToFullSite } from './shared/viewMode.js';
 import { isPending, can } from './entitlements.js';
 import { SignIn } from '@clerk/clerk-react';
 import { supabase } from './supabase.js';
-import { approveApBill, confirmBankTxn, approveExpense, rejectExpense, updateExpenseNominal, fetchExpenseBankNominal } from './shared/approvals.js';
+import { approveApBill, confirmBankTxn, approveExpense, rejectExpense, updateExpenseNominal, updateExpenseVatCode, fetchExpenseBankNominal } from './shared/approvals.js';
 import { orgRoleFor } from './shared/orgRole.js';
 import { CHAT_SUGGESTIONS, buildChatContext, buildChatSystemPrompt, chatGreeting, sendChatMessage, chatPeriodLabel } from './shared/chatContext.js';
 import { InboxZeroCelebration } from './shared/InboxZeroCelebration.jsx';
@@ -16,7 +16,7 @@ import { useHealthy } from './shared/useHealthy.js';
 import { fetchCashBalance } from './shared/bankBalance.js';
 import { useChartOfAccounts } from './shared/chartOfAccounts.js';
 import { useTransactionRules } from './shared/txRules.js';
-import { suggestExpenseAccount, expenseAccountOptions } from './shared/expenseSuggest.js';
+import { suggestExpenseAccount, expenseAccountOptions, suggestExpenseVatCode, EXPENSE_VAT_CODES, VAT_SOURCE_LABEL } from './shared/expenseSuggest.js';
 import { fetchInstitutions, filterInstitutions, startBankConnect, prepareReconnect, connectionState } from './shared/bankConnect.js';
 import { AutomationHero, HealthPulseDot } from './shared/AutomationHero.jsx';
 import { getVATPeriods, fetchVat3PeriodData, computeVat3, vat3Blockers, buildFilingFigures, isPeriodLocked, defaultVatPeriod } from './shared/vat3.js';
@@ -575,8 +575,8 @@ function CashTab({ companyId, company }) {
 }
 
 // ─── Receipt capture (reusable sub-component) ─────────────────────────────────
-function ReceiptCapture({ companyId, user }) {
-  const blankForm = () => ({ supplier:'', description:'', receipt_date: localToday(), amount:'', vat_amount:'0', nominal_account:'6600', nominal_name:'Sundry Expenses', category:'Overheads', payment_method:'company_card', notes:'' });
+function ReceiptCapture({ companyId, user, isBusinessOwner }) {
+  const blankForm = () => ({ supplier:'', description:'', receipt_date: localToday(), amount:'', vat_amount:'0', nominal_account:'6600', nominal_name:'Sundry Expenses', category:'Overheads', vat_code:'', vat_rate:null, payment_method:'company_card', notes:'' });
   const [extracting, setExtracting] = useState(false);
   const [receiptUrl, setReceiptUrl] = useState(null);
   const [submitting, setSubmitting] = useState(false);
@@ -591,6 +591,11 @@ function ReceiptCapture({ companyId, user }) {
   const acctOptions = expenseAccountOptions(coaAccounts);
   const [nominalTouched, setNominalTouched] = useState(false);
   const [suggestedLabel, setSuggestedLabel] = useState(null);
+  // VAT code — follows the suggestion (rule → account default → receipt rate) until an accountant
+  // picks one; a business_owner sees the suggestion, read-only (the database enforces the same).
+  const [vatTouched, setVatTouched] = useState(false);
+  const [lastRule, setLastRule]     = useState(null);
+  const [vatSuggestion, setVatSuggestion] = useState(null);
   const fileRef = useRef(null);
   const ff = f => e => setForm(p => ({ ...p, [f]: e.target.value }));
 
@@ -607,10 +612,21 @@ function ReceiptCapture({ companyId, user }) {
     if (!acct) return;
     setForm(p => ({ ...p, nominal_account: acct.code, nominal_name: acct.name, category: acct.category }));
     setSuggestedLabel(acct.name);
+    setLastRule({ nominal: acct.code, vatCode: acct.ruleVatCode });
   };
+
+  useEffect(() => {
+    const sug = suggestExpenseVatCode({
+      ruleVatCode: lastRule?.nominal === form.nominal_account ? lastRule.vatCode : null,
+      nominal: form.nominal_account, coaAccounts, vatAmount: form.vat_amount, total: form.amount, vatRate: form.vat_rate,
+    });
+    setVatSuggestion(sug);
+    if (!vatTouched) setForm(p => (p.vat_code === (sug?.code || '') ? p : { ...p, vat_code: sug?.code || '' }));
+  }, [form.nominal_account, form.vat_amount, form.amount, form.vat_rate, lastRule, coaAccounts, vatTouched]);
 
   const reset = () => {
     setReceiptUrl(null); setForm(blankForm()); setNominalTouched(false); setSuggestedLabel(null); setSaveError(null);
+    setVatTouched(false); setLastRule(null);
   };
 
   const handleFile = async file => {
@@ -638,6 +654,7 @@ function ReceiptCapture({ companyId, user }) {
         receipt_date: d.date         || p.receipt_date,
         amount:       d.total_amount ? String(d.total_amount) : p.amount,
         vat_amount:   d.vat_amount   ? String(d.vat_amount)   : p.vat_amount,
+        vat_rate:     d.vat_rate ?? p.vat_rate,
       }));
       applySuggestion(d.supplier || form.supplier, d.description || form.description, d.total_amount || form.amount);
     } catch (e) { console.error('[mobile receipts]', e); }
@@ -655,6 +672,7 @@ function ReceiptCapture({ companyId, user }) {
       vat_amount: parseFloat(form.vat_amount)||0,
       net_amount: (parseFloat(form.amount)||0) - (parseFloat(form.vat_amount)||0),
       nominal_account: form.nominal_account, nominal_name: form.nominal_name, category: form.category,
+      vat_code: form.vat_code || null,
       payment_method: form.payment_method, status: 'submitted', notes: form.notes,
     });
     setSubmitting(false);
@@ -727,6 +745,16 @@ function ReceiptCapture({ companyId, user }) {
             {acctOptions.map(a => <option key={a.code} value={a.code}>{a.code} — {a.name}</option>)}
           </select>
           {suggestedLabel && <div className="m-fhint">Suggested: {suggestedLabel}</div>}
+        </div>
+        <div className="m-fgroup">
+          <label className="m-flabel">VAT code</label>
+          <select className="m-fselect" value={form.vat_code} disabled={isBusinessOwner}
+            onChange={e => { setForm(p => ({ ...p, vat_code: e.target.value })); setVatTouched(true); }}>
+            <option value="">— none —</option>
+            {EXPENSE_VAT_CODES.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+          {isBusinessOwner ? <div className="m-fhint" style={{ color: 'var(--mm)' }}>Set by your accountant{form.vat_code ? ` — suggested ${form.vat_code}` : ''}</div>
+            : vatSuggestion && form.vat_code === vatSuggestion.code && <div className="m-fhint">Suggested {VAT_SOURCE_LABEL[vatSuggestion.source]}</div>}
         </div>
         <div className="m-fgroup">
           <label className="m-flabel">Payment Method</label>
@@ -836,7 +864,7 @@ function ApprovalCard({ item, approving, onApprove, onReview, acctOptions, canEd
 // Expenses page's journal (src/shared/approvals.js), Reject marks it rejected.
 const PM_LABEL = { company_card: 'Company card', personal_card: 'Personal card', cash: 'Cash', bank_transfer: 'Bank transfer' };
 
-function ExpenseCard({ exp, busy, onCategory, onApprove, onReject, acctOptions }) {
+function ExpenseCard({ exp, busy, onCategory, onVatCode, onApprove, onReject, acctOptions, canEditVat }) {
   const [confirmReject, setConfirmReject] = useState(false);
   return (
     <div style={{ margin:'0 16px 10px', background:'var(--mc)', border:'1px solid var(--mbd)', borderRadius:'var(--r)', padding:'14px 16px' }}>
@@ -856,6 +884,12 @@ function ExpenseCard({ exp, busy, onCategory, onApprove, onReject, acctOptions }
           {!acctOptions.some(a => a.code === exp.nominal_account) && <option value={exp.nominal_account}>{exp.nominal_account} — {exp.nominal_name}</option>}
           {acctOptions.map(a => <option key={a.code} value={a.code}>{a.code} — {a.name}</option>)}
         </select>
+        {canEditVat ? (
+          <select className="m-fselect m-appr-vat" value={exp.vat_code || ''} onChange={e => onVatCode(exp, e.target.value)} aria-label="VAT code" disabled={busy}>
+            <option value="">no VAT</option>
+            {EXPENSE_VAT_CODES.map(c => <option key={c} value={c}>{c}</option>)}
+          </select>
+        ) : <div className="m-appr-vat m-appr-vat-fixed" title="VAT code is set by your accountant">{exp.vat_code || 'no VAT'}</div>}
       </div>
       {confirmReject ? (
         <div style={{ display:'flex', gap:10, alignItems:'center' }}>
@@ -1053,6 +1087,13 @@ function ApprovalsTab({ companyId, user, isBusinessOwner, isAdmin }) {
     else setExpenses(p => p.map(e => e.id === exp.id ? { ...e, nominal_account: code, nominal_name: acct.name } : e));
     setExpBusy(null);
   };
+  const expVatCode = async (exp, code) => {
+    setExpBusy(exp.id); setActionErr(null);
+    const r = await updateExpenseVatCode(exp, code);
+    if (!r.ok) setActionErr(r.message);
+    else setExpenses(p => p.map(e => e.id === exp.id ? { ...e, vat_code: code || null } : e));
+    setExpBusy(null);
+  };
   const expApprove = async (exp) => {
     setExpBusy(exp.id); setActionErr(null);
     const r = await approveExpense(companyId, exp, bankNominal);
@@ -1123,14 +1164,14 @@ function ApprovalsTab({ companyId, user, isBusinessOwner, isAdmin }) {
           <InboxZeroCelebration companyId={companyId} justCleared={justCleared} theme="dark" />
           {/* Receipt capture always accessible */}
           <div className="m-sec-title">Capture a Receipt</div>
-          <ReceiptCapture companyId={companyId} user={user} />
+          <ReceiptCapture companyId={companyId} user={user} isBusinessOwner={isBusinessOwner} />
         </>
       ) : (
         <>
           {expenses.length > 0 && <div className="m-sec-title">Expenses to approve</div>}
           {expenses.map(exp => (
-            <ExpenseCard key={exp.id} exp={exp} busy={expBusy === exp.id} acctOptions={acctOptions}
-              onCategory={expCategory} onApprove={expApprove} onReject={expReject} />
+            <ExpenseCard key={exp.id} exp={exp} busy={expBusy === exp.id} acctOptions={acctOptions} canEditVat={!isBusinessOwner}
+              onCategory={expCategory} onVatCode={expVatCode} onApprove={expApprove} onReject={expReject} />
           ))}
           {expenses.length > 0 && items.length > 0 && <div className="m-sec-title">Bills &amp; bank</div>}
           {items.map(item => (
@@ -1140,7 +1181,7 @@ function ApprovalsTab({ companyId, user, isBusinessOwner, isAdmin }) {
 
           {/* Receipt capture below queue */}
           <div className="m-sec-title" style={{ marginTop:12 }}>Capture a Receipt</div>
-          <ReceiptCapture companyId={companyId} user={user} />
+          <ReceiptCapture companyId={companyId} user={user} isBusinessOwner={isBusinessOwner} />
         </>
       )}
     </div>
