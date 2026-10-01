@@ -622,7 +622,7 @@ function ReceiptCapture({ companyId, user, isBusinessOwner }) {
     });
     setVatSuggestion(sug);
     if (!vatTouched) setForm(p => (p.vat_code === (sug?.code || '') ? p : { ...p, vat_code: sug?.code || '' }));
-  }, [form.nominal_account, form.vat_amount, form.amount, form.vat_rate, lastRule, coaAccounts, vatTouched]);
+  }, [form.nominal_account, form.vat_amount, form.amount, form.vat_rate, form.vat_code, lastRule, coaAccounts, vatTouched]); // vat_code: re-suggest after the form is reset
 
   const reset = () => {
     setReceiptUrl(null); setForm(blankForm()); setNominalTouched(false); setSuggestedLabel(null); setSaveError(null);

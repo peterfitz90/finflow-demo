@@ -16116,7 +16116,7 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
     });
     setVatSuggestion(sug);
     if (!vatTouched) setForm(p => (p.vat_code === (sug?.code || "") ? p : { ...p, vat_code: sug?.code || "" }));
-  }, [form.nominal_account, form.vat_amount, form.amount, form.vat_rate, lastRule, coaAccounts, vatTouched]);
+  }, [form.nominal_account, form.vat_amount, form.amount, form.vat_rate, form.vat_code, lastRule, coaAccounts, vatTouched]); // vat_code: re-suggest after the form is reset
 
   useEffect(() => {
     if (!companyId) { setExpenses([]); return; }
@@ -16289,7 +16289,7 @@ function Expenses({ companyName = "Company", isAdmin = false, companyId, isActiv
           <button className="btn btn-s" onClick={()=>fileInputRef.current?.click()} disabled={extracting}>
             {extracting ? "Extracting…" : "📷 Upload Receipt"}
           </button>
-          <button className="btn btn-p" onClick={()=>{ setShowForm(v=>!v); setSaveError(null); if(!showForm){setForm(emptyForm());setReceiptUrl(null);setNominalTouched(false);setSuggestedLabel(null);} }}>
+          <button className="btn btn-p" onClick={()=>{ setShowForm(v=>!v); setSaveError(null); if(!showForm){setForm(emptyForm());setReceiptUrl(null);setNominalTouched(false);setSuggestedLabel(null);setVatTouched(false);setLastRule(null);} }}>
             {showForm ? "Cancel" : "+ Add Expense"}
           </button>
         </div>
