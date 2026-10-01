@@ -28,6 +28,7 @@ import { useTransactionRules, preCleanDesc, applyRules } from './shared/txRules.
 import { suggestExpenseAccount, suggestExpenseVatCode, EXPENSE_VAT_CODES, VAT_SOURCE_LABEL } from './shared/expenseSuggest.js';
 import { CURRENCY_SYMBOLS, fmtCurrencyFull } from './shared/currency.js';
 import { burnWindow, netBurn, runwayState } from './shared/cashBurn.js';
+import { usePeriodSignoffs, activeOverlapping, monthRange, rangeLabel, signOffPeriod, withdrawSignoff } from './shared/periodSignoff.js';
 import { orgRoleFor } from './shared/orgRole.js';
 import { CHAT_SUGGESTIONS, buildChatContext, buildChatSystemPrompt, chatGreeting, sendChatMessage } from './shared/chatContext.js';
 import { fetchInstitutions, filterInstitutions, startBankConnect, prepareReconnect, connectionState as connectionStateOf } from './shared/bankConnect.js';
@@ -7216,7 +7217,160 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
   );
 }
 
-function Checklist({ period, selPeriod, companyId, company }) {
+// ─── BNK-01 — accountant period sign-off (src/shared/periodSignoff.js) ───────────
+// A record, not a lock: later writes aren't blocked, they're logged (write_after_signoff) and
+// counted here as "changes since sign-off". Only the accountant can sign off / withdraw (the RPCs
+// enforce it); every company member sees the status.
+const fmtSignoffWhen = ts => new Date(ts).toLocaleString('en-IE', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' });
+const SIGNOFF_TABLE_LABEL = { journals: 'Journal', bank_transactions: 'Bank line', invoices: 'Invoice', ap_invoices: 'Bill', expenses: 'Expense' };
+
+function SignOffPanel({ companyId, selPeriod, canSignOff }) {
+  const { user } = useUser();
+  const actorName = user?.fullName || user?.primaryEmailAddress?.emailAddress || '';
+  const { summaries, error: loadErr, reload } = usePeriodSignoffs(companyId);
+  const month = monthRange(selPeriod);
+  const [range, setRange]   = useState(month);
+  const [custom, setCustom] = useState(false);
+  const [mode, setMode]     = useState(null); // 'sign' | 'withdraw'
+  const [text, setText]     = useState('');
+  const [busy, setBusy]     = useState(false);
+  const [err, setErr]       = useState(null);
+  const [showChanges, setShowChanges] = useState(false);
+  const [showHistory, setShowHistory] = useState(false);
+  useEffect(() => { setRange(monthRange(selPeriod)); setCustom(false); setMode(null); setErr(null); }, [selPeriod]);
+
+  const cur = (summaries || []).find(r => r.start === range.start && r.end === range.end) || null;
+  const signed = cur?.status === 'signed_off';
+  const others = activeOverlapping(summaries, month.start, month.end).filter(r => r.key !== `${range.start}|${range.end}`);
+  const validRange = range.start && range.end && range.end >= range.start;
+
+  const submit = async () => {
+    setBusy(true); setErr(null);
+    try {
+      if (mode === 'sign') await signOffPeriod(companyId, range.start, range.end, text, actorName);
+      else await withdrawSignoff(companyId, range.start, range.end, text, actorName);
+      setMode(null); setText(''); await reload();
+    } catch (e) { setErr(e.message); }
+    setBusy(false);
+  };
+
+  return (
+    <div className="card" style={{ marginBottom: 14 }}>
+      <div className="card-header" style={{ flexWrap: "wrap", gap: 8 }}>
+        <span className="card-title">Period sign-off — {rangeLabel(range.start, range.end)}</span>
+        {canSignOff && (
+          <button className="btn btn-s btn-sm" style={{ marginLeft: "auto", fontSize: 11 }}
+            onClick={() => { setCustom(c => !c); if (custom) setRange(month); setMode(null); }}>
+            {custom ? "Back to this month" : "Another date range…"}
+          </button>
+        )}
+      </div>
+      <div style={{ padding: "12px 16px", fontSize: 13 }}>
+        {custom && (
+          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
+            <input className="f-input" type="date" value={range.start} onChange={e => setRange(r => ({ ...r, start: e.target.value }))} style={{ width: 160 }} />
+            <span style={{ color: "var(--text-muted)" }}>to</span>
+            <input className="f-input" type="date" value={range.end} onChange={e => setRange(r => ({ ...r, end: e.target.value }))} style={{ width: 160 }} />
+            {!validRange && <span style={{ color: "var(--danger)", fontSize: 11 }}>End must be on or after start</span>}
+          </div>
+        )}
+
+        {summaries === null ? <span style={{ color: "var(--text-muted)" }}>Loading…</span> : signed ? (
+          <div>
+            <div style={{ color: "var(--accent)", fontWeight: 600 }}>
+              ✓ Signed off by {cur.signed.actor_name || "the accountant"} · {fmtSignoffWhen(cur.signed.occurred_at)}
+            </div>
+            {cur.signed.reason && <div style={{ color: "var(--text-muted)", marginTop: 4 }}>“{cur.signed.reason}”</div>}
+            {cur.signed.snapshot && (
+              <div style={{ color: "var(--text-faint)", fontSize: 11, marginTop: 6, fontFamily: "Source Code Pro, monospace" }}>
+                At sign-off: income {fmtEUR(cur.signed.snapshot.income)} · expenses {fmtEUR(cur.signed.snapshot.expenses)} · net {fmtEUR(cur.signed.snapshot.net_profit)} · bank {fmtEUR(cur.signed.snapshot.bank_balance)} · {cur.signed.snapshot.journal_count} journals
+              </div>
+            )}
+            <div style={{ marginTop: 8 }}>
+              {cur.changes.length === 0 ? <span style={{ color: "var(--text-muted)", fontSize: 12 }}>No changes since sign-off</span> : (
+                <button className="btn btn-s btn-sm" style={{ fontSize: 11, color: "var(--warn)" }} onClick={() => setShowChanges(v => !v)}>
+                  ⚠ {cur.changes.length} change{cur.changes.length !== 1 ? "s" : ""} since sign-off {showChanges ? "▴" : "▾"}
+                </button>
+              )}
+              {showChanges && cur.changes.length > 0 && (
+                <div style={{ marginTop: 6, fontSize: 11, fontFamily: "Source Code Pro, monospace", color: "var(--text-muted)" }}>
+                  {cur.changes.slice(-50).reverse().map(c => (
+                    <div key={c.id}>{fmtSignoffWhen(c.occurred_at)} · {SIGNOFF_TABLE_LABEL[c.affected_table] || c.affected_table}{c.actor ? "" : " · automatic (feed / system)"}</div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </div>
+        ) : (
+          <div style={{ color: "var(--text-muted)" }}>
+            {cur?.status === 'withdrawn'
+              ? <>Sign-off withdrawn by {cur.withdrawn.actor_name || "the accountant"} · {fmtSignoffWhen(cur.withdrawn.occurred_at)}{cur.withdrawn.reason ? ` — “${cur.withdrawn.reason}”` : ""}</>
+              : "Not signed off."}
+          </div>
+        )}
+
+        {others.length > 0 && !custom && (
+          <div style={{ marginTop: 8, fontSize: 11, color: "var(--text-muted)" }}>
+            Also signed off, covering this month: {others.map(r => rangeLabel(r.start, r.end)).join(", ")}
+          </div>
+        )}
+
+        {(loadErr || err) && <div style={{ color: "var(--danger)", fontSize: 12, marginTop: 8 }}>{err || loadErr}</div>}
+
+        {canSignOff && summaries !== null && (mode ? (
+          <div style={{ marginTop: 10, display: "flex", flexDirection: "column", gap: 8 }}>
+            <textarea className="f-input" rows={2} value={text} onChange={e => setText(e.target.value)}
+              placeholder={mode === 'sign' ? "Note (optional) — e.g. what was reviewed" : "Reason for withdrawing (required)"} />
+            <div style={{ display: "flex", gap: 8 }}>
+              <button className="btn btn-p btn-sm" disabled={busy || !validRange || (mode === 'withdraw' && !text.trim())} onClick={submit}>
+                {busy ? "Saving…" : mode === 'sign' ? `Confirm sign-off — ${rangeLabel(range.start, range.end)}` : "Confirm withdrawal"}
+              </button>
+              <button className="btn btn-s btn-sm" disabled={busy} onClick={() => { setMode(null); setText(''); setErr(null); }}>Cancel</button>
+            </div>
+          </div>
+        ) : (
+          <div style={{ marginTop: 10, display: "flex", gap: 8 }}>
+            {signed
+              ? <button className="btn btn-s btn-sm" onClick={() => { setMode('withdraw'); setText(''); }}>Withdraw sign-off</button>
+              : <button className="btn btn-p btn-sm" disabled={!validRange} onClick={() => { setMode('sign'); setText(''); }}>Sign off {rangeLabel(range.start, range.end)}</button>}
+          </div>
+        ))}
+
+        {cur?.history?.length > 0 && (
+          <div style={{ marginTop: 10 }}>
+            <button className="btn btn-s btn-sm" style={{ fontSize: 11 }} onClick={() => setShowHistory(v => !v)}>History {showHistory ? "▴" : "▾"}</button>
+            {showHistory && (
+              <div style={{ marginTop: 6, fontSize: 11, fontFamily: "Source Code Pro, monospace", color: "var(--text-muted)" }}>
+                {cur.history.filter(h => h.action !== 'write_after_signoff').reverse().map(h => (
+                  <div key={h.id}>{fmtSignoffWhen(h.occurred_at)} · {h.action === 'signed_off' ? "Signed off" : "Withdrawn"} by {h.actor_name || "the accountant"}{h.reason ? ` — ${h.reason}` : ""}</div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// Badge for report headers: any currently signed-off period overlapping [from, to].
+function SignoffBadge({ companyId, from, to }) {
+  const { summaries } = usePeriodSignoffs(companyId);
+  if (!from || !to || !summaries) return null;
+  const act = activeOverlapping(summaries, from, to);
+  if (!act.length) return null;
+  const changes = act.reduce((s, r) => s + r.changes.length, 0);
+  const label = act.length === 1 ? `Signed off: ${rangeLabel(act[0].start, act[0].end)}` : `${act.length} signed-off periods`;
+  const title = act.map(r => `${rangeLabel(r.start, r.end)} — signed off by ${r.signed.actor_name || "the accountant"}, ${fmtSignoffWhen(r.signed.occurred_at)}${r.changes.length ? ` · ${r.changes.length} change(s) since` : ""}`).join("\n");
+  return (
+    <span title={title} style={{ display: "inline-flex", alignItems: "center", gap: 4, fontSize: 10, fontFamily: "Source Code Pro, monospace", padding: "2px 8px", borderRadius: 10,
+      background: "var(--accent-dim)", color: "var(--accent)", border: "1px solid rgba(16,185,129,0.3)" }}>
+      ✓ {label}{changes ? <span style={{ color: "var(--warn)" }}> · {changes} change{changes !== 1 ? "s" : ""} since</span> : null}
+    </span>
+  );
+}
+
+function Checklist({ period, selPeriod, companyId, company, isBusinessOwner = false }) {
   const { user } = useUser();
   const [items, setItems]               = useState([]);
   const [loading, setLoading]           = useState(true);
@@ -7489,6 +7643,7 @@ function Checklist({ period, selPeriod, companyId, company }) {
 
   return (
     <div className="fade-up">
+      <SignOffPanel companyId={companyId} selPeriod={selPeriod} canSignOff={!isBusinessOwner} />
       {/* Header */}
       <div style={{ display: "flex", alignItems: "flex-start", justifyContent: "space-between", marginBottom: 14, gap: 12 }}>
         <div>
@@ -9108,6 +9263,7 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
           ))}
         </div>
         {ytdMode && <span style={{ fontSize: 10, color: "var(--dim)", fontFamily: "Source Code Pro, monospace" }}>from {ytdStart}</span>}
+        <SignoffBadge companyId={companyId} from={rangeStart} to={periodEnd} />
         {tab === "pnl" && (
           <div style={{ display: "flex", alignItems: "center", gap: 6, marginLeft: "auto" }}>
             <span style={{ fontSize: 10, color: "var(--dim)", fontFamily: "Source Code Pro, monospace" }}>Compare to</span>
@@ -14742,6 +14898,7 @@ function FinancialStatements({ company, companyName }) {
           <div style={{ fontSize: 11, color: "var(--muted)", fontFamily: "'Source Code Pro',monospace", marginTop: 2 }}>
             Year ended {yeFmt} · {journals.length} journal entries loaded
           </div>
+          <div style={{ marginTop: 4 }}><SignoffBadge companyId={company?.id} from={fyStart} to={yearEnd} /></div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <ExportDropdown onCSV={exportCSV} onPrint={() => window.print()} />
@@ -21416,7 +21573,7 @@ export default function App() {
                   <div style={{display: page === "expenses" ? "block" : "none"}}>
                     <Expenses companyName={companyName} isAdmin={!isReadOnly} companyId={company?.id} isActive={page === "expenses"} isBusinessOwner={isBusinessOwner} />
                   </div>
-                  {page === "checklist"    && <Checklist period={period} selPeriod={selPeriod} companyId={company?.id} company={company} />}
+                  {page === "checklist"    && <Checklist period={period} selPeriod={selPeriod} companyId={company?.id} company={company} isBusinessOwner={isBusinessOwner} />}
                   {page === "checklist"    && <SuggestedJournals period={selPeriod || period} companyId={company?.id} company={company} />}
                   {page === "journals"     && <Journals period={period} selPeriod={selPeriod} companyName={companyName} companyId={company?.id} readOnly={isReadOnly} company={company} />}
                   {page === "gl"           && <GLReport period={period} selPeriod={selPeriod} setSelPeriod={setSelPeriod} companyId={company?.id} companyName={companyName} company={company} readOnly={isReadOnly} drillAccountCode={drillAccountCode} setDrillAccountCode={setDrillAccountCode} />}
