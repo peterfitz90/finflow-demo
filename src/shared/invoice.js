@@ -127,15 +127,18 @@ export async function createInvoiceDraft(supabase, companyId, inv, lines, custom
 // the invoice as sent. Returns { numStr, jids }.
 export async function finaliseInvoice(supabase, companyId, inv, lines, customers, settings) {
   const isCN = inv.type === 'credit_note';
-  const { data: numStr, error: numErr } = await supabase.rpc('claim_invoice_number', {
-    p_company_id: companyId, p_type: isCN ? 'cn' : 'inv',
-  });
-  if (numErr) throw new Error('Numbering failed: ' + numErr.message);
-  const totals = calcInvTotals(lines);
+  // Every check that can refuse runs BEFORE the number is claimed: a claimed number is consumed
+  // even if we stop afterwards, which left gaps in the sequence (an unsaved draft used to claim
+  // a number and then fail with "Save draft first").
   if (!inv.id) throw new Error('Save draft first');
   // canFinalise guards require customer_id; verify it's in the loaded list before issuing.
   const finalCust = customers.find(c => c.id === inv.customer_id);
   if (!finalCust) throw new Error('Customer not found — please close this form, reload, and try again');
+  const totals = calcInvTotals(lines);
+  const { data: numStr, error: numErr } = await supabase.rpc('claim_invoice_number', {
+    p_company_id: companyId, p_type: isCN ? 'cn' : 'inv',
+  });
+  if (numErr) throw new Error('Numbering failed: ' + numErr.message);
   await upsertInvoiceLines(supabase, inv.id, lines);
   const jids = await postJournals(supabase, companyId, { ...inv, invoice_number: numStr, ...totals }, lines, customers);
   const terms = Number(inv.payment_terms ?? settings?.payment_terms ?? 30);
