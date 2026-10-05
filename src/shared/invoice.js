@@ -41,16 +41,20 @@ export function vatCodeForRate(rate) {
   return null;
 }
 
-// Deletes and re-inserts all line items for an invoice with explicit field
-// mapping and Number() coercion. The coercion is a hard-won bug fix — do not tidy.
+// Explicit field mapping and Number() coercion for invoice_lines rows. The coercion is a
+// hard-won bug fix — do not tidy. Shared by upsertInvoiceLines and finaliseInvoice.
+export const toLineRows = lines => lines.map(l => ({
+  description: l.description, quantity: Number(l.quantity) || 1,
+  unit_price: Number(l.unit_price) || 0, vat_code: l.vat_code,
+  line_total: Number(l.line_total) || 0, vat_amount: Number(l.vat_amount) || 0,
+  gross_total: Number(l.gross_total) || 0,
+}));
+
+// Deletes and re-inserts all line items for an invoice (drafts and the AR import).
 export async function upsertInvoiceLines(supabase, invoiceId, lines) {
   await supabase.from('invoice_lines').delete().eq('invoice_id', invoiceId);
-  if (lines.length) await supabase.from('invoice_lines').insert(lines.map((l, i) => ({
-    invoice_id: invoiceId, sort_order: i,
-    description: l.description, quantity: Number(l.quantity) || 1,
-    unit_price: Number(l.unit_price) || 0, vat_code: l.vat_code,
-    line_total: Number(l.line_total) || 0, vat_amount: Number(l.vat_amount) || 0,
-    gross_total: Number(l.gross_total) || 0,
+  if (lines.length) await supabase.from('invoice_lines').insert(toLineRows(lines).map((row, i) => ({
+    invoice_id: invoiceId, sort_order: i, ...row,
   })));
 }
 
@@ -123,43 +127,30 @@ export async function createInvoiceDraft(supabase, companyId, inv, lines, custom
   return invId;
 }
 
-// Claims the next invoice/CN number, re-writes lines, posts journals, stamps
-// the invoice as sent. Returns { numStr, jids }.
+// Issues a saved draft: rewrites its lines, claims the next INV/CN number, posts the sales
+// journals and marks it sent, all in ONE database transaction (finalise_invoice,
+// supabase/add_finalise_invoice.sql). Any failure there (a filed VAT period, RLS, a dropped
+// connection) rolls everything back, the number claim included, so a number is only consumed by
+// an invoice that was actually issued. Returns { numStr, jids }.
 export async function finaliseInvoice(supabase, companyId, inv, lines, customers, settings) {
-  const isCN = inv.type === 'credit_note';
-  // Every check that can refuse runs BEFORE the number is claimed: a claimed number is consumed
-  // even if we stop afterwards, which left gaps in the sequence (an unsaved draft used to claim
-  // a number and then fail with "Save draft first").
+  // Same refusals as the database makes, checked first so the user gets the message without a
+  // round trip. The database re-checks all of them.
   if (!inv.id) throw new Error('Save draft first');
-  // canFinalise guards require customer_id; verify it's in the loaded list before issuing.
-  const finalCust = customers.find(c => c.id === inv.customer_id);
-  if (!finalCust) throw new Error('Customer not found — please close this form, reload, and try again');
-  const totals = calcInvTotals(lines);
-  const { data: numStr, error: numErr } = await supabase.rpc('claim_invoice_number', {
-    p_company_id: companyId, p_type: isCN ? 'cn' : 'inv',
-  });
-  if (numErr) throw new Error('Numbering failed: ' + numErr.message);
-  await upsertInvoiceLines(supabase, inv.id, lines);
-  const jids = await postJournals(supabase, companyId, { ...inv, invoice_number: numStr, ...totals }, lines, customers);
+  if (!customers.find(c => c.id === inv.customer_id)) throw new Error('Customer not found — please close this form, reload, and try again');
   const terms = Number(inv.payment_terms ?? settings?.payment_terms ?? 30);
-  // Due date = issue date + terms, as a string (was local midnight + toISOString — one day early in summer).
+  // Due date = issue date + terms, computed in the database as date + integer (no timezone).
   //
-  // KNOWN, DELIBERATELY UNCORRECTED DATA: invoices issued before this fix (2026-09-29) during
-  // Irish summer time carry a due_date_calc ONE DAY EARLY. At the time of the fix that was all
-  // 8 invoices with a due_date_calc — Heros Gym INV-009, -010, -011, -013, -014, -016, -018
+  // KNOWN, DELIBERATELY UNCORRECTED DATA: invoices issued before the due-date fix (2026-09-29)
+  // during Irish summer time carry a due_date_calc ONE DAY EARLY. At the time of the fix that was
+  // all 8 invoices with a due_date_calc — Heros Gym INV-009, -010, -011, -013, -014, -016, -018
   // (all void) and INV-017 (sent; stored 2026-07-28, true due 2026-07-29). They were left as-is
   // by decision, not oversight — INV-017's PDF already went to the customer showing 28 Jul.
   // Don't "fix" these in a data migration without checking with the practice first.
-  const { error: updErr } = await supabase.from('invoices').update({
-    invoice_ref: numStr, invoice_number: numStr, status: 'sent', ...totals,
-    client: finalCust.name,
-    amount: totals.total,
-    invoice_date: inv.issue_date || todayStr(),
-    due_date_calc: !isCN ? addDaysStr(inv.issue_date, terms) : null,
-    payment_terms: terms, journal_ids: jids, updated_at: new Date().toISOString(),
-  }).eq('id', inv.id);
-  if (updErr) throw new Error(updErr.message);
-  return { numStr, jids };
+  const { data, error } = await supabase.rpc('finalise_invoice', {
+    p_company_id: companyId, p_invoice_id: inv.id, p_lines: toLineRows(lines), p_payment_terms: terms,
+  });
+  if (error) throw new Error(error.message);
+  return { numStr: data.invoice_number, jids: data.journal_ids };
 }
 
 // ── Invoice status — the Invoices page's rule, shared with /mobile (Home overdue + invoice list)
