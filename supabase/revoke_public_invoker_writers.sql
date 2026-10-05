@@ -1,4 +1,4 @@
--- PROPOSED, NOT APPLIED (2026-10-05). Apply only after approval, then rename to drop the PROPOSED_ prefix.
+-- Applied 2026-10-05 as migration revoke_public_invoker_writers (proposed and dry-run tested the same day).
 --
 -- The 11 ordinary (SECURITY INVOKER) functions that write still have PUBLIC execute, and five also
 -- have an explicit anon grant. They run with the caller's rights, so RLS and table grants already
