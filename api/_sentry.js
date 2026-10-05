@@ -26,6 +26,13 @@ export function captureError(error, context = {}) {
   });
 }
 
+// flushSentry — await after captureError on a path that still returns normally, so the event is
+// sent before Vercel freezes the function (withSentry only flushes on an unhandled throw).
+export async function flushSentry() {
+  if (!initialized) return;
+  await Sentry.flush(2000).catch(() => {});
+}
+
 // withSentry — wraps a Vercel handler so unhandled throws are captured
 // before becoming a silent 500. Use as:
 //   export default withSentry(async function handler(req, res) { ... })

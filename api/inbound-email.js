@@ -1,6 +1,7 @@
 import { createClient } from "@supabase/supabase-js";
 import { randomUUID } from "crypto";
 import { withSentry, captureError } from './_sentry.js';
+import { AI_MODEL, callClaude } from './_anthropic.js';
 
 export const config = {
   api: { bodyParser: { sizeLimit: "15mb" } },
@@ -223,27 +224,14 @@ Return ONLY a JSON object:
 If a value is unknown, use null or 0. Return only the JSON object.`,
       });
 
-      const headers = {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      };
-      if (attachMime === "application/pdf") {
-        headers["anthropic-beta"] = "pdfs-2024-09-25";
-      }
-
-      const claudeRes = await fetch("https://api.anthropic.com/v1/messages", {
-        method: "POST",
-        headers,
-        body: JSON.stringify({
-          model: "claude-haiku-4-5-20251001",
-          max_tokens: 1024,
-          messages: [{ role: "user", content: contentBlocks }],
-        }),
+      // A failed call is reported to Sentry by callClaude; parsed stays {} and the bill is still created.
+      const { text: raw } = await callClaude({
+        model: AI_MODEL.inboundEmail,
+        max_tokens: 1024,
+        messages: [{ role: "user", content: contentBlocks }],
+        extraHeaders: attachMime === "application/pdf" ? { "anthropic-beta": "pdfs-2024-09-25" } : undefined,
+        operation: 'inbound-email-anthropic-call',
       });
-
-      const claudeData = await claudeRes.json();
-      const raw = claudeData.content?.[0]?.text ?? "";
       const m   = raw.replace(/```(?:json)?/gi, "").trim().match(/\{[\s\S]*\}/);
       if (m) parsed = JSON.parse(m[0]);
       console.log("[inbound-email] claude parsed:", JSON.stringify(parsed).slice(0, 300));

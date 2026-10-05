@@ -27,6 +27,7 @@ Return ONLY a JSON array: [{"id":"payee_key","nominal_code":"6000","nominal_name
 
 import { withSentry, captureError } from './_sentry.js';
 import { requireCompanyMember, AuthError } from './_auth.js';
+import { AI_MODEL, callClaude } from './_anthropic.js';
 
 const MAX_PAYEES = 100;          // the client sends chunks of 75
 const MAX_PAYEE_JSON = 40000;    // chars of JSON per request
@@ -57,24 +58,19 @@ export default withSentry(async function handler(req, res) {
   console.log("[categorise] categorising", payees.length, "unique payees");
 
   try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-5",
-        max_tokens: 4000,
-        system: AI_SYSTEM,
-        messages: [{ role: "user", content: JSON.stringify(payees) }],
-      }),
+    // A failed call (bad model, error status) is reported to Sentry by callClaude; the low-confidence
+    // fallback below still applies.
+    const { status, data, text: raw } = await callClaude({
+      model: AI_MODEL.categorise,
+      // Sonnet 5.5's tokenizer makes the same JSON ~30% longer: a 75-payee chunk with long payee keys
+      // measured 4,342 output tokens (2026-10-01), so 4000 truncated it and the whole chunk fell back.
+      max_tokens: 8000,
+      system: AI_SYSTEM,
+      messages: [{ role: "user", content: JSON.stringify(payees) }],
+      operation: 'categorise-anthropic-call',
+      company_id,
     });
-
-    const data = await response.json();
-    console.log("[categorise] API status:", response.status, "| usage:", JSON.stringify(data.usage));
-    const raw = data.content?.[0]?.text ?? "";
+    console.log("[categorise] API status:", status, "| usage:", JSON.stringify(data?.usage));
     console.log("[categorise] raw response (first 600):", raw.slice(0, 600));
 
     const stripped = raw.replace(/```(?:json)?/gi, "").trim();

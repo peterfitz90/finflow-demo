@@ -191,7 +191,8 @@ export async function sendChatMessage({ companyId, systemPrompt, history, msg })
         messages: [...history.map(m => ({ role: m.role, content: m.text })), { role: "user", content: msg }] }) });
     const data = await res.json();
     if (!res.ok) return `Error: ${data.error || "Unable to reach AI. Please try again."}`;
-    return data.content?.[0]?.text || "No response received.";
+    // The first text block, not content[0] — a reply can lead with a thinking block (api/_anthropic.js).
+    return data.content?.find?.(b => b?.type === 'text')?.text || "No response received.";
   } catch (e) { return `Connection error: ${e.message}`; }
 }
 

@@ -1,4 +1,5 @@
 import { requireCompanyMember, AuthError } from './_auth.js';
+import { AI_MODEL, callClaude } from './_anthropic.js';
 
 const MAX_BASE64_CHARS = 10_000_000; // ~7.5 MB image
 
@@ -30,16 +31,12 @@ export default async function handler(req, res) {
   console.log("[extract-receipt] processing", mt, "image, base64 length:", base64.length);
 
   try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-sonnet-4-5",
+    // A failed call is reported to Sentry by callClaude; the empty-fields fallback below still applies.
+    const { status, data, text: raw } = await callClaude({
+        model: AI_MODEL.extractReceipt,
         max_tokens: 1024,
+        operation: 'extract-receipt-anthropic-call',
+        company_id,
         messages: [{
           role: "user",
           content: [
@@ -61,12 +58,8 @@ Return only the JSON object, no other text.`,
             },
           ],
         }],
-      }),
     });
-
-    const data = await response.json();
-    console.log("[extract-receipt] API status:", response.status, "| usage:", JSON.stringify(data.usage));
-    const raw = data.content?.[0]?.text ?? "";
+    console.log("[extract-receipt] API status:", status, "| usage:", JSON.stringify(data?.usage));
     console.log("[extract-receipt] raw:", raw.slice(0, 400));
 
     const stripped = raw.replace(/```(?:json)?/gi, "").trim();

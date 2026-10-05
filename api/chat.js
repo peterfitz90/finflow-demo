@@ -1,10 +1,11 @@
 import { withSentry, captureError } from './_sentry.js';
 import { requireCompanyMember, AuthError } from './_auth.js';
+import { AI_MODEL, callClaude } from './_anthropic.js';
 
 // The request to Anthropic is built here, server-side, from a small allow-list of fields.
 // This used to forward req.body verbatim with no auth — an open proxy on our API key
 // (any caller could pick the model, max_tokens, tools, etc.).
-const MODEL          = 'claude-sonnet-4-5'; // what the chat panel has always used — pinned here, not caller-chosen
+// The model is pinned server-side in api/_anthropic.js (AI_MODEL.chat), never caller-chosen.
 const MAX_TOKENS     = 1000;                // the panel asks for 1000; a caller can ask for less, never more
 const MAX_MESSAGES   = 40;
 const MAX_MSG_CHARS  = 8000;
@@ -36,26 +37,17 @@ export default withSentry(async function handler(req, res) {
   while (clean.length && clean[0].role !== 'user') clean.shift(); // re-check after trimming
   if (!clean.length) return res.status(400).json({ error: 'No user message to send' });
 
-  const body = {
-    model: MODEL,
-    max_tokens: Math.min(Number(max_tokens) || MAX_TOKENS, MAX_TOKENS),
-    messages: clean,
-    ...(typeof system === 'string' && system.trim() ? { system: system.slice(0, MAX_SYSTEM_CHARS) } : {}),
-  };
-
   try {
-    const response = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01"
-      },
-      body: JSON.stringify(body)
+    const { ok, status, data } = await callClaude({
+      model: AI_MODEL.chat,
+      max_tokens: Math.min(Number(max_tokens) || MAX_TOKENS, MAX_TOKENS),
+      messages: clean,
+      system: typeof system === 'string' && system.trim() ? system.slice(0, MAX_SYSTEM_CHARS) : undefined,
+      operation: 'chat-anthropic-call',
+      company_id,
     });
-    const data = await response.json();
-    if (!response.ok) {
-      return res.status(500).json({ error: data.error?.message || `Anthropic API error ${response.status}` });
+    if (!ok) {
+      return res.status(500).json({ error: data?.error?.message || `Anthropic API error ${status}` });
     }
     res.status(200).json(data);
   } catch (error) {

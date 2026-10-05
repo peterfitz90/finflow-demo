@@ -7,6 +7,7 @@
 
 import { withSentry } from './_sentry.js';
 import { requireAccountant, AuthError } from './_auth.js';
+import { AI_MODEL, callClaude } from './_anthropic.js';
 
 const MAX_CANDIDATES = 50;
 
@@ -82,22 +83,15 @@ Classification guide:
 - Do NOT ask questions; do NOT output anything other than the JSON array`;
 
   try {
-    const resp = await fetch("https://api.anthropic.com/v1/messages", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": apiKey,
-        "anthropic-version": "2023-06-01",
-      },
-      body: JSON.stringify({
-        model: "claude-haiku-4-5-20251001",
-        max_tokens: 800,
-        messages: [{ role: "user", content: prompt }],
-      }),
+    // A failed call is reported to Sentry by callClaude; the heuristic fallback below still applies.
+    const { text } = await callClaude({
+      model: AI_MODEL.suggestJournals,
+      max_tokens: 800,
+      messages: [{ role: "user", content: prompt }],
+      operation: 'suggest-journals-anthropic-call',
+      company_id,
     });
-
-    const aiData = await resp.json();
-    const raw = (aiData.content?.[0]?.text ?? "").replace(/```(?:json)?/gi, "").trim();
+    const raw = text.replace(/```(?:json)?/gi, "").trim();
     const match = raw.match(/\[[\s\S]*\]/);
     if (!match) return heuristicFallback();
 
