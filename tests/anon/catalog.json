@@ -60,8 +60,8 @@
   "anon_readable": {},
   "buckets": ["journal-attachments", "Ledgrly"],
   "storage": {
-    "_comment": "read_object: a real client file (read and sign only, never deleted). delete_target: a Fitzsimons Test path that does not exist (the bucket holds client files only, and a real client file must never be a delete target), so anon delete is checked for refusal/0 removed but cannot prove a regression on an existing object; the select/list/read checks cover visibility.",
+    "_comment": "read_object: a real client file (read and sign only, never deleted or written). fixture: a permanent, labelled 246-byte text object in the Fitzsimons Test folder, created once with the service role (scripts/anon-check-fixture.local.mjs create). Anon delete, upsert, update and move attempts target it; the check verifies it before and after (exists, sha256 below, etag, last-modified) and fails if it is missing, changed or deleted. Do not delete or edit it.",
     "read_object": { "bucket": "journal-attachments", "name": "ap/59fc55e0-10ac-471b-a3e4-283ae510f1db/93aab01a-04e6-461b-8ba2-9fb0643c25e5.pdf" },
-    "delete_target": { "bucket": "journal-attachments", "name": "5f4e4585-8937-4624-b0fc-079a8379a160/anon-check/does-not-exist.txt" }
+    "fixture": { "bucket": "journal-attachments", "name": "5f4e4585-8937-4624-b0fc-079a8379a160/_anon-check/fixture.txt", "sha256": "93b46d4418d3a1e3339840c21718270b1aedabdeb37a4710a7fa82a5544491d4" }
   }
 }

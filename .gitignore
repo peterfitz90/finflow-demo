@@ -14,3 +14,6 @@ supabase/.temp/
 
 # One-off local reference exports, not part of the app
 supabase-db-audit-*.pdf
+
+# Local-only helpers that use the service role key (e.g. the anon check's fixture verifier)
+scripts/*.local.mjs
