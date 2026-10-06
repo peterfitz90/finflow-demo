@@ -26,6 +26,7 @@ import { BANK_NOMINAL_CODE, fetchNominalBalanceAsOf, fetchActiveBankNominals } f
 import { GL_ACCOUNTS, COA_SEED_SOLE_TRADER, COA_STATIC_FALLBACK, useChartOfAccounts } from './shared/chartOfAccounts.js';
 import { computeFrs105, frs105FiscalYear, fetchJournalsToDate, fetchChartForStatements, frs105Warnings } from './shared/statements/frs105.js';
 import { microEligibility } from './shared/statements/eligibility.js';
+import { balanceSheetStatements, statementNotes } from './shared/statements/wording.js';
 import { MICRO } from './shared/statements/thresholds.js';
 import { DISCLOSURES, LEGAL_FORMS, LEGAL_FORM_NOTE, informationRequired, ledgerEvidence, suggestion, ledgerNote, suggestionCaution, fixedAssetClasses, directorsInOffice } from './shared/statements/statementInputs.js';
 import { useTransactionRules, preCleanDesc, applyRules } from './shared/txRules.js';
@@ -14873,10 +14874,6 @@ function FinancialStatements({ company, companyName }) {
   const [loading,   setLoading]   = useState(false);
   const [generated, setGenerated] = useState(false);
   const [journals,  setJournals]  = useState([]);
-  const [regNumber,   setRegNumber]   = useState("");
-  const [dirRemun,    setDirRemun]    = useState("");
-  const [regAddress,  setRegAddress]  = useState("");
-  const [directors,   setDirectors]   = useState("");
   const [accountants, setAccountants] = useState("");
   const [bankCodes,   setBankCodes]   = useState([BANK_NOMINAL_CODE]);
   const [chart,       setChart]       = useState([]);
@@ -14948,6 +14945,26 @@ function FinancialStatements({ company, companyName }) {
   const inputsEvidence = generated && fyStart ? ledgerEvidence(journals, { fyStart, yearEnd }) : null;
   const assetClasses = generated && fyStart ? fixedAssetClasses(journals, { fyStart }) : [];
   const infoRequired = generated ? informationRequired({ company: company || {}, ...fsInputs, assetClasses, yearEnd }) : [];
+  // Stage 3d: statutory wording (src/shared/statements/wording.js) from the inputs and figures.
+  const approvalISO = fsInputs.yearInputs?.approval_date || null;
+  const inOfficeAtApproval = approvalISO ? directorsInOffice(fsInputs.directors, approvalISO) : [];
+  const nameOf = id => fsInputs.directors.find(d => d.id === id)?.full_name;
+  const bsStatements = balanceSheetStatements({
+    disclosures: fsInputs.disclosures, companyName,
+    approvalDate: approvalISO ? new Date(approvalISO + "T00:00:00").toLocaleDateString("en-IE", { day: "numeric", month: "long", year: "numeric" }) : null,
+    signatories: (fsInputs.yearInputs?.signatory_ids || []).map(nameOf).filter(Boolean),
+    soleDirector: inOfficeAtApproval.length === 1,
+  });
+  const dividendsInYear = generated && fyStart ? Math.round(journals.filter(j => j.date >= fyStart)
+    .reduce((t, j) => t + (j.debit_account === '3400' ? Number(j.amount) : 0) - (j.credit_account === '3400' ? Number(j.amount) : 0), 0) * 100) / 100 : 0;
+  const notes = generated ? statementNotes({
+    companyName, legalForm: fsInputs.profile?.legal_form, country: fsInputs.profile?.country, croNumber: company?.cro_number,
+    registeredOffice: fsInputs.profile?.registered_office, disclosures: fsInputs.disclosures,
+    yearEndFmt: yearEnd ? new Date(yearEnd + "T00:00:00").toLocaleDateString("en-IE", { day: "numeric", month: "long", year: "numeric" }) : '',
+    depreciationRates: fsInputs.yearInputs?.policy_inputs?.depreciation || {}, assetClasses,
+    taxUsed: s3pnl['7'].amount !== 0 || [...s3bs.E.codes, ...s3bs.C.codes].some(c => c.code === '2210'),
+    reserves: { atStart: Math.round((s3bs.K2.amount - pfYear + dividendsInYear) * 100) / 100, result: pfYear, dividendsInYear, atEnd: s3bs.K2.amount },
+  }) : [];
   // Stage 3e: micro eligibility from the ledger plus inputs and attestations. Warn only.
   const eligibility = generated ? microEligibility({
     turnover: s3pnl['1'].amount,
@@ -15029,7 +15046,7 @@ function FinancialStatements({ company, companyName }) {
 
   const exportCSV = () => downloadCSV(`frs105-${yeYear}.csv`, [
     ["FRS 105 Financial Statements", companyName, `Year ended ${yeFmt}`],
-    ["Company Registration No.", regNumber || "—"],
+    ["Company Registration No.", company?.cro_number || "—"],
     ["Exported", expDate],
     isDraft ? ["DRAFT"] : [],
     [],
@@ -15062,8 +15079,6 @@ function FinancialStatements({ company, companyName }) {
     ["Profit and loss account", fa(s3bs.K2.amount), ""],
     ["", "", fa(s3bs.K.amount)],
     Math.abs(s3Imbalance) >= 0.005 ? ["Imbalance (unmapped balances)", "", fa(s3Imbalance)] : [],
-    [],
-    ["Directors' Remuneration", dirRemun ? fmtEUR(parseFloat(dirRemun)) : "—"],
     [],
     ["Note: These statements should be reviewed by a qualified accountant before CRO filing."],
   ].filter(r => r.length));
@@ -15129,24 +15144,6 @@ function FinancialStatements({ company, companyName }) {
               <select className="f-input" value={yearEnd} onChange={e => setYearEnd(e.target.value)}>
                 {yearEndOptions.map(o => <option key={o.val} value={o.val}>{o.label}</option>)}
               </select>
-            </div>
-            <div className="f-group">
-              <label className="f-label">Company Registration No.</label>
-              <input className="f-input" value={regNumber} onChange={e => setRegNumber(e.target.value)} placeholder="e.g. 123456" />
-            </div>
-          </div>
-          <div className="f-group" style={{ marginBottom: 14 }}>
-            <label className="f-label">Directors' Remuneration (€) — for Note 3</label>
-            <input className="f-input" type="number" min="0" value={dirRemun} onChange={e => setDirRemun(e.target.value)} placeholder="0" />
-          </div>
-          <div className="f-group" style={{ marginBottom: 14 }}>
-            <label className="f-label">Registered Address</label>
-            <textarea className="f-input" rows={3} value={regAddress} onChange={e => setRegAddress(e.target.value)} placeholder="e.g. 1 Main Street, Dublin 2" style={{ resize: "vertical", minHeight: 60 }} />
-          </div>
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 14, marginBottom: 22 }}>
-            <div className="f-group">
-              <label className="f-label">Director(s)</label>
-              <input className="f-input" value={directors} onChange={e => setDirectors(e.target.value)} placeholder="e.g. John Smith" />
             </div>
             <div className="f-group">
               <label className="f-label">Accountants / Firm</label>
@@ -15294,8 +15291,7 @@ function FinancialStatements({ company, companyName }) {
         {draftMark}
         <div className="card-body" style={{ minHeight: 320, display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", textAlign: "center", padding: "48px 32px" }}>
           <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 700, marginBottom: 6 }}>{companyName}</div>
-          {regNumber && <div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "monospace", marginBottom: 4 }}>Company No. {regNumber}</div>}
-          {regAddress && <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 1.6, marginBottom: 16, maxWidth: 340, whiteSpace: "pre-line" }}>{regAddress}</div>}
+          <div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "monospace", marginBottom: 4 }}>Registered number {company?.cro_number || '[Information required: registered number]'}</div>
           <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, fontWeight: 600, marginTop: 24, marginBottom: 6 }}>Financial Statements</div>
           <div style={{ fontSize: 14, color: "var(--muted)", marginBottom: 4 }}>for the year ended {yeFmt}</div>
           <div style={{ fontSize: 11, color: "var(--dim)", fontFamily: "monospace", marginTop: 6 }}>Prepared under FRS 105 — Micro-entities Regime</div>
@@ -15303,33 +15299,8 @@ function FinancialStatements({ company, companyName }) {
         </div>
       </div>
 
-      {/* Directors' Report */}
-      <div className="card" style={{ marginBottom: 14, pageBreakAfter: "always", position: "relative" }}>
-        {draftMark}
-        <div className="card-header">
-          <span className="card-title">Directors' Report</span>
-          <span style={{ fontSize: 10, fontFamily: "'Source Code Pro',monospace", color: "var(--muted)", letterSpacing: "0.06em" }}>FOR THE YEAR ENDED {yeFmt.toUpperCase()}</span>
-        </div>
-        <div className="card-body" style={{ fontSize: 13, lineHeight: 1.8, color: "var(--muted)" }}>
-          <p>The directors present their annual report and the financial statements for the year ended {yeFmt}.</p>
-          <p style={{ marginTop: 10 }}><strong style={{ color: "var(--text)" }}>Principal Activity:</strong> The principal activity of the company during the year was as registered with the Companies Registration Office.</p>
-          <p style={{ marginTop: 10 }}><strong style={{ color: "var(--text)" }}>Results and Dividends:</strong> The profit for the financial year amounted to {fa(pfYear)}. The directors do not recommend the payment of a dividend.</p>
-          <p style={{ marginTop: 10 }}><strong style={{ color: "var(--text)" }}>Future Developments:</strong> The directors do not anticipate any significant changes to the nature of the company's activities in the foreseeable future.</p>
-          {directors && <p style={{ marginTop: 10 }}><strong style={{ color: "var(--text)" }}>Directors:</strong> {directors}</p>}
-          <div style={{ marginTop: 32, paddingTop: 16, borderTop: "1px solid var(--border)", display: "grid", gridTemplateColumns: "1fr 1fr", gap: 32 }}>
-            <div>
-              <div style={{ fontSize: 11, color: "var(--dim)", marginBottom: 32 }}>Signed on behalf of the Board</div>
-              <div style={{ borderTop: "1px solid var(--muted)", paddingTop: 4, fontSize: 11, color: "var(--dim)" }}>Director</div>
-              <div style={{ fontSize: 11, color: "var(--dim)", marginTop: 8 }}>Date: ___/___/_____</div>
-            </div>
-            <div>
-              <div style={{ fontSize: 11, color: "var(--dim)", marginBottom: 32 }}>&nbsp;</div>
-              <div style={{ borderTop: "1px solid var(--muted)", paddingTop: 4, fontSize: 11, color: "var(--dim)" }}>Director</div>
-              <div style={{ fontSize: 11, color: "var(--dim)", marginTop: 8 }}>Date: ___/___/_____</div>
-            </div>
-          </div>
-        </div>
-      </div>
+      {/* Directors' report: not prepared. Micros are exempt where the s.328 information is given as a
+          note (s.325(1A)(b)); see the own-shares note. (STA-01 Stage 3d) */}
 
       {/* Profit & Loss: Schedule 3B, by nature */}
       <div className="card" style={{ marginBottom: 14, pageBreakAfter: "always", position: "relative" }}>
@@ -15385,43 +15356,43 @@ function FinancialStatements({ company, companyName }) {
               <span style={{ width: 90, textAlign: "right", fontFamily: "'Source Code Pro',monospace", fontSize: 12 }}>{fa(s3Imbalance)}</span>
             </div>
           )}
-          <div style={{ marginTop: 16, fontSize: 11, color: "var(--muted)", lineHeight: 1.6 }}>
-            These financial statements have been prepared in accordance with the micro-entity provisions of the Companies Act 2014 and FRS 105. Approved by the Board of Directors on ___/___/_____ · Signed: ____________________
+          {/* Items 3–5 of the wording sheet: above the signatures */}
+          <div style={{ marginTop: 18, fontSize: 12.5, color: "var(--text)", lineHeight: 1.7 }}>
+            <p style={{ fontWeight: 600, margin: "0 0 10px" }}>{bsStatements.microRegime}</p>
+            {bsStatements.auditExemption && bsStatements.auditExemption.map((l, k) => <p key={k} style={{ margin: "0 0 6px", color: /^\[Information required/.test(l) ? "var(--red)" : undefined }}>{l}</p>)}
+            <p style={{ margin: "12px 0 6px", color: /\[Information required/.test(bsStatements.approval) ? "var(--red)" : undefined }}>{bsStatements.approval}</p>
+            <div style={{ display: "grid", gridTemplateColumns: bsStatements.soleDirector ? "1fr" : "1fr 1fr", gap: 32, marginTop: 28, maxWidth: 560 }}>
+              {(bsStatements.soleDirector ? [0] : [0, 1]).map(k => (
+                <div key={k}>
+                  <div style={{ borderTop: "1px solid var(--muted)", paddingTop: 4 }}>{bsStatements.signatories[k] || <span style={{ color: "var(--red)" }}>[Information required: signatory]</span>}</div>
+                  <div style={{ fontSize: 11, color: "var(--muted)" }}>Director</div>
+                </div>
+              ))}
+            </div>
           </div>
         </div>
       </div>
 
-      {/* Notes */}
+      {/* Notes (STA-01 Stage 3d): wording from src/shared/statements/wording.js */}
       <div className="card" style={{ marginBottom: 14, position: "relative" }}>
         {draftMark}
         <div className="card-header"><span className="card-title">Notes to the Financial Statements</span></div>
         <div className="card-body" style={{ fontSize: 13, lineHeight: 1.7 }}>
-          <div style={{ marginBottom: 22 }}>
-            <div style={{ fontFamily: "'Playfair Display',serif", fontWeight: 600, fontSize: 14, marginBottom: 10 }}>1. Accounting Policies</div>
-            <div style={{ color: "var(--muted)", fontSize: 12, lineHeight: 1.9 }}>
-              <p><strong style={{ color: "var(--text)" }}>Basis of preparation:</strong> These financial statements have been prepared under the historical cost convention and in accordance with FRS 105 — The Financial Reporting Standard applicable to the Micro-entities Regime, as issued by the Financial Reporting Council.</p>
-              <p style={{ marginTop: 8 }}><strong style={{ color: "var(--text)" }}>Going concern:</strong> The directors have a reasonable expectation that the company has adequate resources to continue in operational existence for the foreseeable future. Accordingly, these financial statements have been prepared on a going concern basis.</p>
-              <p style={{ marginTop: 8 }}><strong style={{ color: "var(--text)" }}>Revenue recognition:</strong> Turnover represents amounts receivable for services and goods provided in the normal course of business, net of value added tax and trade discounts.</p>
-              <p style={{ marginTop: 8 }}><strong style={{ color: "var(--text)" }}>Fixed assets:</strong> Fixed assets are stated at cost less accumulated depreciation. Depreciation is provided to write off the cost less the estimated residual value on a straight-line basis over the estimated useful economic lives of the assets.</p>
+          {notes.map((n, k) => (
+            <div key={n.title} style={{ marginBottom: 20 }}>
+              <div style={{ fontFamily: "'Playfair Display',serif", fontWeight: 600, fontSize: 14, marginBottom: 8 }}>{k + 1}. {n.title}</div>
+              {n.table && (
+                <div style={{ maxWidth: 520, marginBottom: 8 }}>
+                  {n.table.map(([label, amt], r) => (
+                    <div key={label} style={{ display: "flex", justifyContent: "space-between", padding: "2px 0", fontWeight: r === n.table.length - 1 ? 600 : 400, borderTop: r === n.table.length - 1 ? "1px solid var(--border2)" : undefined }}>
+                      <span>{label}</span><span style={{ fontFamily: "'Source Code Pro',monospace", fontSize: 12 }}>{fa(amt)}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {n.paragraphs.map((t, r) => <p key={r} style={{ margin: "0 0 6px", color: /^\[Information required/.test(t) ? "var(--red)" : "var(--muted)" }}>{t}</p>)}
             </div>
-          </div>
-          <div style={{ marginBottom: 22 }}>
-            <div style={{ fontFamily: "'Playfair Display',serif", fontWeight: 600, fontSize: 14, marginBottom: 10 }}>2. Company Information</div>
-            <div style={{ fontSize: 12, color: "var(--muted)", lineHeight: 2 }}>
-              <div><strong style={{ color: "var(--text)" }}>Company name:</strong> {companyName}</div>
-              <div><strong style={{ color: "var(--text)" }}>Company registration number:</strong> {regNumber || <span style={{ fontStyle: "italic" }}>Not provided</span>}</div>
-              <div><strong style={{ color: "var(--text)" }}>Country of incorporation:</strong> Ireland</div>
-              <div><strong style={{ color: "var(--text)" }}>Nature of business:</strong> As per company registration with the Companies Registration Office</div>
-            </div>
-          </div>
-          <div>
-            <div style={{ fontFamily: "'Playfair Display',serif", fontWeight: 600, fontSize: 14, marginBottom: 10 }}>3. Directors' Remuneration</div>
-            <div style={{ fontSize: 12, color: "var(--muted)" }}>
-              {dirRemun && parseFloat(dirRemun) > 0
-                ? <span>Aggregate remuneration paid to directors in the year ended {yeFmt}: <strong style={{ fontFamily: "'Source Code Pro',monospace", color: "var(--text)" }}>{fmtEUR(parseFloat(dirRemun))}</strong></span>
-                : <span>No directors' remuneration was paid or payable during the year ended {yeFmt}.</span>}
-            </div>
-          </div>
+          ))}
         </div>
       </div>
 
