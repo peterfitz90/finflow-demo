@@ -9,6 +9,7 @@
 // scripts/frs105-regression.mjs proves this file matches the pre-extraction code to the cent.
 import { GL_ACCOUNTS } from '../glAccounts.js';
 import { fetchAllRows } from '../fetchAllRows.js';
+import { monthEnd } from '../dates.js';
 
 export const FRS105_MODES = ['legacy'];
 
@@ -110,10 +111,25 @@ const inAnyRange = (code, ranges) => ranges.some(([f, t]) => code >= f && code <
 const round2 = n => Math.round(n * 100) / 100;
 const glName = code => GL_ACCOUNTS.find(a => a.code === code)?.name || null;
 
+// Month-end dates from the period start through the year end, as YYYY-MM-DD.
+function monthEndsBetween(start, end) {
+  const out = [];
+  let [y, m] = start.split('-').map(Number);
+  for (;;) {
+    const me = monthEnd(y, m);
+    if (me > end) break;
+    out.push(me);
+    if (++m > 12) { m = 1; y++; }
+  }
+  return out;
+}
+
 // journals: every journal up to the year end (fetchJournalsToDate). result: computeFrs105's
 // output for the same journals. bankCodes: the company's active bank nominals (fallback 1000).
-// Balances are debit minus credit, the same sum nominal_balance_as_of returns.
-export function frs105Warnings(journals, result, { bankCodes = ['1000'] } = {}) {
+// yearEnd: the statements' year end. Balances are debit minus credit, the same sum nominal_balance_as_of returns. Every rule works
+// on this one paginated journal set: no further queries, none per month.
+// Each warning has severity 'warn', except 'liability_debit', which is 'info'.
+export function frs105Warnings(journals, result, { bankCodes = ['1000'], yearEnd = null } = {}) {
   const warnings = [];
   const debitNet = code => round2((result.rawD[code] || 0) - (result.rawC[code] || 0));
 
@@ -140,5 +156,39 @@ export function frs105Warnings(journals, result, { bankCodes = ['1000'] } = {}) 
     .filter(x => x.balance < -0.005);
   if (negative.length) warnings.push({ id: 'negative_bank', items: negative });
 
-  return warnings;
+  // (d) a bank nominal below zero at any month-end in the period (the year end included)
+  if (result.fyStart) {
+    // The period runs to the year end; without one, 12 months from the period start (as the
+    // legacy engine assumes).
+    const [fy, fm] = result.fyStart.split('-').map(Number);
+    const periodEnd = yearEnd || monthEnd(fm === 1 ? fy : fy + 1, fm === 1 ? 12 : fm - 1);
+    const ends = monthEndsBetween(result.fyStart, periodEnd);
+    const items = [];
+    for (const code of [...new Set(bankCodes)]) {
+      const moves = journals.filter(j => j.debit_account === code || j.credit_account === code)
+        .map(j => [j.date, (j.debit_account === code ? Number(j.amount) : 0) - (j.credit_account === code ? Number(j.amount) : 0)])
+        .sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0));
+      let bal = 0, i = 0;
+      const below = [];
+      for (const me of ends) {
+        while (i < moves.length && moves[i][0] <= me) bal += moves[i++][1];
+        if (round2(bal) < -0.005) below.push({ date: me, balance: round2(bal) });
+      }
+      if (below.length) {
+        const lowest = below.reduce((lo, x) => (x.balance < lo.balance ? x : lo));
+        items.push({ code, name: glName(code), monthEndsBelowZero: below.length, monthEnds: ends.length, lowest, below });
+      }
+    }
+    if (items.length) warnings.push({ id: 'negative_bank_month_end', items });
+  }
+
+  // (e) information: a liability account (2000–2599) in debit at the year end
+  const liabDebit = result.allCodes
+    .filter(c => c >= '2000' && c <= '2599')
+    .map(c => ({ code: c, name: glName(c), debit: debitNet(c) }))
+    .filter(x => x.debit > 0.005)
+    .sort((x, y) => (x.code < y.code ? -1 : 1));
+  if (liabDebit.length) warnings.push({ id: 'liability_debit', severity: 'info', items: liabDebit });
+
+  return warnings.map(w => ({ severity: 'warn', ...w }));
 }

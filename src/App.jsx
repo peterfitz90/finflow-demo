@@ -14651,7 +14651,9 @@ function FinancialStatements({ company, companyName }) {
     rawD, rawC, allCodes, acctBal, sumRng, fixedAssets, debtors, cashAtBank, currAssets, creditors, netCurrAssets, totAssetsLCL, shareCapital, retainedEarns, pnlJournals, pnlRawD, pnlRawC, pnlCodes, pnlAcctBal, pnlSumRng, turnover, cos, grossProfit, adminExp, opProfit, interest, pbt, pfYear,
   } = frs105;
   // Interim guard (STA-01): warnings only. Shown on screen, never printed.
-  const guardWarnings = generated ? frs105Warnings(journals, frs105, { bankCodes }) : [];
+  const guardWarnings = generated ? frs105Warnings(journals, frs105, { bankCodes, yearEnd }) : [];
+  const guardWarn = guardWarnings.filter(w => w.severity === 'warn');
+  const guardInfo = guardWarnings.filter(w => w.severity === 'info');
 
   useEffect(() => {
     if (!generated || allCodes.length === 0) return;
@@ -14858,10 +14860,10 @@ function FinancialStatements({ company, companyName }) {
       </div>
 
       {/* Interim guard (STA-01): warnings only, does not block, never printed */}
-      {guardWarnings.length > 0 && (
+      {guardWarn.length > 0 && (
         <div className="no-print" role="alert" style={{ marginBottom: 14, padding: "14px 16px", borderRadius: "var(--radius-sm)", border: "1px solid rgba(220,38,38,0.35)", borderLeft: "4px solid var(--red)", background: "rgba(220,38,38,0.06)", fontSize: 13, lineHeight: 1.6, color: "var(--text)" }}>
           <div style={{ fontWeight: 700, color: "var(--red)", marginBottom: 6 }}>Check these statements before relying on them</div>
-          {guardWarnings.map(w => (
+          {guardWarn.map(w => (
             <div key={w.id} style={{ marginTop: 8 }}>
               {w.id === 'absorbed' && <>
                 <strong>Balances not shown on any line.</strong> These balances are included in "Profit and loss account" on the balance sheet, because no statement line covers their account codes:
@@ -14878,9 +14880,30 @@ function FinancialStatements({ company, companyName }) {
                   {w.items.map(x => <li key={x.code}><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{x.code}</span>{x.name ? ` ${x.name}` : ''}: {fmtEUR(x.balance)}</li>)}
                 </ul>
               </>}
+              {w.id === 'negative_bank_month_end' && <>
+                <strong>Bank balance below zero at a month end during the year.</strong> This usually means opening balances or bank transactions are missing:
+                <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>
+                  {w.items.map(x => <li key={x.code}><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{x.code}</span>{x.name ? ` ${x.name}` : ''}: below zero at {x.monthEndsBelowZero} of {x.monthEnds} month ends; lowest {fmtEUR(x.lowest.balance)} on {fmtIE(x.lowest.date)}</li>)}
+                </ul>
+              </>}
             </div>
           ))}
           <div style={{ marginTop: 10, fontSize: 12, color: "var(--muted)" }}>These are warnings only. The statements below are generated as normal, and these warnings don't print.</div>
+        </div>
+      )}
+      {guardInfo.length > 0 && (
+        <div className="no-print" style={{ marginBottom: 14, padding: "12px 16px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border)", borderLeft: "4px solid var(--muted)", background: "var(--surface2)", fontSize: 13, lineHeight: 1.6, color: "var(--text)" }}>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>For information</div>
+          {guardInfo.map(w => (
+            <div key={w.id}>
+              {w.id === 'liability_debit' && <>
+                Liability accounts in debit at the year end. Check whether each is a genuine debit (for example a VAT refund due) or a missing opening balance:
+                <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>
+                  {w.items.map(x => <li key={x.code}><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{x.code}</span>{x.name ? ` ${x.name}` : ''}: {fmtEUR(x.debit)} Dr</li>)}
+                </ul>
+              </>}
+            </div>
+          ))}
         </div>
       )}
 

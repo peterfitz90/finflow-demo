@@ -1,6 +1,7 @@
 // STA-01 Stage 0 worklist: which limited companies and year ends trigger the FRS 105 interim
 // guard warnings (a) balances absorbed by the balancing figure, (b) no opening position,
-// (c) a bank nominal below zero at the year end. Same engine and guard code as the app.
+// (c) a bank nominal below zero at the year end, (d) below zero at any month end in the year,
+// and (e, information) liability accounts in debit at the year end. Same code as the app.
 // Read-only (paginated journal reads). Run for the last three year ends plus the current one:
 //
 //   node --env-file=.env --env-file=.env.service.local scripts/frs105-guard-report.mjs
@@ -35,7 +36,7 @@ for (const co of companies) {
   for (const [i, yearEnd] of yearEnds(yeMonth).entries()) {
     const { data: journals, error: jErr } = await fetchJournalsToDate(db, co.id, yearEnd);
     if (jErr) { console.error(`${co.name} ${yearEnd}: ${jErr.message}`); process.exit(2); }
-    const ws = frs105Warnings(journals, computeFrs105(journals, { yearEnd, yeMonth }), { bankCodes: bankCodes.length ? bankCodes : ['1000'] });
+    const ws = frs105Warnings(journals, computeFrs105(journals, { yearEnd, yeMonth }), { bankCodes: bankCodes.length ? bankCodes : ['1000'], yearEnd });
     const get = id => ws.find(w => w.id === id);
     rows.push({
       company: co.name,
@@ -44,6 +45,8 @@ for (const co of companies) {
       '(a) absorbed': get('absorbed')?.items.map(x => `${x.code} ${fmt(Math.abs(x.debitNet))} ${x.debitNet >= 0 ? 'Dr' : 'Cr'}`).join(', ') || '',
       '(b) no opening': get('no_opening') ? `first ${get('no_opening').firstJournal ?? 'none'} > start ${get('no_opening').periodStart}` : '',
       '(c) negative bank': get('negative_bank')?.items.map(x => `${x.code} ${fmt(x.balance)}`).join(', ') || '',
+      '(d) month-end negative': get('negative_bank_month_end')?.items.map(x => `${x.code} ${x.monthEndsBelowZero}/${x.monthEnds}, low ${fmt(x.lowest.balance)} ${x.lowest.date}`).join(', ') || '',
+      '(e) liabilities in debit (info)': get('liability_debit')?.items.map(x => `${x.code} ${fmt(x.debit)}`).join(', ') || '',
     });
   }
 }
