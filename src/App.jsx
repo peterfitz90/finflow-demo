@@ -25,6 +25,7 @@ import { NARROW_QUERY, matches as matchesMedia, goToMobile } from './shared/view
 import { BANK_NOMINAL_CODE, fetchNominalBalanceAsOf, fetchActiveBankNominals } from './shared/bankBalance.js';
 import { GL_ACCOUNTS, COA_SEED_SOLE_TRADER, COA_STATIC_FALLBACK, useChartOfAccounts } from './shared/chartOfAccounts.js';
 import { computeFrs105, frs105FiscalYear, fetchJournalsToDate, fetchChartForStatements, frs105Warnings } from './shared/statements/frs105.js';
+import { DISCLOSURES, LEGAL_FORMS, LEGAL_FORM_NOTE, informationRequired, ledgerEvidence, suggestion, fixedAssetClasses, directorsInOffice } from './shared/statements/statementInputs.js';
 import { useTransactionRules, preCleanDesc, applyRules } from './shared/txRules.js';
 import { suggestExpenseAccount, suggestExpenseVatCode, EXPENSE_VAT_CODES, VAT_SOURCE_LABEL } from './shared/expenseSuggest.js';
 import { CURRENCY_SYMBOLS, fmtCurrencyFull } from './shared/currency.js';
@@ -14614,6 +14615,247 @@ function Settings({ company, onUpdate, onNavigate }) {
   );
 }
 
+// ─── STATEMENT INPUTS PANEL (STA-01 Stage 3c) ────────────────────────────────────────────────
+// Accountant-only inputs and attestations for the FRS 105 statements (tables in
+// supabase/add_fs_inputs.sql; rules in src/shared/statements/statementInputs.js). Every
+// "nothing to disclose" is the accountant's own recorded attestation: a suggestion from the
+// ledger is only shown until confirmed, and last year's text is offered, never copied in.
+// The database stamps who attested and when. Not printed.
+function StatementInputsPanel({ company, yearEnd, regime = 'FRS105', inputs, evidence, assetClasses, onSaved }) {
+  const { profile, directors, yearInputs, disclosures, lastYear } = inputs;
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [prof, setProf] = useState({ legal_form: profile?.legal_form || '', registered_office: profile?.registered_office || '', country: profile?.country || '' });
+  const [year, setYear] = useState({
+    approval_date: yearInputs?.approval_date || '', average_employees: yearInputs?.average_employees ?? '',
+    signatory_ids: yearInputs?.signatory_ids || [], depreciation: { ...(yearInputs?.policy_inputs?.depreciation || {}) },
+  });
+  const [newDir, setNewDir] = useState({ full_name: '', appointed_on: '', resigned_on: '' });
+  const [drafts, setDrafts] = useState({}); // disclosure_key -> { mode: 'yes', narrative, section }
+  useEffect(() => {
+    setProf({ legal_form: profile?.legal_form || '', registered_office: profile?.registered_office || '', country: profile?.country || '' });
+  }, [profile]);
+  useEffect(() => {
+    setYear({ approval_date: yearInputs?.approval_date || '', average_employees: yearInputs?.average_employees ?? '',
+      signatory_ids: yearInputs?.signatory_ids || [], depreciation: { ...(yearInputs?.policy_inputs?.depreciation || {}) } });
+  }, [yearInputs]);
+
+  const byKey = Object.fromEntries(disclosures.map(d => [d.disclosure_key, d]));
+  const lastByKey = Object.fromEntries((lastYear || []).map(d => [d.disclosure_key, d]));
+  const attesterName = () => window.Clerk?.user?.fullName || window.Clerk?.user?.primaryEmailAddress?.emailAddress || null;
+  const run = async fn => {
+    setBusy(true); setErr(null);
+    try { await fn(); await onSaved(); } catch (e) { setErr(e.message || String(e)); }
+    setBusy(false);
+  };
+  const check = ({ error }) => { if (error) throw new Error(error.message); };
+
+  const saveProfile = () => run(async () => check(await supabase.from('company_statutory_profile').upsert({
+    company_id: company.id, legal_form: prof.legal_form || null, registered_office: prof.registered_office.trim() || null, country: prof.country.trim() || null,
+  }, { onConflict: 'company_id' })));
+  const addDirector = () => run(async () => {
+    if (!newDir.full_name.trim()) throw new Error('Enter the director\'s name.');
+    check(await supabase.from('company_directors').insert({ company_id: company.id, full_name: newDir.full_name.trim(), appointed_on: newDir.appointed_on || null, resigned_on: newDir.resigned_on || null }));
+    setNewDir({ full_name: '', appointed_on: '', resigned_on: '' });
+  });
+  const updateDirector = (d, patch) => run(async () => check(await supabase.from('company_directors').update(patch).eq('id', d.id).eq('company_id', company.id)));
+  const removeDirector = d => run(async () => check(await supabase.from('company_directors').delete().eq('id', d.id).eq('company_id', company.id)));
+  const saveYear = () => run(async () => check(await supabase.from('fs_year_inputs').upsert({
+    company_id: company.id, year_end_date: yearEnd, regime,
+    approval_date: year.approval_date || null,
+    average_employees: year.average_employees === '' ? null : Number(year.average_employees),
+    signatory_ids: year.signatory_ids,
+    policy_inputs: { ...(yearInputs?.policy_inputs || {}), depreciation: Object.fromEntries(Object.entries(year.depreciation).filter(([, v]) => String(v || '').trim())) },
+  }, { onConflict: 'company_id,year_end_date,regime' })));
+  const attest = (key, has_items, extra = {}) => supabase.from('fs_disclosures').upsert({
+    company_id: company.id, year_end_date: yearEnd, regime, disclosure_key: key, has_items,
+    details: extra.details || {}, narrative: extra.narrative || null, basis: extra.basis || 'entered', evidence: extra.evidence || {},
+    attested_by_name: attesterName(),
+  }, { onConflict: 'company_id,year_end_date,regime,disclosure_key' });
+  const attestNone = (key, sug) => run(async () => check(await attest(key, false, sug ? { basis: 'confirmed_suggestion', evidence: sug.evidence } : {})));
+  const attestYes = key => run(async () => {
+    const dr = drafts[key] || {};
+    const details = key === 'audit_exemption' ? { section: dr.section || '' } : {};
+    check(await attest(key, true, { narrative: (dr.narrative || '').trim() || null, details }));
+    setDrafts(p => ({ ...p, [key]: undefined }));
+  });
+  const removeAttestation = key => run(async () => check(await supabase.from('fs_disclosures').delete()
+    .eq('company_id', company.id).eq('year_end_date', yearEnd).eq('regime', regime).eq('disclosure_key', key)));
+
+  const suggestions = DISCLOSURES.filter(d => !byKey[d.key] && d.suggest).map(d => ({ d, sug: suggestion(d.suggest, evidence) })).filter(x => x.sug);
+  const confirmAllSuggested = () => run(async () => {
+    for (const { d, sug } of suggestions) check(await attest(d.key, false, { basis: 'confirmed_suggestion', evidence: sug.evidence }));
+  });
+
+  const approval = year.approval_date;
+  const inOffice = approval ? directorsInOffice(directors, approval) : directors;
+  const toggleSignatory = id => setYear(p => ({ ...p, signatory_ids: p.signatory_ids.includes(id) ? p.signatory_ids.filter(x => x !== id) : [...p.signatory_ids, id].slice(-2) }));
+  const box = { background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: "var(--radius-sm)", padding: "10px 12px", marginTop: 8 };
+  const sumStyle = { cursor: "pointer", fontWeight: 600, fontSize: 13, padding: "8px 0" };
+  const groups = [...new Set(DISCLOSURES.map(d => d.group))];
+
+  return (
+    <div className="card no-print" style={{ marginBottom: 14 }}>
+      <div className="card-header">
+        <span className="card-title">Statement inputs</span>
+        <span style={{ fontSize: 11, color: "var(--muted)" }}>Accountant only · saved for {companyNameOf(company)} · year ended {fmtIE(yearEnd)} · not printed</span>
+      </div>
+      <div className="card-body" style={{ fontSize: 13 }}>
+        {err && <div style={{ color: "var(--red)", marginBottom: 8 }}>Couldn't save: {err}</div>}
+
+        <details open>
+          <summary style={sumStyle}>Company</summary>
+          <div className="f-row" style={{ marginTop: 6 }}>
+            <div className="f-group">
+              <label className="f-label" htmlFor="fsi-legal-form">Legal form</label>
+              <select id="fsi-legal-form" className="f-input" value={prof.legal_form} onChange={e => setProf(p => ({ ...p, legal_form: e.target.value }))}>
+                <option value="">Choose…</option>
+                {LEGAL_FORMS.map(f => <option key={f.value} value={f.value}>{f.label}</option>)}
+              </select>
+              <div style={{ fontSize: 11, color: "var(--dim)", marginTop: 3 }}>{LEGAL_FORM_NOTE}</div>
+            </div>
+            <div className="f-group">
+              <label className="f-label" htmlFor="fsi-country">Country of incorporation</label>
+              <input id="fsi-country" className="f-input" value={prof.country} placeholder="Ireland" onChange={e => setProf(p => ({ ...p, country: e.target.value }))} />
+            </div>
+          </div>
+          <div className="f-group">
+            <label className="f-label" htmlFor="fsi-registered-office">Registered office</label>
+            <textarea id="fsi-registered-office" className="f-input" rows={2} value={prof.registered_office} onChange={e => setProf(p => ({ ...p, registered_office: e.target.value }))} />
+          </div>
+          <div style={{ display: "flex", gap: 16, flexWrap: "wrap", fontSize: 12, color: "var(--muted)", margin: "4px 0 8px" }}>
+            <span id="fsi-cro">Registered number: <strong style={{ color: "var(--text)" }}>{company.cro_number || 'not set'}</strong></span>
+            <span id="fsi-incorporation">Incorporation date: <strong style={{ color: "var(--text)" }}>{company.incorporation_date ? fmtIE(company.incorporation_date) : 'not set'}</strong></span>
+            <span>Edit these in Settings.</span>
+          </div>
+          <button className="btn btn-s btn-sm" disabled={busy} onClick={saveProfile}>Save company details</button>
+
+          <div id="fsi-directors" style={{ ...box }}>
+            <div style={{ fontWeight: 600, marginBottom: 6 }}>Directors</div>
+            {directors.length === 0 && <div style={{ color: "var(--muted)", marginBottom: 6 }}>No directors recorded.</div>}
+            {directors.map(d => (
+              <div key={d.id} style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 6 }}>
+                <span style={{ minWidth: 160 }}>{d.full_name}</span>
+                <label style={{ fontSize: 11, color: "var(--muted)" }}>Appointed <input type="date" className="f-input" style={{ width: 150, display: "inline-block" }} defaultValue={d.appointed_on || ''} onBlur={e => e.target.value !== (d.appointed_on || '') && updateDirector(d, { appointed_on: e.target.value || null })} /></label>
+                <label style={{ fontSize: 11, color: "var(--muted)" }}>Resigned <input type="date" className="f-input" style={{ width: 150, display: "inline-block" }} defaultValue={d.resigned_on || ''} onBlur={e => e.target.value !== (d.resigned_on || '') && updateDirector(d, { resigned_on: e.target.value || null })} /></label>
+                <button className="btn btn-s btn-sm" disabled={busy} onClick={() => removeDirector(d)}>Remove</button>
+              </div>
+            ))}
+            <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+              <input id="fsi-new-director" className="f-input" style={{ width: 200 }} placeholder="Director's full name" value={newDir.full_name} onChange={e => setNewDir(p => ({ ...p, full_name: e.target.value }))} />
+              <label style={{ fontSize: 11, color: "var(--muted)" }}>Appointed <input type="date" className="f-input" style={{ width: 150, display: "inline-block" }} value={newDir.appointed_on} onChange={e => setNewDir(p => ({ ...p, appointed_on: e.target.value }))} /></label>
+              <button className="btn btn-s btn-sm" disabled={busy} onClick={addDirector}>Add director</button>
+            </div>
+          </div>
+        </details>
+
+        <details open>
+          <summary style={sumStyle}>This year</summary>
+          <div className="f-row" style={{ marginTop: 6 }}>
+            <div className="f-group">
+              <label className="f-label" htmlFor="fsi-approval-date">Approval date</label>
+              <input id="fsi-approval-date" type="date" className="f-input" value={year.approval_date} onChange={e => setYear(p => ({ ...p, approval_date: e.target.value }))} />
+            </div>
+            <div className="f-group">
+              <label className="f-label" htmlFor="fsi-employees">Average number of employees</label>
+              <input id="fsi-employees" type="number" min="0" className="f-input" value={year.average_employees} onChange={e => setYear(p => ({ ...p, average_employees: e.target.value }))} />
+              <div style={{ fontSize: 11, color: "var(--dim)", marginTop: 3 }}>Used for the micro eligibility check only; not printed.</div>
+            </div>
+          </div>
+          <div id="fsi-signatories" style={{ marginBottom: 8 }}>
+            <div className="f-label">Signatories {approval ? `(directors in office on ${fmtIE(approval)})` : '(set the approval date first)'}</div>
+            {inOffice.length === 0 && <div style={{ color: "var(--muted)" }}>No directors in office{approval ? ' on that date' : ''}.</div>}
+            {inOffice.map(d => (
+              <label key={d.id} style={{ display: "inline-flex", gap: 6, alignItems: "center", marginRight: 14 }}>
+                <input type="checkbox" checked={year.signatory_ids.includes(d.id)} onChange={() => toggleSignatory(d.id)} /> {d.full_name}
+              </label>
+            ))}
+            {approval && inOffice.length === 1 && <div style={{ fontSize: 11, color: "var(--dim)", marginTop: 3 }}>One director in office on the approval date: the statements will be signed by the sole director.</div>}
+          </div>
+          {assetClasses.length > 0 && (
+            <div style={{ marginBottom: 8 }}>
+              <div className="f-label">Depreciation policy, by fixed-asset class with a balance or movements this year</div>
+              {assetClasses.map(cls => (
+                <div key={cls} style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 4 }}>
+                  <span style={{ fontFamily: "'Source Code Pro',monospace", width: 48 }}>{cls}</span>
+                  <span style={{ minWidth: 160 }}>{GL_ACCOUNTS.find(a => a.code === cls)?.name || ''}</span>
+                  <input id={`fsi-dep-${cls}`} className="f-input" style={{ width: 240 }} placeholder="e.g. 20% straight line" value={year.depreciation[cls] || ''} onChange={e => setYear(p => ({ ...p, depreciation: { ...p.depreciation, [cls]: e.target.value } }))} />
+                </div>
+              ))}
+            </div>
+          )}
+          <button className="btn btn-s btn-sm" disabled={busy} onClick={saveYear}>Save this year</button>
+        </details>
+
+        <details open>
+          <summary style={sumStyle}>Disclosures and attestations</summary>
+          {suggestions.length > 0 && (
+            <div style={{ ...box, borderLeft: "3px solid var(--accent)" }}>
+              <div style={{ marginBottom: 6 }}>The ledger shows nothing for {suggestions.length === 1 ? 'one item' : `${suggestions.length} items`} below. Each is suggested as "nothing to disclose" beside its evidence; confirming records your own attestation for each.</div>
+              <button className="btn btn-p btn-sm" disabled={busy} onClick={confirmAllSuggested}>Confirm all suggested ({suggestions.length})</button>
+            </div>
+          )}
+          {groups.map(g => (
+            <div key={g} style={{ marginTop: 10 }}>
+              <div style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", color: "var(--muted)" }}>{g}</div>
+              {DISCLOSURES.filter(d => d.group === g).map(d => {
+                const row = byKey[d.key];
+                const sug = !row && d.suggest ? suggestion(d.suggest, evidence) : null;
+                const last = lastByKey[d.key];
+                const dr = drafts[d.key];
+                return (
+                  <div key={d.key} id={`fsi-d-${d.key}`} style={box}>
+                    <div style={{ fontWeight: 600 }}>{d.title}</div>
+                    {row ? (
+                      <div style={{ marginTop: 4 }}>
+                        <div>{row.has_items ? d.yes : d.no}</div>
+                        {row.disclosure_key === 'audit_exemption' && row.has_items && <div>Section: {row.details?.section ? `s.${row.details.section}` : 'not chosen'}</div>}
+                        {row.narrative && <div style={{ whiteSpace: "pre-wrap", color: "var(--muted)", marginTop: 2 }}>{row.narrative}</div>}
+                        <div style={{ fontSize: 11, color: "var(--dim)", marginTop: 4 }}>
+                          Attested by {row.attested_by_name || row.attested_by} on {fmtIE(String(row.attested_at).slice(0, 10))}{row.basis === 'confirmed_suggestion' ? ' (confirmed from a ledger suggestion)' : ''}.
+                          {' '}<button className="btn btn-s btn-sm" disabled={busy} onClick={() => removeAttestation(d.key)}>Withdraw</button>
+                        </div>
+                      </div>
+                    ) : (
+                      <div style={{ marginTop: 4 }}>
+                        {sug && <div style={{ color: "var(--accent)", marginBottom: 4 }}>Suggested from the ledger: {sug.text}</div>}
+                        {last && <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 4 }}>Last year: {last.has_items ? d.yes : d.no}{last.narrative ? ` — ${last.narrative}` : ''}{' '}
+                          {last.narrative && <button className="btn btn-s btn-sm" onClick={() => setDrafts(p => ({ ...p, [d.key]: { mode: 'yes', narrative: last.narrative, section: last.details?.section || '' } }))}>Start from last year's text</button>}</div>}
+                        {!dr && (
+                          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                            <button className="btn btn-s btn-sm" disabled={busy} onClick={() => attestNone(d.key, sug)}>{sug ? 'Confirm: nothing to disclose' : 'Nothing to disclose'}</button>
+                            <button className="btn btn-s btn-sm" disabled={busy} onClick={() => setDrafts(p => ({ ...p, [d.key]: { mode: 'yes', narrative: '', section: '' } }))}>{d.key === 'audit_exemption' ? 'Claiming exemption' : 'There is something to disclose'}</button>
+                          </div>
+                        )}
+                        {dr && (
+                          <div>
+                            <div style={{ marginBottom: 4 }}>{d.yes}</div>
+                            {d.key === 'audit_exemption' && (
+                              <select className="f-input" style={{ width: 220, marginBottom: 6 }} value={dr.section || ''} onChange={e => setDrafts(p => ({ ...p, [d.key]: { ...dr, section: e.target.value } }))}>
+                                <option value="">Choose section…</option><option value="358">s.358</option><option value="359">s.359</option>
+                              </select>
+                            )}
+                            <textarea className="f-input" rows={3} placeholder="Details" value={dr.narrative} onChange={e => setDrafts(p => ({ ...p, [d.key]: { ...dr, narrative: e.target.value } }))} />
+                            <div style={{ display: "flex", gap: 8, marginTop: 6 }}>
+                              <button className="btn btn-p btn-sm" disabled={busy} onClick={() => attestYes(d.key)}>Save</button>
+                              <button className="btn btn-s btn-sm" onClick={() => setDrafts(p => ({ ...p, [d.key]: undefined }))}>Cancel</button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                );
+              })}
+            </div>
+          ))}
+        </details>
+      </div>
+    </div>
+  );
+}
+const companyNameOf = c => c?.name || 'this company';
+
 function FinancialStatements({ company, companyName }) {
   const baseCurrency = company?.base_currency || company?.currency || "EUR";
   const fmt    = (n) => fmtCurrency(n, baseCurrency);
@@ -14629,6 +14871,8 @@ function FinancialStatements({ company, companyName }) {
   const [accountants, setAccountants] = useState("");
   const [bankCodes,   setBankCodes]   = useState([BANK_NOMINAL_CODE]);
   const [chart,       setChart]       = useState([]);
+  const EMPTY_INPUTS = { profile: null, directors: [], yearInputs: null, disclosures: [], lastYear: [] };
+  const [fsInputs,    setFsInputs]    = useState(EMPTY_INPUTS);
 
   const yeMonth = company?.year_end_month || 12;
   const yearEndOptions = (() => {
@@ -14649,6 +14893,22 @@ function FinancialStatements({ company, companyName }) {
   // Fiscal year start for the SELECTED yearEnd: moved verbatim to src/shared/statements/frs105.js.
   const { yeSelYear, yearStartMonth, fyStartYear, fyStart } = frs105FiscalYear(yearEnd, yeMonth);
 
+  // Stage 3c inputs (accountant-only tables). The prior year end is the day before this year's start.
+  const loadInputs = async () => {
+    if (!company?.id || !yearEnd || !fyStart) return;
+    const priorYE = addDaysStr(fyStart, -1);
+    const [p, d, y, cur, prev] = await Promise.all([
+      supabase.from('company_statutory_profile').select('*').eq('company_id', company.id).maybeSingle(),
+      supabase.from('company_directors').select('*').eq('company_id', company.id).order('appointed_on', { nullsFirst: true }).order('full_name'),
+      supabase.from('fs_year_inputs').select('*').eq('company_id', company.id).eq('year_end_date', yearEnd).eq('regime', 'FRS105').maybeSingle(),
+      supabase.from('fs_disclosures').select('*').eq('company_id', company.id).eq('year_end_date', yearEnd).eq('regime', 'FRS105'),
+      supabase.from('fs_disclosures').select('*').eq('company_id', company.id).eq('year_end_date', priorYE).eq('regime', 'FRS105'),
+    ]);
+    const firstErr = [p, d, y, cur, prev].find(r => r.error);
+    if (firstErr) console.warn('[FinancialStatements] inputs load failed:', firstErr.error.message);
+    setFsInputs({ profile: p.data || null, directors: d.data || [], yearInputs: y.data || null, disclosures: cur.data || [], lastYear: prev.data || [] });
+  };
+
   const generate = async () => {
     if (!company?.id) return;
     setLoading(true);
@@ -14662,6 +14922,7 @@ function FinancialStatements({ company, companyName }) {
     setJournals(data || []);
     setBankCodes(activeBank.length ? activeBank : [BANK_NOMINAL_CODE]);
     setChart(chartRows || []);
+    await loadInputs();
     setGenerated(true);
     setLoading(false);
   };
@@ -14674,8 +14935,13 @@ function FinancialStatements({ company, companyName }) {
   const { rawD, rawC, allCodes, acctBal, cashAtBank, debtors, fixedAssets, creditors, shareCapital, totAssetsLCL, turnover, opProfit } = frs105.legacy;
   // Interim guard (STA-01): warnings only. Shown on screen, never printed.
   const guardWarnings = generated ? frs105Warnings(journals, frs105, { bankCodes, yearEnd, ledgerCompleteFrom: company?.ledger_complete_from || null }) : [];
-  // DRAFT watermark (prints): unmapped balances, an imbalance, or no opening position.
-  const isDraft = generated && (s3Unmapped.length > 0 || Math.abs(s3Imbalance) >= 0.005 || guardWarnings.some(w => w.id === 'no_opening'));
+  // Stage 3c: what the accountant still has to record, and the ledger evidence for suggestions.
+  const inputsEvidence = generated && fyStart ? ledgerEvidence(journals, { fyStart, yearEnd }) : null;
+  const assetClasses = generated && fyStart ? fixedAssetClasses(journals, { fyStart }) : [];
+  const infoRequired = generated ? informationRequired({ company: company || {}, ...fsInputs, assetClasses, yearEnd }) : [];
+  // DRAFT watermark (prints): unmapped balances, an imbalance, no opening position, or a required
+  // input missing.
+  const isDraft = generated && (s3Unmapped.length > 0 || Math.abs(s3Imbalance) >= 0.005 || guardWarnings.some(w => w.id === 'no_opening') || infoRequired.length > 0);
   const draftMark = isDraft ? (
     <div aria-hidden="true" style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none", overflow: "hidden", zIndex: 1 }}>
       <span style={{ transform: "rotate(-30deg)", fontSize: 96, fontWeight: 800, letterSpacing: "0.12em", color: "rgba(220,38,38,0.14)", fontFamily: "'Source Sans 3',system-ui,sans-serif", whiteSpace: "nowrap" }}>DRAFT</span>
@@ -14891,6 +15157,28 @@ function FinancialStatements({ company, companyName }) {
           <button className="btn btn-s btn-sm" onClick={() => setGenerated(false)}>← Settings</button>
         </div>
       </div>
+
+      {/* Information required (STA-01 Stage 3c): not printed */}
+      {infoRequired.length > 0 && (
+        <div className="no-print" role="status" style={{ marginBottom: 14, padding: "12px 16px", borderRadius: "var(--radius-sm)", border: "1px solid rgba(220,38,38,0.35)", borderLeft: "4px solid var(--red)", background: "rgba(220,38,38,0.04)", fontSize: 13, lineHeight: 1.6 }}>
+          <div style={{ fontWeight: 700, color: "var(--red)", marginBottom: 6 }}>Information required ({infoRequired.length}): these statements are marked DRAFT until it is recorded</div>
+          {[...new Set(infoRequired.map(m => m.section))].map(sec => (
+            <div key={sec} style={{ marginTop: 4 }}>
+              <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", color: "var(--muted)", marginRight: 8 }}>{sec}</span>
+              {infoRequired.filter(m => m.section === sec).map(m => (
+                <button key={m.key} className="btn btn-s btn-sm" style={{ margin: "2px 6px 2px 0" }}
+                  onClick={() => { const el = document.getElementById(m.field); if (el) { el.closest('details')?.setAttribute('open', ''); el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.focus?.(); } }}>
+                  {m.label}
+                </button>
+              ))}
+            </div>
+          ))}
+        </div>
+      )}
+      {inputsEvidence && (
+        <StatementInputsPanel key={`${company?.id}|${yearEnd}`} company={company} yearEnd={yearEnd} inputs={fsInputs}
+          evidence={inputsEvidence} assetClasses={assetClasses} onSaved={loadInputs} />
+      )}
 
       {/* Interim guard (STA-01): warnings only, does not block, never printed */}
       {guardWarn.length > 0 && (

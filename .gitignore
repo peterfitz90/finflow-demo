@@ -17,3 +17,6 @@ supabase-db-audit-*.pdf
 
 # Local-only helpers that use the service role key (e.g. the anon check's fixture verifier)
 scripts/*.local.mjs
+
+# Local regression golden files (client figures)
+tests/statements/*.local.json
