@@ -1,0 +1,69 @@
+{
+  "_comment": "What the anon check (scripts/anon-check.mjs) attacks. Refresh tables/functions/buckets after any migration that adds a table, function or bucket, using the SQL in scripts/anon-check.mjs (CATALOG_SQL). Anything the live API exposes that is missing here is still tested and reported as 'not in catalog'.",
+  "companies": {
+    "test": "5f4e4585-8937-4624-b0fc-079a8379a160",
+    "client": "59fc55e0-10ac-471b-a3e4-283ae510f1db"
+  },
+  "tables": [
+    "ap_invoices", "asset_depreciation_runs", "bank_accounts", "bank_connections", "bank_matches",
+    "bank_transactions", "chart_of_accounts", "checklists", "companies", "contracts", "customers",
+    "expenses", "fixed_assets", "invoice_lines", "invoice_sequences", "invoice_settings", "invoices",
+    "journal_attachments", "journals", "on_account_entries", "pending_business_owner_invites",
+    "period_lock_events", "period_signoff_events", "prior_year_balances", "provider_connections",
+    "public_stats", "recurring_journal_runs", "recurring_journals", "revenue_events",
+    "revenue_review_items", "settlement_allocations", "suggested_journals", "transaction_rules",
+    "user_company_access", "user_dashboard_layouts", "user_report_views", "vat_filing_requests",
+    "vat_returns"
+  ],
+  "views": [],
+  "functions": [
+    { "name": "apply_learned_rule", "args": ["p_company_id", "p_pattern", "p_match_type", "p_direction", "p_nominal_code", "p_nominal_name", "p_default_nominal"] },
+    { "name": "approve_ap_bill", "args": ["p_company_id", "p_bill_id", "p_gross", "p_nom_code", "p_vat_code", "p_date", "p_supplier", "p_invoice_ref", "p_net_amount", "p_vat_amount", "p_due_date"] },
+    { "name": "claim_invoice_number", "args": ["p_company_id", "p_type"] },
+    { "name": "claim_mailbox_slug", "args": ["p_company_id", "p_name"] },
+    { "name": "compute_automation_rollup", "args": ["window_days"] },
+    { "name": "confirm_journal_match", "args": ["p_company_id", "p_match_id", "p_bt_id"] },
+    { "name": "confirm_settlement", "args": ["p_company_id", "p_bt_id", "p_mode", "p_allocations", "p_on_account_party_type", "p_on_account_party_name"] },
+    { "name": "finalise_invoice", "args": ["p_company_id", "p_invoice_id", "p_lines", "p_payment_terms"] },
+    { "name": "get_locked_periods", "args": ["p_company_id"] },
+    { "name": "log_vat_refile", "args": ["p_company_id", "p_period_val"] },
+    { "name": "mark_ap_bill_paid", "args": ["p_company_id", "p_bill_id", "p_paid_amt", "p_date", "p_bank_account_nominal"] },
+    { "name": "nominal_balance_as_of", "args": ["p_company_id", "p_codes", "p_as_of"] },
+    { "name": "period_signoff_status", "args": ["p_company_id", "p_start", "p_end"] },
+    { "name": "post_asset_disposal", "args": ["p_company_id", "p_asset_id", "p_date", "p_accum_dep", "p_proceeds", "p_proceeds_nominal", "p_gain"] },
+    { "name": "regenerate_mailbox_slug", "args": ["p_company_id"] },
+    { "name": "request_vat_filing", "args": ["p_company_id", "p_period_val", "p_period_start", "p_period_end", "p_figures"] },
+    { "name": "resolve_vat_filing_request", "args": ["p_company_id", "p_period_val"] },
+    { "name": "search_bank_transactions", "args": ["p_company_id", "p_query"] },
+    { "name": "search_customers", "args": ["p_company_id", "p_query"] },
+    { "name": "search_invoices", "args": ["p_company_id", "p_query"] },
+    { "name": "search_journals", "args": ["p_company_id", "p_query"] },
+    { "name": "sign_off_period", "args": ["p_company_id", "p_period_start", "p_period_end", "p_note", "p_actor_name"] },
+    { "name": "slugify_company_name", "args": ["p_name"] },
+    { "name": "storage_path_company_id", "args": ["p_name"] },
+    { "name": "undo_learned_rule", "args": ["p_company_id", "p_rule_id", "p_applied_ids", "p_original_nominal"] },
+    { "name": "unfile_vat_return", "args": ["p_company_id", "p_period_val", "p_reason"] },
+    { "name": "user_company_ids", "args": [] },
+    { "name": "user_company_role", "args": ["p_company_id"] },
+    { "name": "user_is_accountant", "args": ["p_company_id"] },
+    { "name": "void_ar_invoice", "args": ["p_company_id", "p_invoice_id"] },
+    { "name": "withdraw_signoff", "args": ["p_company_id", "p_period_start", "p_period_end", "p_reason", "p_actor_name"] }
+  ],
+  "_anon_allowed_comment": "Functions anon may execute on purpose. Each is called with the client company and must return exactly 'expect' (nothing about any company). Every other function must be refused.",
+  "anon_allowed": {
+    "user_company_ids": { "args": {}, "expect": [] },
+    "user_company_role": { "args": { "p_company_id": "client" }, "expect": null },
+    "user_is_accountant": { "args": { "p_company_id": "client" }, "expect": false },
+    "slugify_company_name": { "args": { "p_name": "Anon Check Ltd" }, "expect": "anoncheckltd" }
+  },
+  "_anon_readable_comment": "Tables anon may read on purpose, limited to rows where the named column is null (shared reference data, no company). Any row with a value there is a FAIL.",
+  "anon_readable": {
+    "transaction_rules": "company_id"
+  },
+  "buckets": ["journal-attachments", "Ledgrly"],
+  "storage": {
+    "_comment": "read_object: a real client file (read and sign only, never deleted). delete_sentinel: a Fitzsimons Test object that exists only so anon delete has a real target.",
+    "read_object": { "bucket": "journal-attachments", "name": "ap/59fc55e0-10ac-471b-a3e4-283ae510f1db/93aab01a-04e6-461b-8ba2-9fb0643c25e5.pdf" },
+    "delete_sentinel": { "bucket": "journal-attachments", "name": "5f4e4585-8937-4624-b0fc-079a8379a160/anon-check/sentinel.txt" }
+  }
+}
