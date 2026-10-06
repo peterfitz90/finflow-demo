@@ -2483,7 +2483,7 @@ function Invoices({ companyName, companyId: propCid, company, onNavigate, isBusi
     if (!voidTarget) return;
     setVoiding(true); setVoidErr(null);
     const { error } = await supabase.from('invoices').delete()
-      .eq('id', voidTarget.inv.id).eq('company_id', cid);
+      .eq('id', voidTarget.inv.id).eq('company_id', cid).eq('status', 'draft');
     if (error) { setVoidErr(error.message); setVoiding(false); return; }
     setVoidTarget(null);
     await loadData();
