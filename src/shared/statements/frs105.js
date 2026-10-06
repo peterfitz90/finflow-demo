@@ -98,3 +98,47 @@ export function computeFrs105(journals, { yearEnd, yeMonth, mode = 'legacy' }) {
     rawD, rawC, allCodes, acctBal, sumRng, fixedAssets, debtors, cashAtBank, currAssets, creditors, netCurrAssets, totAssetsLCL, shareCapital, retainedEarns, pnlJournals, pnlRawD, pnlRawC, pnlCodes, pnlAcctBal, pnlSumRng, turnover, cos, grossProfit, adminExp, opProfit, interest, pbt, pfYear,
   };
 }
+
+// ── Interim guard (STA-01): warnings only, never blocks generation ─────────────────────────
+// The legacy statements put these code ranges on balance sheet lines and 4000–7999 on the P&L.
+// Any other balance is silently included in "Profit and loss account" (the balancing figure).
+// Same string comparison as the engine's sumRng, so "mapped" here means exactly what the
+// engine maps.
+export const FRS105_LEGACY_BS_RANGES = [['1000', '1099'], ['1100', '1299'], ['1500', '1599'], ['2000', '2399'], ['3000', '3099']];
+export const FRS105_LEGACY_PNL_RANGES = [['4000', '4999'], ['5000', '5999'], ['6000', '6999'], ['7000', '7999']];
+const inAnyRange = (code, ranges) => ranges.some(([f, t]) => code >= f && code <= t);
+const round2 = n => Math.round(n * 100) / 100;
+const glName = code => GL_ACCOUNTS.find(a => a.code === code)?.name || null;
+
+// journals: every journal up to the year end (fetchJournalsToDate). result: computeFrs105's
+// output for the same journals. bankCodes: the company's active bank nominals (fallback 1000).
+// Balances are debit minus credit, the same sum nominal_balance_as_of returns.
+export function frs105Warnings(journals, result, { bankCodes = ['1000'] } = {}) {
+  const warnings = [];
+  const debitNet = code => round2((result.rawD[code] || 0) - (result.rawC[code] || 0));
+
+  // (a) balances the balancing figure absorbs
+  const absorbed = result.allCodes
+    .filter(c => !inAnyRange(c, FRS105_LEGACY_BS_RANGES) && !inAnyRange(c, FRS105_LEGACY_PNL_RANGES))
+    .map(c => ({ code: c, name: glName(c), debitNet: debitNet(c) }))
+    .filter(x => Math.abs(x.debitNet) >= 0.005)
+    .sort((x, y) => (x.code < y.code ? -1 : 1));
+  if (absorbed.length) warnings.push({ id: 'absorbed', items: absorbed });
+
+  // (b) no opening position: no OPENING journal, and the ledger starts after the period start
+  if (result.fyStart) {
+    const hasOpening = journals.some(j => j.reference === 'OPENING');
+    const firstJournal = journals.reduce((min, j) => (min === null || j.date < min ? j.date : min), null);
+    if (!hasOpening && (firstJournal === null || firstJournal > result.fyStart)) {
+      warnings.push({ id: 'no_opening', firstJournal, periodStart: result.fyStart });
+    }
+  }
+
+  // (c) a bank nominal below zero at the year end
+  const negative = [...new Set(bankCodes)]
+    .map(c => ({ code: c, name: glName(c), balance: debitNet(c) }))
+    .filter(x => x.balance < -0.005);
+  if (negative.length) warnings.push({ id: 'negative_bank', items: negative });
+
+  return warnings;
+}

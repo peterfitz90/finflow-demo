@@ -24,7 +24,7 @@ import {
 import { NARROW_QUERY, matches as matchesMedia, goToMobile } from './shared/viewMode.js';
 import { BANK_NOMINAL_CODE, fetchNominalBalanceAsOf, fetchActiveBankNominals } from './shared/bankBalance.js';
 import { GL_ACCOUNTS, COA_SEED_SOLE_TRADER, COA_STATIC_FALLBACK, useChartOfAccounts } from './shared/chartOfAccounts.js';
-import { computeFrs105, frs105FiscalYear, fetchJournalsToDate } from './shared/statements/frs105.js';
+import { computeFrs105, frs105FiscalYear, fetchJournalsToDate, frs105Warnings } from './shared/statements/frs105.js';
 import { useTransactionRules, preCleanDesc, applyRules } from './shared/txRules.js';
 import { suggestExpenseAccount, suggestExpenseVatCode, EXPENSE_VAT_CODES, VAT_SOURCE_LABEL } from './shared/expenseSuggest.js';
 import { CURRENCY_SYMBOLS, fmtCurrencyFull } from './shared/currency.js';
@@ -14608,6 +14608,7 @@ function FinancialStatements({ company, companyName }) {
   const [regAddress,  setRegAddress]  = useState("");
   const [directors,   setDirectors]   = useState("");
   const [accountants, setAccountants] = useState("");
+  const [bankCodes,   setBankCodes]   = useState([BANK_NOMINAL_CODE]);
 
   const yeMonth = company?.year_end_month || 12;
   const yearEndOptions = (() => {
@@ -14633,17 +14634,24 @@ function FinancialStatements({ company, companyName }) {
     setLoading(true);
     // Inception-to-date (opening position + the year) — paged past the 1,000-row response cap,
     // id as the unique tiebreaker. Statutory figures: a truncated fetch here mis-states the accounts.
-    const { data } = await fetchJournalsToDate(supabase, company.id, yearEnd);
+    const [{ data }, activeBank] = await Promise.all([
+      fetchJournalsToDate(supabase, company.id, yearEnd),
+      fetchActiveBankNominals(company.id),
+    ]);
     setJournals(data || []);
+    setBankCodes(activeBank.length ? activeBank : [BANK_NOMINAL_CODE]);
     setGenerated(true);
     setLoading(false);
   };
 
   // FRS 105 figures: calculation moved verbatim to src/shared/statements/frs105.js (legacy mode,
   // so "Profit and loss account" is still the balancing figure).
+  const frs105 = computeFrs105(journals, { yearEnd, yeMonth, mode: 'legacy' });
   const {
     rawD, rawC, allCodes, acctBal, sumRng, fixedAssets, debtors, cashAtBank, currAssets, creditors, netCurrAssets, totAssetsLCL, shareCapital, retainedEarns, pnlJournals, pnlRawD, pnlRawC, pnlCodes, pnlAcctBal, pnlSumRng, turnover, cos, grossProfit, adminExp, opProfit, interest, pbt, pfYear,
-  } = computeFrs105(journals, { yearEnd, yeMonth, mode: 'legacy' });
+  } = frs105;
+  // Interim guard (STA-01): warnings only. Shown on screen, never printed.
+  const guardWarnings = generated ? frs105Warnings(journals, frs105, { bankCodes }) : [];
 
   useEffect(() => {
     if (!generated || allCodes.length === 0) return;
@@ -14833,7 +14841,7 @@ function FinancialStatements({ company, companyName }) {
   return (
     <div className="fade-up">
       {/* Toolbar */}
-      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
+      <div className="no-print" style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 16 }}>
         <div>
           <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 16, fontWeight: 700, color: "var(--text)" }}>
             {companyName} — FRS 105 Financial Statements
@@ -14848,6 +14856,33 @@ function FinancialStatements({ company, companyName }) {
           <button className="btn btn-s btn-sm" onClick={() => setGenerated(false)}>← Settings</button>
         </div>
       </div>
+
+      {/* Interim guard (STA-01): warnings only, does not block, never printed */}
+      {guardWarnings.length > 0 && (
+        <div className="no-print" role="alert" style={{ marginBottom: 14, padding: "14px 16px", borderRadius: "var(--radius-sm)", border: "1px solid rgba(220,38,38,0.35)", borderLeft: "4px solid var(--red)", background: "rgba(220,38,38,0.06)", fontSize: 13, lineHeight: 1.6, color: "var(--text)" }}>
+          <div style={{ fontWeight: 700, color: "var(--red)", marginBottom: 6 }}>Check these statements before relying on them</div>
+          {guardWarnings.map(w => (
+            <div key={w.id} style={{ marginTop: 8 }}>
+              {w.id === 'absorbed' && <>
+                <strong>Balances not shown on any line.</strong> These balances are included in "Profit and loss account" on the balance sheet, because no statement line covers their account codes:
+                <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>
+                  {w.items.map(x => <li key={x.code}><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{x.code}</span>{x.name ? ` ${x.name}` : ''}: {fmtEUR(Math.abs(x.debitNet))} {x.debitNet >= 0 ? 'Dr' : 'Cr'}</li>)}
+                </ul>
+              </>}
+              {w.id === 'no_opening' && <>
+                <strong>No opening balances.</strong> This company has no OPENING journal, and {w.firstJournal ? <>its first journal ({fmtIE(w.firstJournal)}) is after</> : <>it has no journals before</>} the start of this period ({fmtIE(w.periodStart)}). The balance sheet and the P&amp;L may be incomplete.
+              </>}
+              {w.id === 'negative_bank' && <>
+                <strong>Bank balance below zero at the year end.</strong> This usually means opening balances or bank transactions are missing:
+                <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>
+                  {w.items.map(x => <li key={x.code}><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{x.code}</span>{x.name ? ` ${x.name}` : ''}: {fmtEUR(x.balance)}</li>)}
+                </ul>
+              </>}
+            </div>
+          ))}
+          <div style={{ marginTop: 10, fontSize: 12, color: "var(--muted)" }}>These are warnings only. The statements below are generated as normal, and these warnings don't print.</div>
+        </div>
+      )}
 
       {/* Cover Page */}
       <div className="card" style={{ marginBottom: 14, pageBreakAfter: "always" }}>
@@ -14980,7 +15015,7 @@ function FinancialStatements({ company, companyName }) {
       </div>
 
       {/* Disclaimer */}
-      <div style={{ fontSize: 11, color: "var(--muted)", background: "rgba(184,134,11,0.05)", borderRadius: "var(--radius-sm)", padding: "12px 16px", borderLeft: "3px solid var(--gold)", lineHeight: 1.7, marginBottom: 14 }}>
+      <div className="no-print" style={{ fontSize: 11, color: "var(--muted)", background: "rgba(184,134,11,0.05)", borderRadius: "var(--radius-sm)", padding: "12px 16px", borderLeft: "3px solid var(--gold)", lineHeight: 1.7, marginBottom: 14 }}>
         ⚠ These statements have been prepared in accordance with the micro-entity provisions of FRS 105. They should be reviewed and approved by a qualified accountant before filing with the CRO.
       </div>
     </div>
