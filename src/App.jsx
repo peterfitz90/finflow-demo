@@ -14880,10 +14880,10 @@ function FinancialStatements({ company, companyName }) {
                   {w.items.map(x => <li key={x.code}><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{x.code}</span>{x.name ? ` ${x.name}` : ''}: {fmtEUR(x.balance)}</li>)}
                 </ul>
               </>}
-              {w.id === 'negative_bank_month_end' && <>
-                <strong>Bank balance below zero at a month end during the year.</strong> This usually means opening balances or bank transactions are missing:
+              {w.id === 'negative_bank_in_period' && <>
+                <strong>Bank balance below zero during the year.</strong> This usually means opening balances or bank transactions are missing:
                 <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>
-                  {w.items.map(x => <li key={x.code}><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{x.code}</span>{x.name ? ` ${x.name}` : ''}: below zero at {x.monthEndsBelowZero} of {x.monthEnds} month ends; lowest {fmtEUR(x.lowest.balance)} on {fmtIE(x.lowest.date)}</li>)}
+                  {w.items.map(x => <li key={x.code}><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{x.code}</span>{x.name ? ` ${x.name}` : ''}: below zero at the end of {x.daysBelowZero} of {x.daysInPeriod} days, first on {fmtIE(x.firstBelow)}; lowest {fmtEUR(x.lowest.balance)} on {fmtIE(x.lowest.date)}</li>)}
                 </ul>
               </>}
             </div>

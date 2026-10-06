@@ -111,19 +111,6 @@ const inAnyRange = (code, ranges) => ranges.some(([f, t]) => code >= f && code <
 const round2 = n => Math.round(n * 100) / 100;
 const glName = code => GL_ACCOUNTS.find(a => a.code === code)?.name || null;
 
-// Month-end dates from the period start through the year end, as YYYY-MM-DD.
-function monthEndsBetween(start, end) {
-  const out = [];
-  let [y, m] = start.split('-').map(Number);
-  for (;;) {
-    const me = monthEnd(y, m);
-    if (me > end) break;
-    out.push(me);
-    if (++m > 12) { m = 1; y++; }
-  }
-  return out;
-}
-
 // journals: every journal up to the year end (fetchJournalsToDate). result: computeFrs105's
 // output for the same journals. bankCodes: the company's active bank nominals (fallback 1000).
 // yearEnd: the statements' year end. Balances are debit minus credit, the same sum nominal_balance_as_of returns. Every rule works
@@ -156,30 +143,43 @@ export function frs105Warnings(journals, result, { bankCodes = ['1000'], yearEnd
     .filter(x => x.balance < -0.005);
   if (negative.length) warnings.push({ id: 'negative_bank', items: negative });
 
-  // (d) a bank nominal below zero at any month-end in the period (the year end included)
+  // (d) a bank nominal below zero at the end of any day in the period (the year end included).
+  // The balance only changes on days with movements, so it is checked after each such day and
+  // for the balance carried into the period; the days between keep the same balance.
   if (result.fyStart) {
     // The period runs to the year end; without one, 12 months from the period start (as the
     // legacy engine assumes).
     const [fy, fm] = result.fyStart.split('-').map(Number);
     const periodEnd = yearEnd || monthEnd(fm === 1 ? fy : fy + 1, fm === 1 ? 12 : fm - 1);
-    const ends = monthEndsBetween(result.fyStart, periodEnd);
+    const dayNo = d => Date.UTC(+d.slice(0, 4), +d.slice(5, 7) - 1, +d.slice(8, 10)) / 86400000;
+    const daysInPeriod = dayNo(periodEnd) - dayNo(result.fyStart) + 1;
     const items = [];
     for (const code of [...new Set(bankCodes)]) {
-      const moves = journals.filter(j => j.debit_account === code || j.credit_account === code)
-        .map(j => [j.date, (j.debit_account === code ? Number(j.amount) : 0) - (j.credit_account === code ? Number(j.amount) : 0)])
-        .sort((x, y) => (x[0] < y[0] ? -1 : x[0] > y[0] ? 1 : 0));
-      let bal = 0, i = 0;
-      const below = [];
-      for (const me of ends) {
-        while (i < moves.length && moves[i][0] <= me) bal += moves[i++][1];
-        if (round2(bal) < -0.005) below.push({ date: me, balance: round2(bal) });
+      const byDay = new Map();
+      let carried = 0;
+      for (const j of journals) {
+        if (j.debit_account !== code && j.credit_account !== code) continue;
+        const mv = (j.debit_account === code ? Number(j.amount) : 0) - (j.credit_account === code ? Number(j.amount) : 0);
+        if (j.date < result.fyStart) carried += mv;
+        else if (j.date <= periodEnd) byDay.set(j.date, (byDay.get(j.date) || 0) + mv);
       }
-      if (below.length) {
-        const lowest = below.reduce((lo, x) => (x.balance < lo.balance ? x : lo));
-        items.push({ code, name: glName(code), monthEndsBelowZero: below.length, monthEnds: ends.length, lowest, below });
-      }
+      // [date the balance takes effect, end-of-day balance], from the period start
+      const points = [];
+      let bal = carried;
+      const days = [...byDay.keys()].sort();
+      if (!days.length || days[0] > result.fyStart) points.push([result.fyStart, round2(bal)]);
+      for (const d of days) { bal += byDay.get(d); points.push([d, round2(bal)]); }
+      let daysBelowZero = 0, firstBelow = null, lowest = null;
+      points.forEach(([d, b], k) => {
+        if (b >= -0.005) return;
+        const until = k + 1 < points.length ? dayNo(points[k + 1][0]) : dayNo(periodEnd) + 1;
+        daysBelowZero += until - dayNo(d);
+        if (!firstBelow) firstBelow = d;
+        if (!lowest || b < lowest.balance) lowest = { date: d, balance: b };
+      });
+      if (daysBelowZero) items.push({ code, name: glName(code), daysBelowZero, daysInPeriod, firstBelow, lowest });
     }
-    if (items.length) warnings.push({ id: 'negative_bank_month_end', items });
+    if (items.length) warnings.push({ id: 'negative_bank_in_period', items });
   }
 
   // (e) information: a liability account (2000–2599) in debit at the year end

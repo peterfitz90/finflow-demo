@@ -1,6 +1,6 @@
 // STA-01 Stage 0 worklist: which limited companies and year ends trigger the FRS 105 interim
 // guard warnings (a) balances absorbed by the balancing figure, (b) no opening position,
-// (c) a bank nominal below zero at the year end, (d) below zero at any month end in the year,
+// (c) a bank nominal below zero at the year end, (d) below zero at the end of any day in the year,
 // and (e, information) liability accounts in debit at the year end. Same code as the app.
 // Read-only (paginated journal reads). Run for the last three year ends plus the current one:
 //
@@ -45,7 +45,7 @@ for (const co of companies) {
       '(a) absorbed': get('absorbed')?.items.map(x => `${x.code} ${fmt(Math.abs(x.debitNet))} ${x.debitNet >= 0 ? 'Dr' : 'Cr'}`).join(', ') || '',
       '(b) no opening': get('no_opening') ? `first ${get('no_opening').firstJournal ?? 'none'} > start ${get('no_opening').periodStart}` : '',
       '(c) negative bank': get('negative_bank')?.items.map(x => `${x.code} ${fmt(x.balance)}`).join(', ') || '',
-      '(d) month-end negative': get('negative_bank_month_end')?.items.map(x => `${x.code} ${x.monthEndsBelowZero}/${x.monthEnds}, low ${fmt(x.lowest.balance)} ${x.lowest.date}`).join(', ') || '',
+      '(d) negative during year': get('negative_bank_in_period')?.items.map(x => `${x.code} ${x.daysBelowZero}/${x.daysInPeriod} days, low ${fmt(x.lowest.balance)} ${x.lowest.date}`).join(', ') || '',
       '(e) liabilities in debit (info)': get('liability_debit')?.items.map(x => `${x.code} ${fmt(x.debit)}`).join(', ') || '',
     });
   }
