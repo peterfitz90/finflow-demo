@@ -13388,7 +13388,11 @@ function guessVatCode(code, salesVatCode) {
   return 'STD23';
 }
 
-function Settings({ company, onUpdate, onNavigate }) {
+// Days a year-end day may take in a month (February allows 29, as the companies check does; a
+// non-leap year reads 29 as the 28th, see src/shared/statements/periods.js).
+const daysInYeMonth = m => (Number(m) === 2 ? 29 : [4, 6, 9, 11].includes(Number(m)) ? 30 : 31);
+
+function Settings({ company, onUpdate, onNavigate, companyRole }) {
   const { user } = useUser();
   const blank = () => ({
     name:            company?.name            || "",
@@ -13399,6 +13403,7 @@ function Settings({ company, onUpdate, onNavigate }) {
     vat_period:      company?.vat_period      || "bimonthly",
     ros_efiler:      company?.ros_efiler      ?? false,
     year_end_month:  company?.year_end_month  || 12,
+    fy_end_day:      company?.fy_end_day      ?? "",
     ard_month:       company?.ard_month       || "",
     ard_day:         company?.ard_day         || "",
     currency:        company?.base_currency    || company?.currency || "EUR",
@@ -13728,6 +13733,8 @@ function Settings({ company, onUpdate, onNavigate }) {
         vat_period:      form.vat_period,
         ros_efiler:      form.ros_efiler,
         year_end_month:  Number(form.year_end_month),
+        // Year-end day (STA-01 Stage 4a): accountant-only, enforced in the database too.
+        ...(companyRole === 'accountant' ? { fy_end_day: form.fy_end_day === "" ? null : Number(form.fy_end_day) } : {}),
         ard_month:       form.ard_month ? Number(form.ard_month) : null,
         ard_day:         form.ard_day   ? Number(form.ard_day)   : null,
         currency:        form.currency,
@@ -13838,9 +13845,22 @@ function Settings({ company, onUpdate, onNavigate }) {
             <div className="f-group">
               <label className="f-label">Accounting Year End</label>
               <select className="f-input" value={form.year_end_month}
-                onChange={e => setForm(p => ({ ...p, year_end_month: e.target.value }))}>
+                onChange={e => setForm(p => ({ ...p, year_end_month: e.target.value, fy_end_day: p.fy_end_day !== "" && Number(p.fy_end_day) > daysInYeMonth(e.target.value) ? "" : p.fy_end_day }))}>
                 {SETTINGS_MONTHS.map((m, i) => <option key={i} value={i+1}>{m}</option>)}
               </select>
+            </div>
+            <div className="f-group">
+              <label className="f-label" htmlFor="settings-fy-end-day">Year-end day</label>
+              {companyRole === 'accountant' ? (
+                <select id="settings-fy-end-day" className="f-input" value={form.fy_end_day}
+                  onChange={e => setForm(p => ({ ...p, fy_end_day: e.target.value }))}>
+                  <option value="">Last day of the month</option>
+                  {Array.from({ length: daysInYeMonth(form.year_end_month) }, (_, i) => <option key={i} value={i + 1}>{i + 1}</option>)}
+                </select>
+              ) : (
+                <div className="f-input" style={{ background: "transparent" }}>{form.fy_end_day === "" ? "Last day of the month" : form.fy_end_day}</div>
+              )}
+              <div style={{ fontSize: 11, color: "var(--dim)", marginTop: 3 }}>The day of the year-end month the financial year ends. Set by the accountant.</div>
             </div>
           </div>
         </div>
@@ -15037,6 +15057,10 @@ function FinancialStatements({ company, companyName }) {
 
   const yeDate  = new Date(yearEnd + "T00:00:00");
   const yeFmt   = yeDate.toLocaleDateString("en-IE", { day: "numeric", month: "long", year: "numeric" });
+  // Stage 4a: a period other than 12 months is described by its dates, not as a year.
+  const longFmt = d => new Date(d + "T00:00:00").toLocaleDateString("en-IE", { day: "numeric", month: "long", year: "numeric" });
+  const notAYear = selectedPeriod && selectedPeriod.months !== 12;
+  const periodPhrase = notAYear ? `period from ${longFmt(selectedPeriod.start)} to ${yeFmt}` : `year ended ${yeFmt}`;
   const yeYear  = yeDate.getFullYear();
   const expDate = fmtIE(localToday());
 
@@ -15078,12 +15102,12 @@ function FinancialStatements({ company, companyName }) {
   );
 
   const exportCSV = () => downloadCSV(`frs105-${yeYear}.csv`, [
-    ["FRS 105 Financial Statements", companyName, `Year ended ${yeFmt}`],
+    ["FRS 105 Financial Statements", companyName, periodPhrase.charAt(0).toUpperCase() + periodPhrase.slice(1)],
     ["Company Registration No.", company?.cro_number || "—"],
     ["Exported", expDate],
     isDraft ? ["DRAFT"] : [],
     [],
-    ["PROFIT AND LOSS ACCOUNT FOR YEAR ENDED", yeFmt],
+    [notAYear ? "PROFIT AND LOSS ACCOUNT FOR THE PERIOD" : "PROFIT AND LOSS ACCOUNT FOR YEAR ENDED", notAYear ? `${longFmt(selectedPeriod.start)} to ${yeFmt}` : yeFmt],
     [], [" ", "€"],
     ["Turnover", fa(s3pnl['1'].amount)],
     s3pnl['2'].amount !== 0 ? ["Other income", fa(s3pnl['2'].amount)] : [],
@@ -15202,7 +15226,7 @@ function FinancialStatements({ company, companyName }) {
             {companyName} — FRS 105 Financial Statements
           </div>
           <div style={{ fontSize: 11, color: "var(--muted)", fontFamily: "'Source Code Pro',monospace", marginTop: 2 }}>
-            Year ended {yeFmt} · {journals.length} journal entries loaded
+            {periodPhrase.charAt(0).toUpperCase() + periodPhrase.slice(1)} · {journals.length} journal entries loaded
           </div>
           <div style={{ marginTop: 4 }}><SignoffBadge companyId={company?.id} from={fyStart} to={yearEnd} /></div>
         </div>
@@ -15333,7 +15357,7 @@ function FinancialStatements({ company, companyName }) {
           <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 700, marginBottom: 6 }}>{companyName}</div>
           <div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "monospace", marginBottom: 4 }}>Registered number {company?.cro_number || '[Information required: registered number]'}</div>
           <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 18, fontWeight: 600, marginTop: 24, marginBottom: 6 }}>Financial Statements</div>
-          <div style={{ fontSize: 14, color: "var(--muted)", marginBottom: 4 }}>for the year ended {yeFmt}</div>
+          <div style={{ fontSize: 14, color: "var(--muted)", marginBottom: 4 }}>for the {periodPhrase}</div>
           <div style={{ fontSize: 11, color: "var(--dim)", fontFamily: "monospace", marginTop: 6 }}>Prepared under FRS 105 — Micro-entities Regime</div>
           {accountants && <div style={{ marginTop: 28, paddingTop: 14, borderTop: "1px solid var(--border)", fontSize: 12, color: "var(--muted)" }}><strong>Accountants:</strong> {accountants}</div>}
         </div>
@@ -15347,7 +15371,7 @@ function FinancialStatements({ company, companyName }) {
         {draftMark}
         <div className="card-header">
           <span className="card-title">Profit and Loss Account</span>
-          <span style={{ fontSize: 10, fontFamily: "'Source Code Pro',monospace", color: "var(--muted)", letterSpacing: "0.06em" }}>FOR THE YEAR ENDED {yeFmt.toUpperCase()}</span>
+          <span style={{ fontSize: 10, fontFamily: "'Source Code Pro',monospace", color: "var(--muted)", letterSpacing: "0.06em" }}>FOR THE {periodPhrase.toUpperCase()}</span>
         </div>
         <div className="card-body">
           {amtCols()}
@@ -21991,7 +22015,7 @@ export default function App() {
                   {page === "payroll-import"    && <BrightPayImporter companyId={company?.id} />}
                   {page === "opening-balances" && <OpeningBalances companyId={company?.id} />}
                   {page === "fixed-assets"   && <FixedAssets companyId={company?.id} company={company} onNavigate={setPage} selPeriod={selPeriod} />}
-                  {page === "settings"       && <Settings company={company} onUpdate={c => { setCompany(c); setCompanies(prev => prev.map(x => x.id === c.id ? c : x)); }} onNavigate={setPage} />}
+                  {page === "settings"       && <Settings company={company} companyRole={companyRole} onUpdate={c => { setCompany(c); setCompanies(prev => prev.map(x => x.id === c.id ? c : x)); }} onNavigate={setPage} />}
                 </>
               )}
             </div>
