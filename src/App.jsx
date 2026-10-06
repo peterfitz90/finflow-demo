@@ -25,6 +25,7 @@ import { NARROW_QUERY, matches as matchesMedia, goToMobile } from './shared/view
 import { BANK_NOMINAL_CODE, fetchNominalBalanceAsOf, fetchActiveBankNominals } from './shared/bankBalance.js';
 import { GL_ACCOUNTS, COA_SEED_SOLE_TRADER, COA_STATIC_FALLBACK, useChartOfAccounts } from './shared/chartOfAccounts.js';
 import { computeFrs105, frs105FiscalYear, fetchJournalsToDate, fetchChartForStatements, frs105Warnings } from './shared/statements/frs105.js';
+import { listPeriods, isYearEnd } from './shared/statements/periods.js';
 import { microEligibility } from './shared/statements/eligibility.js';
 import { balanceSheetStatements, statementNotes } from './shared/statements/wording.js';
 import { MICRO } from './shared/statements/thresholds.js';
@@ -14895,23 +14896,38 @@ function FinancialStatements({ company, companyName }) {
   const [fsInputs,    setFsInputs]    = useState(EMPTY_INPUTS);
 
   const yeMonth = company?.year_end_month || 12;
-  const yearEndOptions = (() => {
-    const now = new Date();
-    const thisYE = new Date(now.getFullYear(), yeMonth, 0);
-    const startYear = thisYE <= now ? now.getFullYear() : now.getFullYear() - 1;
-    return Array.from({ length: 3 }, (_, i) => {
-      const y = startYear - i;
-      const d = new Date(y, yeMonth, 0);
-      return {
-        val: localDateStr(d),
-        label: d.toLocaleDateString("en-IE", { day: "numeric", month: "long", year: "numeric" }),
-      };
+  const fyEndDay = company?.fy_end_day ?? null;
+  // Stage 4a: recorded financial periods (accountant-only; empty for anyone else) and every OPENING
+  // journal of the company, whatever its date, for the guard's OPENING-date rule.
+  const [periodRows,   setPeriodRows]   = useState([]);
+  const [openingJnls,  setOpeningJnls]  = useState([]);
+  useEffect(() => {
+    if (!company?.id) return;
+    let live = true;
+    Promise.all([
+      supabase.from('financial_periods').select('period_start, period_end, kind, reason').eq('company_id', company.id).order('period_end', { ascending: false }),
+      supabase.from('journals').select('id, date, reference').eq('company_id', company.id).eq('reference', 'OPENING').order('date'),
+    ]).then(([p, o]) => {
+      if (!live) return;
+      if (p.error) console.warn('[FinancialStatements] periods load failed:', p.error.message);
+      if (o.error) console.warn('[FinancialStatements] OPENING journals load failed:', o.error.message);
+      setPeriodRows(p.data || []);
+      setOpeningJnls(o.data || []);
     });
-  })();
+    return () => { live = false; };
+  }, [company?.id]);
+  // Recorded periods first, then the three most recent regular years ended (src/shared/statements/periods.js).
+  const yearEndOptions = listPeriods({ yeMonth, fyEndDay, periods: periodRows, today: localToday() });
   const [yearEnd, setYearEnd] = useState(yearEndOptions[0]?.val || "");
+  useEffect(() => {
+    if (yearEndOptions.length && !yearEndOptions.some(o => o.val === yearEnd)) setYearEnd(yearEndOptions[0].val);
+  }, [yearEndOptions.map(o => o.val).join()]); // eslint-disable-line react-hooks/exhaustive-deps
+  const selectedPeriod = yearEndOptions.find(o => o.val === yearEnd) || null;
+  const isCompanyYearEnd = d => isYearEnd(d, { yeMonth, fyEndDay, periods: periodRows });
 
-  // Fiscal year start for the SELECTED yearEnd: moved verbatim to src/shared/statements/frs105.js.
-  const { yeSelYear, yearStartMonth, fyStartYear, fyStart } = frs105FiscalYear(yearEnd, yeMonth);
+  // Period start for the SELECTED year end: from the period list (year ends on any day, periods
+  // other than 12 months); the old month-based start only if the selection is not in the list.
+  const fyStart = selectedPeriod?.start || frs105FiscalYear(yearEnd, yeMonth).fyStart;
 
   // Stage 3c inputs (accountant-only tables). The prior year end is the day before this year's start.
   const loadInputs = async () => {
@@ -14950,11 +14966,11 @@ function FinancialStatements({ company, companyName }) {
   // FRS 105 figures in the Schedule 3B formats (src/shared/statements/schedule3b.js): every nominal
   // mapped to one line, reserves derived from the ledger, no balancing figure. frs105.legacy is the
   // old calculation, kept for the debug log below and the regression script only.
-  const frs105 = computeFrs105(journals, { yearEnd, yeMonth, mode: 'schedule3b', chart });
+  const frs105 = computeFrs105(journals, { yearEnd, yeMonth, periodStart: fyStart, mode: 'schedule3b', chart });
   const { bs: s3bs, pnl: s3pnl, profit: pfYear, imbalance: s3Imbalance, unmapped: s3Unmapped } = frs105;
   const { rawD, rawC, allCodes, acctBal, cashAtBank, debtors, fixedAssets, creditors, shareCapital, totAssetsLCL, turnover, opProfit } = frs105.legacy;
   // Interim guard (STA-01): warnings only. Shown on screen, never printed.
-  const guardWarnings = generated ? frs105Warnings(journals, frs105, { bankCodes, yearEnd, ledgerCompleteFrom: company?.ledger_complete_from || null }) : [];
+  const guardWarnings = generated ? frs105Warnings(journals, frs105, { bankCodes, yearEnd, ledgerCompleteFrom: company?.ledger_complete_from || null, isYearEnd: isCompanyYearEnd, openingJournals: openingJnls }) : [];
   // Stage 3c: what the accountant still has to record, and the ledger evidence for suggestions.
   const inputsEvidence = generated && fyStart ? ledgerEvidence(journals, { fyStart, yearEnd }) : null;
   const assetClasses = generated && fyStart ? fixedAssetClasses(journals, { fyStart }) : [];
@@ -14984,6 +15000,7 @@ function FinancialStatements({ company, companyName }) {
   // Stage 3e: micro eligibility from the ledger plus inputs and attestations. Warn only.
   const eligibility = generated ? microEligibility({
     turnover: s3pnl['1'].amount,
+    periodMonths: selectedPeriod?.months ?? 12,
     grossAssets: Math.round((s3bs.A.amount + s3bs.B.amount + s3bs.C.amount + s3bs.D.amount) * 100) / 100,
     employees: fsInputs.yearInputs?.average_employees ?? null,
     legalForm: fsInputs.profile?.legal_form || null,
@@ -15160,6 +15177,7 @@ function FinancialStatements({ company, companyName }) {
               <select className="f-input" value={yearEnd} onChange={e => setYearEnd(e.target.value)}>
                 {yearEndOptions.map(o => <option key={o.val} value={o.val}>{o.label}</option>)}
               </select>
+              {selectedPeriod && <div style={{ fontSize: 11, color: "var(--dim)", marginTop: 3 }}>Period {fmtIE(selectedPeriod.start)} to {fmtIE(selectedPeriod.end)}{selectedPeriod.months !== 12 ? ` (${selectedPeriod.months} months)` : ''}</div>}
             </div>
             <div className="f-group">
               <label className="f-label">Accountants / Firm</label>
@@ -15259,6 +15277,12 @@ function FinancialStatements({ company, companyName }) {
               </>}
               {w.id === 'imbalance' && <>
                 <strong>The balance sheet does not balance.</strong> Net assets differ from capital and reserves by {fmtEUR(w.amount)}, the total of the balances above. It is shown on the balance sheet, not hidden in reserves.
+              </>}
+              {w.id === 'opening_after_year_end' && <>
+                <strong>Opening balances dated the day after a year end.</strong> An OPENING journal holds the closing position of a year end, so it belongs on that date. Dated a day later it is left out of that year end's balance sheet and counted in the following year:
+                <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>
+                  {w.items.map(x => <li key={x.date}>{x.count} OPENING journal{x.count === 1 ? '' : 's'} dated {fmtIE(x.date)}, the day after the year end {fmtIE(x.yearEnd)}</li>)}
+                </ul>
               </>}
               {w.id === 'no_opening' && <>
                 <strong>No opening balances.</strong> This company has no OPENING journal, and {w.firstJournal ? <>its first journal ({fmtIE(w.firstJournal)}) is after</> : <>it has no journals before</>} the start of this period ({fmtIE(w.periodStart)}). The balance sheet and the P&amp;L may be incomplete.

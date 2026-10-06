@@ -13,7 +13,7 @@
 import { LEGACY_GL_ACCOUNTS as GL_ACCOUNTS } from './legacyGlAccounts.js';
 import { GL_ACCOUNTS as CURRENT_GL_ACCOUNTS } from '../glAccounts.js';
 import { fetchAllRows } from '../fetchAllRows.js';
-import { monthEnd } from '../dates.js';
+import { monthEnd, addDaysStr } from '../dates.js';
 import { computeSchedule3b, MAPPING as S3B_MAPPING } from './schedule3b.js';
 
 export const FRS105_MODES = ['legacy', 'schedule3b'];
@@ -43,14 +43,19 @@ export function frs105FiscalYear(yearEnd, yeMonth) {
   return { yeSelYear, yearStartMonth, fyStartYear, fyStart };
 }
 
-export function computeFrs105(journals, { yearEnd, yeMonth, mode = 'legacy', chart = [] }) {
+// periodStart (schedule3b only, STA-01 Stage 4a): the first day of the period ending on yearEnd,
+// for year ends on any day and periods other than 12 months (src/shared/statements/periods.js).
+// Omitted, the period starts on the 1st of the month after yeMonth, as before. Legacy mode keeps
+// its signature and ignores it, so the regression against the pre-extraction code stays exact.
+export function computeFrs105(journals, { yearEnd, yeMonth, periodStart = null, mode = 'legacy', chart = [] }) {
   if (!FRS105_MODES.includes(mode)) throw new Error(`Unknown FRS 105 mode: ${mode}`);
   if (mode === 'schedule3b') {
     // The legacy result supplies the per-code totals the guard uses; its figures are not shown.
     const legacy = computeFrs105(journals, { yearEnd, yeMonth, mode: 'legacy' });
+    const fyStart = periodStart || legacy.fyStart;
     return {
-      mode, fyStart: legacy.fyStart, rawD: legacy.rawD, rawC: legacy.rawC, allCodes: legacy.allCodes, legacy,
-      ...computeSchedule3b(journals, { fyStart: legacy.fyStart, yearEnd, chart }),
+      mode, fyStart, rawD: legacy.rawD, rawC: legacy.rawC, allCodes: legacy.allCodes, legacy,
+      ...computeSchedule3b(journals, { fyStart, yearEnd, chart }),
     };
   }
   const { fyStart } = frs105FiscalYear(yearEnd, yeMonth);
@@ -134,7 +139,11 @@ const glName = code => CURRENT_GL_ACCOUNTS.find(a => a.code === code)?.name || n
 // yearEnd: the statements' year end. Balances are debit minus credit, the same sum nominal_balance_as_of returns. Every rule works
 // on this one paginated journal set: no further queries, none per month.
 // Each warning has severity 'warn', except 'liability_debit' and 'asset_credit', which are 'info'.
-export function frs105Warnings(journals, result, { bankCodes = ['1000'], yearEnd = null, ledgerCompleteFrom = null } = {}) {
+// isYearEnd: date => boolean, the company's year ends (periods.js isYearEnd); omitted, the
+// OPENING-date rule (g) is not checked. openingJournals: every OPENING journal of the company,
+// whatever its date (the journals above stop at the year end, so an OPENING journal dated the
+// day after it would otherwise never be seen); omitted, those among journals.
+export function frs105Warnings(journals, result, { bankCodes = ['1000'], yearEnd = null, ledgerCompleteFrom = null, isYearEnd = null, openingJournals = null } = {}) {
   const warnings = [];
   const debitNet = code => round2((result.rawD[code] || 0) - (result.rawC[code] || 0));
 
@@ -235,6 +244,19 @@ export function frs105Warnings(journals, result, { bankCodes = ['1000'], yearEnd
     if (bal < -0.005) assetCredit.push({ code: cls, name: glName(cls), credit: round2(-bal), kind: 'fixed-asset class' });
   }
   if (assetCredit.length) warnings.push({ id: 'asset_credit', severity: 'info', items: assetCredit.sort((x, y) => (x.code < y.code ? -1 : 1)) });
+
+  // (g) an OPENING journal dated the day after a year end: it holds the closing position of that
+  // year end, so it belongs on the year end itself; dated a day later it is left out of that
+  // year end's balance sheet and counted in the next year. An OPENING journal on any other day is
+  // not flagged: a ledger can legitimately start mid-year (Peter, Stage 4a).
+  if (isYearEnd) {
+    const opening = (openingJournals || journals).filter(j => j.reference === 'OPENING');
+    const items = [...new Set(opening.map(j => j.date))]
+      .filter(d => isYearEnd(addDaysStr(d, -1)))
+      .sort()
+      .map(d => ({ date: d, yearEnd: addDaysStr(d, -1), count: opening.filter(j => j.date === d).length }));
+    if (items.length) warnings.push({ id: 'opening_after_year_end', items });
+  }
 
   return warnings.map(w => ({ severity: 'warn', ...w }));
 }
