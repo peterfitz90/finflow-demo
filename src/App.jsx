@@ -24,6 +24,7 @@ import {
 import { NARROW_QUERY, matches as matchesMedia, goToMobile } from './shared/viewMode.js';
 import { BANK_NOMINAL_CODE, fetchNominalBalanceAsOf, fetchActiveBankNominals } from './shared/bankBalance.js';
 import { GL_ACCOUNTS, COA_SEED_SOLE_TRADER, COA_STATIC_FALLBACK, useChartOfAccounts } from './shared/chartOfAccounts.js';
+import { computeFrs105, frs105FiscalYear, fetchJournalsToDate } from './shared/statements/frs105.js';
 import { useTransactionRules, preCleanDesc, applyRules } from './shared/txRules.js';
 import { suggestExpenseAccount, suggestExpenseVatCode, EXPENSE_VAT_CODES, VAT_SOURCE_LABEL } from './shared/expenseSuggest.js';
 import { CURRENCY_SYMBOLS, fmtCurrencyFull } from './shared/currency.js';
@@ -14624,83 +14625,25 @@ function FinancialStatements({ company, companyName }) {
   })();
   const [yearEnd, setYearEnd] = useState(yearEndOptions[0]?.val || "");
 
-  // Fiscal year start for the SELECTED yearEnd — same yearStartMonth logic GLReport's ytdStart
-  // uses, just anchored to the chosen year-end's own month instead of "today"'s selected period.
-  // yearEnd is always the last day of yeMonth (by construction in yearEndOptions above), so this
-  // never hits a day-overflow edge case the way subtracting a literal year from the date would.
-  const [yeSelYear] = yearEnd ? yearEnd.split('-').map(Number) : [null];
-  const yearStartMonth = (yeMonth % 12) + 1;
-  const fyStartYear = yeSelYear != null ? (yeMonth >= yearStartMonth ? yeSelYear : yeSelYear - 1) : null;
-  const fyStart = fyStartYear != null ? `${fyStartYear}-${String(yearStartMonth).padStart(2, '0')}-01` : null;
+  // Fiscal year start for the SELECTED yearEnd: moved verbatim to src/shared/statements/frs105.js.
+  const { yeSelYear, yearStartMonth, fyStartYear, fyStart } = frs105FiscalYear(yearEnd, yeMonth);
 
   const generate = async () => {
     if (!company?.id) return;
     setLoading(true);
     // Inception-to-date (opening position + the year) — paged past the 1,000-row response cap,
     // id as the unique tiebreaker. Statutory figures: a truncated fetch here mis-states the accounts.
-    const { data } = await fetchAllRows(() => supabase.from('journals')
-      .select('*').eq('company_id', company.id).lte('date', yearEnd).order('date').order('id'));
+    const { data } = await fetchJournalsToDate(supabase, company.id, yearEnd);
     setJournals(data || []);
     setGenerated(true);
     setLoading(false);
   };
 
-  // Balance sheet accounts are cumulative from inception — unchanged, correct as before.
-  const rawD = {}, rawC = {};
-  journals.forEach(j => {
-    const a = Number(j.amount);
-    rawD[j.debit_account]  = (rawD[j.debit_account]  || 0) + a;
-    rawC[j.credit_account] = (rawC[j.credit_account] || 0) + a;
-  });
-  const allCodes = [...new Set([...Object.keys(rawD), ...Object.keys(rawC)])];
-  const acctBal = code => {
-    const d = rawD[code] || 0, c = rawC[code] || 0;
-    const t = GL_ACCOUNTS.find(a => a.code === code)?.type || '';
-    return (t === 'Liability' || t === 'Equity' || t === 'Income') ? c - d : d - c;
-  };
-  const sumRng = (f, t) => allCodes.filter(c => c >= f && c <= t).reduce((s, c) => s + acctBal(c), 0);
-
-  // Balance sheet figures
-  // 1000-1099 = Bank accounts (cash), 1100-1299 = Debtors + Prepayments, 1500-1599 = Fixed assets
-  const fixedAssets   = sumRng("1500", "1599");
-  const debtors       = sumRng("1100", "1299");
-  const cashAtBank    = sumRng("1000", "1099");
-  const currAssets    = debtors + cashAtBank;
-  const creditors     = sumRng("2000", "2399");
-  const netCurrAssets = currAssets - creditors;
-  const totAssetsLCL  = fixedAssets + netCurrAssets;
-  const shareCapital  = sumRng("3000", "3099");
-  const retainedEarns = totAssetsLCL - shareCapital; // balancing figure
-
-  // P&L accounts must be bound to the fiscal year, not cumulative — this app never posts
-  // automatic year-end closing journals, so income/expense balances otherwise accumulate
-  // indefinitely across every year a company has traded. Filtering the already-fetched
-  // cumulative set (rather than a second query) since it's already a superset.
-  const pnlJournals = fyStart ? journals.filter(j => j.date >= fyStart) : [];
-  const pnlRawD = {}, pnlRawC = {};
-  pnlJournals.forEach(j => {
-    const a = Number(j.amount);
-    pnlRawD[j.debit_account]  = (pnlRawD[j.debit_account]  || 0) + a;
-    pnlRawC[j.credit_account] = (pnlRawC[j.credit_account] || 0) + a;
-  });
-  const pnlCodes = [...new Set([...Object.keys(pnlRawD), ...Object.keys(pnlRawC)])];
-  const pnlAcctBal = code => {
-    const d = pnlRawD[code] || 0, c = pnlRawC[code] || 0;
-    const t = GL_ACCOUNTS.find(a => a.code === code)?.type || '';
-    return (t === 'Liability' || t === 'Equity' || t === 'Income') ? c - d : d - c;
-  };
-  const pnlSumRng = (f, t) => pnlCodes.filter(c => c >= f && c <= t).reduce((s, c) => s + pnlAcctBal(c), 0);
-
-  // P&L figures
-  const turnover    = pnlSumRng("4000", "4999");
-  const cos         = pnlSumRng("5000", "5999");
-  const grossProfit = turnover - cos;
-  const adminExp    = pnlSumRng("6000", "6999");
-  const opProfit    = grossProfit - adminExp;
-  const interest    = pnlCodes.filter(c => c >= "7000" && c <= "7999")
-    .reduce((s, c) => s + ((pnlRawC[c] || 0) - (pnlRawD[c] || 0)), 0);
-  const pbt     = opProfit + interest;
-  const pfYear  = pbt;
+  // FRS 105 figures: calculation moved verbatim to src/shared/statements/frs105.js (legacy mode,
+  // so "Profit and loss account" is still the balancing figure).
+  const {
+    rawD, rawC, allCodes, acctBal, sumRng, fixedAssets, debtors, cashAtBank, currAssets, creditors, netCurrAssets, totAssetsLCL, shareCapital, retainedEarns, pnlJournals, pnlRawD, pnlRawC, pnlCodes, pnlAcctBal, pnlSumRng, turnover, cos, grossProfit, adminExp, opProfit, interest, pbt, pfYear,
+  } = computeFrs105(journals, { yearEnd, yeMonth, mode: 'legacy' });
 
   useEffect(() => {
     if (!generated || allCodes.length === 0) return;

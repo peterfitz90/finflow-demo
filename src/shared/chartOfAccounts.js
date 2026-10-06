@@ -3,62 +3,7 @@
 import { useState, useEffect } from 'react';
 import { supabase } from '../supabase.js';
 
-export const GL_ACCOUNTS = [
-  // Assets
-  { code: "1000", name: "Bank — Current Account",  type: "Asset" },
-  { code: "1100", name: "Trade Debtors",            type: "Asset" },
-  { code: "1200", name: "Prepayments",              type: "Asset" },
-  { code: "1300", name: "Stripe Clearing",          type: "Asset" },
-  { code: "1500", name: "Fixed Assets",             type: "Asset" },
-  { code: "1501", name: "Accum Dep — Fixed Assets",           type: "Asset" },
-  { code: "1510", name: "Plant & Machinery",                  type: "Asset" },
-  { code: "1511", name: "Accum Dep — Plant & Machinery",      type: "Asset" },
-  { code: "1520", name: "Fixtures & Fittings",                type: "Asset" },
-  { code: "1521", name: "Accum Dep — Fixtures & Fittings",   type: "Asset" },
-  { code: "1530", name: "Computer Equipment",                 type: "Asset" },
-  { code: "1531", name: "Accum Dep — Computer Equipment",    type: "Asset" },
-  { code: "1540", name: "Motor Vehicles",                     type: "Asset" },
-  { code: "1541", name: "Accum Dep — Motor Vehicles",         type: "Asset" },
-  { code: "1600", name: "VAT Receivable",           type: "Asset" },
-  // Liabilities
-  { code: "2000", name: "Trade Creditors",          type: "Liability" },
-  { code: "2100", name: "VAT Control",              type: "Liability" },
-  { code: "1250", name: "Supplier Prepayments",     type: "Asset" },
-  { code: "2200", name: "PAYE & PRSI Payable",      type: "Liability" },
-  { code: "2250", name: "Net Wages Payable",        type: "Liability" },
-  { code: "2260", name: "Pension Payable",          type: "Liability" },
-  { code: "2300", name: "Accruals",                 type: "Liability" },
-  { code: "2350", name: "Customer Advance Payments",type: "Liability" },
-  { code: "2400", name: "Directors Loan Account",   type: "Liability" },
-  { code: "2500", name: "Bank Loan",                type: "Liability" },
-  // Capital
-  { code: "3000", name: "Share Capital",            type: "Equity" },
-  { code: "3100", name: "Retained Earnings",        type: "Equity" },
-  // Income
-  { code: "4000", name: "Sales Revenue",            type: "Income" },
-  { code: "4100", name: "Service Income",           type: "Income" },
-  { code: "4200", name: "Other Income",             type: "Income" },
-  { code: "4300", name: "Interest Received",        type: "Income" },
-  // Cost of Sales
-  { code: "5000", name: "Cost of Sales",            type: "Expense" },
-  { code: "5100", name: "Materials & Supplies",     type: "Expense" },
-  { code: "5200", name: "Subcontractor Costs",      type: "Expense" },
-  { code: "5300", name: "Direct Labour",            type: "Expense" },
-  // Overheads
-  { code: "6000", name: "Payroll & PAYE",           type: "Expense" },
-  { code: "6100", name: "Rent & Rates",             type: "Expense" },
-  { code: "6200", name: "Motor & Travel",           type: "Expense" },
-  { code: "6300", name: "Telecoms & IT",            type: "Expense" },
-  { code: "6400", name: "Professional Fees",        type: "Expense" },
-  { code: "6500", name: "Bank Charges & Interest",  type: "Expense" },
-  { code: "6600", name: "Sundry Expenses",          type: "Expense" },
-  { code: "6750", name: "Settlement Rounding",      type: "Expense" },
-  { code: "6700", name: "Marketing & Advertising",  type: "Expense" },
-  { code: "6800", name: "Insurance",                type: "Expense" },
-  { code: "6900", name: "Repairs & Maintenance",    type: "Expense" },
-  { code: "6910", name: "Loss on Disposal of Assets", type: "Expense" },
-  { code: "6950", name: "Depreciation",             type: "Expense" },
-];
+export { GL_ACCOUNTS } from './glAccounts.js';
 
 export const COA_SEED = [
   { code: "1000", name: "Bank — Current Account",  account_type: "asset",     category: "Current Assets",        is_system: true },
