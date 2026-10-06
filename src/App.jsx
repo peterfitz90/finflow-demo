@@ -24,7 +24,7 @@ import {
 import { NARROW_QUERY, matches as matchesMedia, goToMobile } from './shared/viewMode.js';
 import { BANK_NOMINAL_CODE, fetchNominalBalanceAsOf, fetchActiveBankNominals } from './shared/bankBalance.js';
 import { GL_ACCOUNTS, COA_SEED_SOLE_TRADER, COA_STATIC_FALLBACK, useChartOfAccounts } from './shared/chartOfAccounts.js';
-import { computeFrs105, frs105FiscalYear, fetchJournalsToDate, frs105Warnings } from './shared/statements/frs105.js';
+import { computeFrs105, frs105FiscalYear, fetchJournalsToDate, fetchChartForStatements, frs105Warnings } from './shared/statements/frs105.js';
 import { useTransactionRules, preCleanDesc, applyRules } from './shared/txRules.js';
 import { suggestExpenseAccount, suggestExpenseVatCode, EXPENSE_VAT_CODES, VAT_SOURCE_LABEL } from './shared/expenseSuggest.js';
 import { CURRENCY_SYMBOLS, fmtCurrencyFull } from './shared/currency.js';
@@ -13401,6 +13401,8 @@ function Settings({ company, onUpdate, onNavigate }) {
     rct_registered:  company?.rct_registered  ?? false,
     cro_number:      company?.cro_number      || "",
     sales_vat_rate:  company?.sales_vat_rate  ?? 23,
+    incorporation_date:   company?.incorporation_date   || "",
+    ledger_complete_from: company?.ledger_complete_from || "",
   });
   const [form, setForm] = useState(blank());
   const [saving, setSaving] = useState(false);
@@ -13729,6 +13731,8 @@ function Settings({ company, onUpdate, onNavigate }) {
         rct_registered:  form.rct_registered,
         cro_number:      form.cro_number.trim() || null,
         sales_vat_rate:  Number(form.sales_vat_rate) || 23,
+        incorporation_date:   form.incorporation_date   || null,
+        ledger_complete_from: form.ledger_complete_from || null,
       })
       .eq("id", company.id)
       .select()
@@ -13938,6 +13942,21 @@ function Settings({ company, onUpdate, onNavigate }) {
                 onChange={e => setForm(p => ({ ...p, cro_number: e.target.value }))}
                 placeholder="e.g. 123456" />
             </div>
+          </div>
+          <div className="f-row">
+            <div className="f-group">
+              <label className="f-label" htmlFor="set-incorporation-date">Incorporation date</label>
+              <input id="set-incorporation-date" className="f-input" type="date" value={form.incorporation_date}
+                onChange={e => setForm(p => ({ ...p, incorporation_date: e.target.value }))} />
+            </div>
+            <div className="f-group">
+              <label className="f-label" htmlFor="set-ledger-complete-from">Ledger complete from</label>
+              <input id="set-ledger-complete-from" className="f-input" type="date" value={form.ledger_complete_from}
+                onChange={e => setForm(p => ({ ...p, ledger_complete_from: e.target.value }))} />
+            </div>
+          </div>
+          <div style={{ fontSize: 11.5, color: "var(--dim)", marginTop: -4, marginBottom: 10, lineHeight: 1.5 }}>
+            Ledger complete from: the date from which this ledger holds every transaction (the opening balances date for a company moved from another system, or the incorporation date). Financial statements for periods starting on or after it don't warn about missing opening balances.
           </div>
           <div className="f-row">
             <div className="f-group">
@@ -14609,6 +14628,7 @@ function FinancialStatements({ company, companyName }) {
   const [directors,   setDirectors]   = useState("");
   const [accountants, setAccountants] = useState("");
   const [bankCodes,   setBankCodes]   = useState([BANK_NOMINAL_CODE]);
+  const [chart,       setChart]       = useState([]);
 
   const yeMonth = company?.year_end_month || 12;
   const yearEndOptions = (() => {
@@ -14634,24 +14654,33 @@ function FinancialStatements({ company, companyName }) {
     setLoading(true);
     // Inception-to-date (opening position + the year) — paged past the 1,000-row response cap,
     // id as the unique tiebreaker. Statutory figures: a truncated fetch here mis-states the accounts.
-    const [{ data }, activeBank] = await Promise.all([
+    const [{ data }, activeBank, { data: chartRows }] = await Promise.all([
       fetchJournalsToDate(supabase, company.id, yearEnd),
       fetchActiveBankNominals(company.id),
+      fetchChartForStatements(supabase, company.id),
     ]);
     setJournals(data || []);
     setBankCodes(activeBank.length ? activeBank : [BANK_NOMINAL_CODE]);
+    setChart(chartRows || []);
     setGenerated(true);
     setLoading(false);
   };
 
-  // FRS 105 figures: calculation moved verbatim to src/shared/statements/frs105.js (legacy mode,
-  // so "Profit and loss account" is still the balancing figure).
-  const frs105 = computeFrs105(journals, { yearEnd, yeMonth, mode: 'legacy' });
-  const {
-    rawD, rawC, allCodes, acctBal, sumRng, fixedAssets, debtors, cashAtBank, currAssets, creditors, netCurrAssets, totAssetsLCL, shareCapital, retainedEarns, pnlJournals, pnlRawD, pnlRawC, pnlCodes, pnlAcctBal, pnlSumRng, turnover, cos, grossProfit, adminExp, opProfit, interest, pbt, pfYear,
-  } = frs105;
+  // FRS 105 figures in the Schedule 3B formats (src/shared/statements/schedule3b.js): every nominal
+  // mapped to one line, reserves derived from the ledger, no balancing figure. frs105.legacy is the
+  // old calculation, kept for the debug log below and the regression script only.
+  const frs105 = computeFrs105(journals, { yearEnd, yeMonth, mode: 'schedule3b', chart });
+  const { bs: s3bs, pnl: s3pnl, profit: pfYear, imbalance: s3Imbalance, unmapped: s3Unmapped } = frs105;
+  const { rawD, rawC, allCodes, acctBal, cashAtBank, debtors, fixedAssets, creditors, shareCapital, totAssetsLCL, turnover, opProfit } = frs105.legacy;
   // Interim guard (STA-01): warnings only. Shown on screen, never printed.
-  const guardWarnings = generated ? frs105Warnings(journals, frs105, { bankCodes, yearEnd }) : [];
+  const guardWarnings = generated ? frs105Warnings(journals, frs105, { bankCodes, yearEnd, ledgerCompleteFrom: company?.ledger_complete_from || null }) : [];
+  // DRAFT watermark (prints): unmapped balances, an imbalance, or no opening position.
+  const isDraft = generated && (s3Unmapped.length > 0 || Math.abs(s3Imbalance) >= 0.005 || guardWarnings.some(w => w.id === 'no_opening'));
+  const draftMark = isDraft ? (
+    <div aria-hidden="true" style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none", overflow: "hidden", zIndex: 1 }}>
+      <span style={{ transform: "rotate(-30deg)", fontSize: 96, fontWeight: 800, letterSpacing: "0.12em", color: "rgba(220,38,38,0.14)", fontFamily: "'Source Sans 3',system-ui,sans-serif", whiteSpace: "nowrap" }}>DRAFT</span>
+    </div>
+  ) : null;
   const guardWarn = guardWarnings.filter(w => w.severity === 'warn');
   const guardInfo = guardWarnings.filter(w => w.severity === 'info');
 
@@ -14713,33 +14742,38 @@ function FinancialStatements({ company, companyName }) {
     ["FRS 105 Financial Statements", companyName, `Year ended ${yeFmt}`],
     ["Company Registration No.", regNumber || "—"],
     ["Exported", expDate],
+    isDraft ? ["DRAFT"] : [],
     [],
     ["PROFIT AND LOSS ACCOUNT FOR YEAR ENDED", yeFmt],
-    [], [" ", "€", "€"],
-    ["Turnover", "", fa(turnover)],
-    cos > 0 ? ["Cost of Sales", fa(cos), ""] : [],
-    cos > 0 ? ["Gross Profit", "", fa(grossProfit)] : [],
-    adminExp > 0 ? ["Administrative Expenses", fa(adminExp), ""] : [],
-    ["Operating Profit", "", fa(opProfit)],
-    interest !== 0 ? [interest > 0 ? "Interest receivable" : "Interest payable", fa(Math.abs(interest)), ""] : [],
-    ["Profit before tax", "", fa(pbt)],
-    ["Tax on profit", "", "—"],
-    ["Profit for the financial year", "", fa(pfYear)],
+    [], [" ", "€"],
+    ["Turnover", fa(s3pnl['1'].amount)],
+    s3pnl['2'].amount !== 0 ? ["Other income", fa(s3pnl['2'].amount)] : [],
+    s3pnl['3'].amount !== 0 ? ["Cost of raw materials and consumables", fa(-s3pnl['3'].amount)] : [],
+    s3pnl['4'].amount !== 0 ? ["Staff costs", fa(-s3pnl['4'].amount)] : [],
+    s3pnl['5'].amount !== 0 ? ["Value adjustments and other amounts written off assets", fa(-s3pnl['5'].amount)] : [],
+    s3pnl['6'].amount !== 0 ? ["Other expenses", fa(-s3pnl['6'].amount)] : [],
+    ["Tax", s3pnl['7'].amount !== 0 ? fa(-s3pnl['7'].amount) : "—"],
+    ["Profit or loss", fa(pfYear)],
     [],
     ["BALANCE SHEET AS AT", yeFmt],
     [], [" ", "€", "€"],
-    ["Fixed Assets", "", fa(fixedAssets)],
-    ["Current Assets — Debtors", fa(debtors), ""],
-    ["Current Assets — Cash at bank and in hand", fa(cashAtBank), ""],
-    ["Total Current Assets", "", fa(currAssets)],
-    ["Creditors: amounts falling due within one year", "", creditors > 0 ? `(${fa(creditors)})` : "—"],
-    ["Net Current Assets", "", fa(netCurrAssets)],
-    ["Total Assets less Current Liabilities", "", fa(totAssetsLCL)],
+    s3bs.A.amount !== 0 ? ["Called up share capital not paid", "", fa(s3bs.A.amount)] : [],
+    ["Fixed assets", "", fa(s3bs.B.amount)],
+    ["Current assets", fa(s3bs.C.amount), ""],
+    s3bs.D.amount !== 0 ? ["Prepayments and accrued income", fa(s3bs.D.amount), ""] : [],
+    ["Creditors: amounts falling due within one year", fa(-s3bs.E.amount), ""],
+    ["Net current assets (liabilities)", "", fa(s3bs.F.amount)],
+    ["Total assets less current liabilities", "", fa(s3bs.G.amount)],
+    s3bs.H.amount !== 0 ? ["Creditors: amounts falling due after more than one year", "", fa(-s3bs.H.amount)] : [],
+    s3bs.I.amount !== 0 ? ["Provisions for liabilities", "", fa(-s3bs.I.amount)] : [],
+    s3bs.J.amount !== 0 ? ["Accruals and deferred income", "", fa(-s3bs.J.amount)] : [],
+    ["", "", fa(frs105.netAssets)],
     [],
-    ["Capital and Reserves"],
-    ["Called up share capital", fa(shareCapital), ""],
-    ["Profit and loss account", fa(retainedEarns), ""],
-    ["Total Capital and Reserves", "", fa(totAssetsLCL)],
+    ["Capital and reserves"],
+    ["Called up share capital", fa(s3bs.K1.amount), ""],
+    ["Profit and loss account", fa(s3bs.K2.amount), ""],
+    ["", "", fa(s3bs.K.amount)],
+    Math.abs(s3Imbalance) >= 0.005 ? ["Imbalance (unmapped balances)", "", fa(s3Imbalance)] : [],
     [],
     ["Directors' Remuneration", dirRemun ? fmtEUR(parseFloat(dirRemun)) : "—"],
     [],
@@ -14871,6 +14905,15 @@ function FinancialStatements({ company, companyName }) {
                   {w.items.map(x => <li key={x.code}><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{x.code}</span>{x.name ? ` ${x.name}` : ''}: {fmtEUR(Math.abs(x.debitNet))} {x.debitNet >= 0 ? 'Dr' : 'Cr'}</li>)}
                 </ul>
               </>}
+              {w.id === 'unmapped' && <>
+                <strong>Balances with no statement line.</strong> These balances could not be placed on a Schedule 3B line, so the statements are marked DRAFT and the balance sheet shows the difference as an imbalance:
+                <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>
+                  {w.items.map(x => <li key={x.code}><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{x.code}</span>{x.name ? ` ${x.name}` : ''}: {fmtEUR(Math.abs(x.debitNet))} {x.debitNet >= 0 ? 'Dr' : 'Cr'} ({x.reason})</li>)}
+                </ul>
+              </>}
+              {w.id === 'imbalance' && <>
+                <strong>The balance sheet does not balance.</strong> Net assets differ from capital and reserves by {fmtEUR(w.amount)}, the total of the balances above. It is shown on the balance sheet, not hidden in reserves.
+              </>}
               {w.id === 'no_opening' && <>
                 <strong>No opening balances.</strong> This company has no OPENING journal, and {w.firstJournal ? <>its first journal ({fmtIE(w.firstJournal)}) is after</> : <>it has no journals before</>} the start of this period ({fmtIE(w.periodStart)}). The balance sheet and the P&amp;L may be incomplete.
               </>}
@@ -14908,7 +14951,8 @@ function FinancialStatements({ company, companyName }) {
       )}
 
       {/* Cover Page */}
-      <div className="card" style={{ marginBottom: 14, pageBreakAfter: "always" }}>
+      <div className="card" style={{ marginBottom: 14, pageBreakAfter: "always", position: "relative" }}>
+        {draftMark}
         <div className="card-body" style={{ minHeight: 320, display: "flex", flexDirection: "column", justifyContent: "center", alignItems: "center", textAlign: "center", padding: "48px 32px" }}>
           <div style={{ fontFamily: "'Playfair Display',serif", fontSize: 26, fontWeight: 700, marginBottom: 6 }}>{companyName}</div>
           {regNumber && <div style={{ fontSize: 12, color: "var(--muted)", fontFamily: "monospace", marginBottom: 4 }}>Company No. {regNumber}</div>}
@@ -14921,7 +14965,8 @@ function FinancialStatements({ company, companyName }) {
       </div>
 
       {/* Directors' Report */}
-      <div className="card" style={{ marginBottom: 14, pageBreakAfter: "always" }}>
+      <div className="card" style={{ marginBottom: 14, pageBreakAfter: "always", position: "relative" }}>
+        {draftMark}
         <div className="card-header">
           <span className="card-title">Directors' Report</span>
           <span style={{ fontSize: 10, fontFamily: "'Source Code Pro',monospace", color: "var(--muted)", letterSpacing: "0.06em" }}>FOR THE YEAR ENDED {yeFmt.toUpperCase()}</span>
@@ -14947,57 +14992,61 @@ function FinancialStatements({ company, companyName }) {
         </div>
       </div>
 
-      {/* Profit & Loss */}
-      <div className="card" style={{ marginBottom: 14, pageBreakAfter: "always" }}>
+      {/* Profit & Loss: Schedule 3B, by nature */}
+      <div className="card" style={{ marginBottom: 14, pageBreakAfter: "always", position: "relative" }}>
+        {draftMark}
         <div className="card-header">
           <span className="card-title">Profit and Loss Account</span>
           <span style={{ fontSize: 10, fontFamily: "'Source Code Pro',monospace", color: "var(--muted)", letterSpacing: "0.06em" }}>FOR THE YEAR ENDED {yeFmt.toUpperCase()}</span>
         </div>
         <div className="card-body">
           {amtCols()}
-          {fsRow("Turnover", { c2: turnover })}
-          {cos > 0 && fsRow("Cost of Sales", { c1: cos, indent: 1 })}
-          {cos > 0 && fsRow("Gross Profit", { c2: grossProfit, top2: true, bold: true })}
-          {cos > 0 && fsDivider()}
-          {adminExp > 0 && fsRow("Administrative Expenses", { c1: adminExp, indent: 1 })}
-          {fsRow(cos > 0 ? "Operating Profit" : "Net Profit", { c2: opProfit, top2: true, bold: true })}
+          {fsRow("Turnover", { c2: s3pnl['1'].amount })}
+          {s3pnl['2'].amount !== 0 && fsRow("Other income", { c2: s3pnl['2'].amount })}
+          {s3pnl['3'].amount !== 0 && fsRow("Cost of raw materials and consumables", { c2: -s3pnl['3'].amount })}
+          {s3pnl['4'].amount !== 0 && fsRow("Staff costs", { c2: -s3pnl['4'].amount })}
+          {s3pnl['5'].amount !== 0 && fsRow("Value adjustments and other amounts written off assets", { c2: -s3pnl['5'].amount })}
+          {s3pnl['6'].amount !== 0 && fsRow("Other expenses", { c2: -s3pnl['6'].amount })}
           {fsDivider()}
-          {interest !== 0 && fsRow(interest > 0 ? "Interest receivable" : "Interest payable", { c1: Math.abs(interest) })}
-          {fsRow("Profit before tax", { c2: pbt, bold: true })}
-          {fsDivider()}
-          {fsRow("Tax on profit", {})}
-          <div style={{ fontSize: 11, color: "var(--dim)", fontStyle: "italic", padding: "2px 0 6px 10px" }}>No corporation tax posted for this period</div>
-          {fsRow("Profit for the financial year", { c2: pfYear, dbl: true, bold: true })}
+          {fsRow("Tax", s3pnl['7'].amount !== 0 ? { c2: -s3pnl['7'].amount } : {})}
+          {s3pnl['7'].amount === 0 && <div style={{ fontSize: 11, color: "var(--dim)", fontStyle: "italic", padding: "2px 0 6px 10px" }}>No corporation tax posted for this period</div>}
+          {fsRow("Profit or loss", { c2: pfYear, dbl: true, bold: true })}
         </div>
       </div>
 
-      {/* Balance Sheet */}
-      <div className="card" style={{ marginBottom: 14, pageBreakAfter: "always" }}>
+      {/* Balance Sheet: Schedule 3B Format 1 */}
+      <div className="card" style={{ marginBottom: 14, pageBreakAfter: "always", position: "relative" }}>
+        {draftMark}
         <div className="card-header">
           <span className="card-title">Balance Sheet</span>
           <span style={{ fontSize: 10, fontFamily: "'Source Code Pro',monospace", color: "var(--muted)", letterSpacing: "0.06em" }}>AS AT {yeFmt.toUpperCase()}</span>
         </div>
         <div className="card-body">
           {amtCols()}
-          {fsHead("Fixed Assets")}
-          {fsRow("Tangible assets", { c2: fixedAssets })}
+          {s3bs.A.amount !== 0 && fsRow("Called up share capital not paid", { c2: s3bs.A.amount })}
+          {fsRow("Fixed assets", { c2: s3bs.B.amount })}
           {fsDivider()}
-          {fsHead("Current Assets")}
-          {fsRow("Debtors", { c1: debtors })}
-          {fsRow("Cash at bank and in hand", { c1: cashAtBank })}
-          {fsRow("", { c2: currAssets, top1: true })}
+          {fsRow("Current assets", { c1: s3bs.C.amount })}
+          {s3bs.D.amount !== 0 && fsRow("Prepayments and accrued income", { c1: s3bs.D.amount })}
+          {fsRow("Creditors: amounts falling due within one year", { c1: -s3bs.E.amount })}
+          {fsRow("Net current assets (liabilities)", { c2: s3bs.F.amount, top2: true, bold: true })}
           {fsDivider()}
-          {fsHead("Creditors: amounts falling due within one year")}
-          {fsRow("", { c2: creditors > 0 ? -creditors : 0 })}
+          {fsRow("Total assets less current liabilities", { c2: s3bs.G.amount, bold: true })}
+          {s3bs.H.amount !== 0 && fsRow("Creditors: amounts falling due after more than one year", { c2: -s3bs.H.amount })}
+          {s3bs.I.amount !== 0 && fsRow("Provisions for liabilities", { c2: -s3bs.I.amount })}
+          {s3bs.J.amount !== 0 && fsRow("Accruals and deferred income", { c2: -s3bs.J.amount })}
+          {fsRow("", { c2: frs105.netAssets, dbl: true, bold: true })}
           {fsDivider()}
-          {fsRow("Net Current Assets", { c2: netCurrAssets, top2: true, bold: true })}
-          {fsDivider()}
-          {fsRow("Total Assets less Current Liabilities", { c2: totAssetsLCL, bold: true })}
-          {fsDivider()}
-          {fsHead("Capital and Reserves")}
-          {fsRow("Called up share capital", { c1: shareCapital })}
-          {fsRow("Profit and loss account", { c1: retainedEarns })}
-          {fsRow("", { c2: totAssetsLCL, dbl: true, bold: true })}
+          {fsHead("Capital and reserves")}
+          {fsRow("Called up share capital", { c1: s3bs.K1.amount })}
+          {fsRow("Profit and loss account", { c1: s3bs.K2.amount })}
+          {fsRow("", { c2: s3bs.K.amount, dbl: true, bold: true })}
+          {Math.abs(s3Imbalance) >= 0.005 && (
+            <div style={{ display: "flex", padding: "6px 0", fontSize: 13, fontWeight: 700, color: "var(--red)" }}>
+              <span style={{ flex: 1 }}>Imbalance: balances with no statement line (see warnings)</span>
+              <span style={{ width: 90, textAlign: "right", fontFamily: "'Source Code Pro',monospace", fontSize: 12 }}>{fa(s3Imbalance)}</span>
+            </div>
+          )}
           <div style={{ marginTop: 16, fontSize: 11, color: "var(--muted)", lineHeight: 1.6 }}>
             These financial statements have been prepared in accordance with the micro-entity provisions of the Companies Act 2014 and FRS 105. Approved by the Board of Directors on ___/___/_____ · Signed: ____________________
           </div>
@@ -15005,7 +15054,8 @@ function FinancialStatements({ company, companyName }) {
       </div>
 
       {/* Notes */}
-      <div className="card" style={{ marginBottom: 14 }}>
+      <div className="card" style={{ marginBottom: 14, position: "relative" }}>
+        {draftMark}
         <div className="card-header"><span className="card-title">Notes to the Financial Statements</span></div>
         <div className="card-body" style={{ fontSize: 13, lineHeight: 1.7 }}>
           <div style={{ marginBottom: 22 }}>

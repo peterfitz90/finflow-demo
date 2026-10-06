@@ -2,22 +2,29 @@
 // FinancialStatements (STA-01 Stage 1), copied by marker, not retyped. Pure: no React and no
 // Supabase import, so the on-screen statements, server code and node scripts share one engine.
 //
-// Mode 'legacy' is the only mode today and reproduces the committed behaviour exactly, including
-// the balance sheet's balancing figure: "Profit and loss account" = total assets less current
-// liabilities minus share capital, which absorbs any balance outside the mapped code ranges.
-// Later stages add a mode that maps every balance and switches the balancing figure off.
+// Mode 'legacy' reproduces the committed behaviour exactly, including the balance sheet's
+// balancing figure: "Profit and loss account" = total assets less current liabilities minus
+// share capital, which absorbs any balance outside the mapped code ranges. It must never change.
+// Mode 'schedule3b' (STA-01 Stage 2) maps every nominal to a Schedule 3B line with no balancing
+// figure (see schedule3b.js); it needs the company's chart of accounts.
 // scripts/frs105-regression.mjs proves this file matches the pre-extraction code to the cent.
 import { GL_ACCOUNTS } from '../glAccounts.js';
 import { fetchAllRows } from '../fetchAllRows.js';
 import { monthEnd } from '../dates.js';
+import { computeSchedule3b } from './schedule3b.js';
 
-export const FRS105_MODES = ['legacy'];
+export const FRS105_MODES = ['legacy', 'schedule3b'];
 
 // Every journal up to and including yearEnd (inception-to-date), paged past PostgREST's
 // 1,000-row cap with id as the unique tiebreaker. `db` is a supabase-js client.
 export function fetchJournalsToDate(db, companyId, yearEnd) {
   return fetchAllRows(() => db.from('journals')
       .select('*').eq('company_id', companyId).lte('date', yearEnd).order('date').order('id'));
+}
+
+// The company's own chart of accounts, which the schedule3b mode maps from.
+export function fetchChartForStatements(db, companyId) {
+  return db.from('chart_of_accounts').select('code, name, account_type, category').eq('company_id', companyId);
 }
 
 // Fiscal year bounds for the selected year end (yearEnd is always the last day of yeMonth).
@@ -33,8 +40,16 @@ export function frs105FiscalYear(yearEnd, yeMonth) {
   return { yeSelYear, yearStartMonth, fyStartYear, fyStart };
 }
 
-export function computeFrs105(journals, { yearEnd, yeMonth, mode = 'legacy' }) {
+export function computeFrs105(journals, { yearEnd, yeMonth, mode = 'legacy', chart = [] }) {
   if (!FRS105_MODES.includes(mode)) throw new Error(`Unknown FRS 105 mode: ${mode}`);
+  if (mode === 'schedule3b') {
+    // The legacy result supplies the per-code totals the guard uses; its figures are not shown.
+    const legacy = computeFrs105(journals, { yearEnd, yeMonth, mode: 'legacy' });
+    return {
+      mode, fyStart: legacy.fyStart, rawD: legacy.rawD, rawC: legacy.rawC, allCodes: legacy.allCodes, legacy,
+      ...computeSchedule3b(journals, { fyStart: legacy.fyStart, yearEnd, chart }),
+    };
+  }
   const { fyStart } = frs105FiscalYear(yearEnd, yeMonth);
 
   // Balance sheet accounts are cumulative from inception — unchanged, correct as before.
@@ -116,20 +131,27 @@ const glName = code => GL_ACCOUNTS.find(a => a.code === code)?.name || null;
 // yearEnd: the statements' year end. Balances are debit minus credit, the same sum nominal_balance_as_of returns. Every rule works
 // on this one paginated journal set: no further queries, none per month.
 // Each warning has severity 'warn', except 'liability_debit', which is 'info'.
-export function frs105Warnings(journals, result, { bankCodes = ['1000'], yearEnd = null } = {}) {
+export function frs105Warnings(journals, result, { bankCodes = ['1000'], yearEnd = null, ledgerCompleteFrom = null } = {}) {
   const warnings = [];
   const debitNet = code => round2((result.rawD[code] || 0) - (result.rawC[code] || 0));
 
-  // (a) balances the balancing figure absorbs
-  const absorbed = result.allCodes
+  // (a) schedule3b: balances that could not be placed on a line, and any imbalance they cause
+  if (result.mode === 'schedule3b') {
+    if (result.unmapped.length) warnings.push({ id: 'unmapped', items: result.unmapped });
+    if (Math.abs(result.imbalance) >= 0.005) warnings.push({ id: 'imbalance', amount: result.imbalance });
+  }
+
+  // (a) legacy: balances the balancing figure absorbs
+  const absorbed = result.mode === 'schedule3b' ? [] : result.allCodes
     .filter(c => !inAnyRange(c, FRS105_LEGACY_BS_RANGES) && !inAnyRange(c, FRS105_LEGACY_PNL_RANGES))
     .map(c => ({ code: c, name: glName(c), debitNet: debitNet(c) }))
     .filter(x => Math.abs(x.debitNet) >= 0.005)
     .sort((x, y) => (x.code < y.code ? -1 : 1));
   if (absorbed.length) warnings.push({ id: 'absorbed', items: absorbed });
 
-  // (b) no opening position: no OPENING journal, and the ledger starts after the period start
-  if (result.fyStart) {
+  // (b) no opening position: no OPENING journal, and the ledger starts after the period start.
+  // Satisfied when the company's ledger_complete_from is on or before the period start.
+  if (result.fyStart && !(ledgerCompleteFrom && ledgerCompleteFrom <= result.fyStart)) {
     const hasOpening = journals.some(j => j.reference === 'OPENING');
     const firstJournal = journals.reduce((min, j) => (min === null || j.date < min ? j.date : min), null);
     if (!hasOpening && (firstJournal === null || firstJournal > result.fyStart)) {
