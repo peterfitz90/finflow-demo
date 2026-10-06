@@ -95,3 +95,10 @@ test('directors in office and the legal-form list', () => {
   assert.deepEqual(directorsInOffice([D1, { ...D2, appointed_on: '2026-07-01' }], '2026-06-30').map(d => d.id), ['d1']);
   assert.deepEqual(LEGAL_FORMS.map(f => f.value), ['LTD', 'DAC', 'CLG', 'UC', 'ULC']);
 });
+
+test('number and class of shares are required only when the company has share capital', () => {
+  assert.deepEqual(informationRequired({ ...complete, shareCapitalNeeded: true }).map(x => x.key), ['share_capital']);
+  const withShares = { ...complete, shareCapitalNeeded: true, yearInputs: { ...complete.yearInputs, policy_inputs: { share_capital: { number: 2, class: 'Ordinary' } } } };
+  assert.deepEqual(informationRequired(withShares), []);
+  assert.equal(informationRequired({ ...complete, shareCapitalNeeded: true }).find(x => x.key === 'share_capital').field, 'fsi-share-capital');
+});

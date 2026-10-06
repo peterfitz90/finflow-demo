@@ -14632,6 +14632,7 @@ function StatementInputsPanel({ company, yearEnd, regime = 'FRS105', inputs, evi
   const [year, setYear] = useState({
     approval_date: yearInputs?.approval_date || '', average_employees: yearInputs?.average_employees ?? '',
     signatory_ids: yearInputs?.signatory_ids || [], depreciation: { ...(yearInputs?.policy_inputs?.depreciation || {}) },
+    share_number: yearInputs?.policy_inputs?.share_capital?.number ?? '', share_class: yearInputs?.policy_inputs?.share_capital?.class || '',
   });
   const [newDir, setNewDir] = useState({ full_name: '', appointed_on: '', resigned_on: '' });
   const [drafts, setDrafts] = useState({}); // disclosure_key -> { mode: 'yes', narrative, section }
@@ -14640,7 +14641,8 @@ function StatementInputsPanel({ company, yearEnd, regime = 'FRS105', inputs, evi
   }, [profile]);
   useEffect(() => {
     setYear({ approval_date: yearInputs?.approval_date || '', average_employees: yearInputs?.average_employees ?? '',
-      signatory_ids: yearInputs?.signatory_ids || [], depreciation: { ...(yearInputs?.policy_inputs?.depreciation || {}) } });
+      signatory_ids: yearInputs?.signatory_ids || [], depreciation: { ...(yearInputs?.policy_inputs?.depreciation || {}) },
+      share_number: yearInputs?.policy_inputs?.share_capital?.number ?? '', share_class: yearInputs?.policy_inputs?.share_capital?.class || '' });
   }, [yearInputs]);
 
   const byKey = Object.fromEntries(disclosures.map(d => [d.disclosure_key, d]));
@@ -14668,7 +14670,8 @@ function StatementInputsPanel({ company, yearEnd, regime = 'FRS105', inputs, evi
     approval_date: year.approval_date || null,
     average_employees: year.average_employees === '' ? null : Number(year.average_employees),
     signatory_ids: year.signatory_ids,
-    policy_inputs: { ...(yearInputs?.policy_inputs || {}), depreciation: Object.fromEntries(Object.entries(year.depreciation).filter(([, v]) => String(v || '').trim())) },
+    policy_inputs: { ...(yearInputs?.policy_inputs || {}), depreciation: Object.fromEntries(Object.entries(year.depreciation).filter(([, v]) => String(v || '').trim())),
+      share_capital: { number: year.share_number === '' ? null : Number(year.share_number), class: year.share_class.trim() || null } },
   }, { onConflict: 'company_id,year_end_date,regime' })));
   const attest = (key, has_items, extra = {}) => supabase.from('fs_disclosures').upsert({
     company_id: company.id, year_end_date: yearEnd, regime, disclosure_key: key, has_items,
@@ -14766,6 +14769,17 @@ function StatementInputsPanel({ company, yearEnd, regime = 'FRS105', inputs, evi
               <label className="f-label" htmlFor="fsi-employees">Average number of employees</label>
               <input id="fsi-employees" type="number" min="0" className="f-input" value={year.average_employees} onChange={e => setYear(p => ({ ...p, average_employees: e.target.value }))} />
               <div style={{ fontSize: 11, color: "var(--dim)", marginTop: 3 }}>Used for the micro eligibility check only; not printed.</div>
+            </div>
+          </div>
+          <div className="f-row" id="fsi-share-capital">
+            <div className="f-group">
+              <label className="f-label" htmlFor="fsi-share-number">Number of shares allotted, called up and fully paid</label>
+              <input id="fsi-share-number" type="number" min="0" step="1" className="f-input" value={year.share_number} onChange={e => setYear(p => ({ ...p, share_number: e.target.value }))} />
+            </div>
+            <div className="f-group">
+              <label className="f-label" htmlFor="fsi-share-class">Class of shares</label>
+              <input id="fsi-share-class" className="f-input" placeholder="e.g. Ordinary" value={year.share_class} onChange={e => setYear(p => ({ ...p, share_class: e.target.value }))} />
+              <div style={{ fontSize: 11, color: "var(--dim)", marginTop: 3 }}>For the called up share capital note; the amount comes from 3000.</div>
             </div>
           </div>
           <div id="fsi-signatories" style={{ marginBottom: 8 }}>
@@ -14944,7 +14958,8 @@ function FinancialStatements({ company, companyName }) {
   // Stage 3c: what the accountant still has to record, and the ledger evidence for suggestions.
   const inputsEvidence = generated && fyStart ? ledgerEvidence(journals, { fyStart, yearEnd }) : null;
   const assetClasses = generated && fyStart ? fixedAssetClasses(journals, { fyStart }) : [];
-  const infoRequired = generated ? informationRequired({ company: company || {}, ...fsInputs, assetClasses, yearEnd }) : [];
+  const hasShareCapital = generated && (['LTD', 'DAC'].includes(fsInputs.profile?.legal_form) || s3bs.K1.amount !== 0);
+  const infoRequired = generated ? informationRequired({ company: company || {}, ...fsInputs, assetClasses, yearEnd, shareCapitalNeeded: hasShareCapital }) : [];
   // Stage 3d: statutory wording (src/shared/statements/wording.js) from the inputs and figures.
   const approvalISO = fsInputs.yearInputs?.approval_date || null;
   const inOfficeAtApproval = approvalISO ? directorsInOffice(fsInputs.directors, approvalISO) : [];
@@ -14964,6 +14979,7 @@ function FinancialStatements({ company, companyName }) {
     depreciationRates: fsInputs.yearInputs?.policy_inputs?.depreciation || {}, assetClasses,
     taxUsed: s3pnl['7'].amount !== 0 || [...s3bs.E.codes, ...s3bs.C.codes].some(c => c.code === '2210'),
     reserves: { atStart: Math.round((s3bs.K2.amount - pfYear + dividendsInYear) * 100) / 100, result: pfYear, dividendsInYear, atEnd: s3bs.K2.amount },
+    shareCapital: hasShareCapital ? { amount: s3bs.K1.amount, number: fsInputs.yearInputs?.policy_inputs?.share_capital?.number, shareClass: fsInputs.yearInputs?.policy_inputs?.share_capital?.class } : null,
   }) : [];
   // Stage 3e: micro eligibility from the ledger plus inputs and attestations. Warn only.
   const eligibility = generated ? microEligibility({

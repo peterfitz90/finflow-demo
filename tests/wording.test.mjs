@@ -2,7 +2,7 @@
 // Run: node --test "tests/*.test.mjs"
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { CHOICE, VARIANTS, disclosureSentence, balanceSheetStatements, statementNotes, PLACEHOLDER } from '../src/shared/statements/wording.js';
+import { CHOICE, VARIANTS, CURRENCY, disclosureSentence, balanceSheetStatements, statementNotes, PLACEHOLDER } from '../src/shared/statements/wording.js';
 
 const row = (key, has_items, extra = {}) => ({ disclosure_key: key, has_items, ...extra });
 
@@ -34,7 +34,8 @@ test('complete inputs give the sheet wording', () => {
   const notes = statementNotes({ companyName: 'X Ltd', legalForm: 'LTD', country: 'Ireland', croNumber: '123456', registeredOffice: '1 Main St, Dublin', disclosures: ds,
     yearEndFmt: '31 December 2025', assetClasses: ['1510'], depreciationRates: { 1510: '20% straight line' }, taxUsed: true, reserves: { atStart: 100, result: 50, dividendsInYear: 20, atEnd: 130 } });
   assert.equal(notes[0].paragraphs[0], 'X Ltd is a private company limited by shares incorporated and registered in Ireland (registered number 123456). Its registered office is 1 Main St, Dublin.');
-  assert.equal(notes[0].paragraphs[1], 'The company is not being wound up.');
+  assert.equal(notes[0].paragraphs[1], CURRENCY, 'item 8: the sheet plus the currency sentence (Peter)');
+  assert.equal(notes[0].paragraphs[2], 'The company is not being wound up.');
   assert.match(notes[2].paragraphs.join(' '), /following rates: 1510: 20% straight line\./);
   assert.match(notes[2].paragraphs.join(' '), /Current tax is recognised/);
   assert.deepEqual(notes[5].table, [['Profit and loss account at the start of the year', 100], ['Profit or loss for the year', 50], ['Dividends paid', -20], ['Profit and loss account at the end of the year', 130]]);
@@ -51,7 +52,7 @@ test('audit exemption prints only when claimed, with a section and the s.334 att
   assert.equal(ok.auditExemption.length, 5);
   assert.match(ok.auditExemption[1], /availing itself of the exemption provided for by Chapter 15 of Part 6 of the Companies Act 2014/);
   assert.match(ok.auditExemption[2], /section 358 of the Companies Act 2014 is complied with/);
-  assert.equal(ok.microRegime, VARIANTS.microRegime.sheet);
+  assert.equal(ok.microRegime, VARIANTS.microRegime.sp, 'item 3: S&P wording (Peter)');
   assert.equal(ok.approval, 'Approved by the board of directors and authorised for issue on 30 June 2026 and signed on its behalf by:');
   assert.equal(balanceSheetStatements({ companyName: 'X' }).approval, `Approved by the board of directors and authorised for issue on ${PLACEHOLDER('approval date')} and signed on its behalf by:`);
 });
@@ -65,4 +66,34 @@ test('the per-item choice switches to the S&P wording', () => {
     assert.equal(ok.auditExemption[0], 'We as Directors of S&P Ltd, state that:');
     assert.match(ok.auditExemption[2], /conditions specified in section 359 are satisfied/);
   } finally { Object.assign(CHOICE, saved); }
+});
+
+test("Peter's choices: S&P for item 3 only, the sheet for 4, 5, 8, 9 and 10", () => {
+  assert.deepEqual(CHOICE, { microRegime: 'sp', auditExemption: 'sheet', approval: 'sheet', companyInfo: 'sheet', compliance: 'sheet', policies: 'sheet' });
+});
+
+test('called up share capital note: amount from 3000, number and class from the inputs', () => {
+  const base = { companyName: 'X Ltd', reserves: null };
+  assert.equal(statementNotes(base).find(n => n.title === 'Called up share capital'), undefined, 'not produced without share capital');
+  const ok = statementNotes({ ...base, shareCapital: { amount: 2, number: 2, shareClass: 'Ordinary' } }).find(n => n.title === 'Called up share capital');
+  assert.deepEqual(ok.table, [['Allotted, called up and fully paid: 2 Ordinary shares', 2]]);
+  assert.deepEqual(ok.paragraphs, []);
+  const missing = statementNotes({ ...base, shareCapital: { amount: 0 } }).find(n => n.title === 'Called up share capital');
+  assert.match(missing.table[0][0], /\[Information required: number and class of shares\]/);
+  assert.deepEqual(missing.paragraphs, [PLACEHOLDER('share capital not in the ledger (3000 is nil)')]);
+});
+
+test('post balance sheet events note: printed only when attested', () => {
+  const t = ds => statementNotes({ companyName: 'X Ltd', disclosures: ds }).find(n => n.title === 'Events after the balance sheet date');
+  assert.equal(t([]), undefined);
+  assert.deepEqual(t([row('post_bs_events', false)]).paragraphs, ['There have been no significant events affecting the company since the financial year-end.']);
+  assert.deepEqual(t([row('post_bs_events', true, { narrative: 'Premises sold in March.' })]).paragraphs, ['Premises sold in March.']);
+  assert.equal(t([row('post_bs_events', true, { narrative: '' })]), undefined);
+});
+
+test('no separate approval note and no going-concern sentence', () => {
+  const titles = statementNotes({ companyName: 'X Ltd', disclosures: [row('post_bs_events', false), row('no_going_concern_uncertainty', false)] }).map(n => n.title);
+  assert.ok(!titles.some(t => /approval/i.test(t)));
+  const text = statementNotes({ companyName: 'X Ltd' }).flatMap(n => n.paragraphs).join(' ');
+  assert.doesNotMatch(text, /going concern/i);
 });

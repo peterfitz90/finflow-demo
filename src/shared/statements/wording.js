@@ -12,8 +12,10 @@ import { DISCLOSURE_BY_KEY, LEGAL_FORMS } from './statementInputs.js';
 
 // Peter chooses per item: 'sheet' (Stage 3a wording sheet) or 'sp' (as printed in S&P's signed
 // accounts for the year ended 8 October 2025). Default: the approved sheet.
+// Peter's choices (review of 6 Oct 2026): item 3 S&P's wording, printed once; items 4, 5, 8, 9
+// and 10 the sheet (item 8 plus the currency sentence, CURRENCY below).
 export const CHOICE = {
-  microRegime: 'sheet',
+  microRegime: 'sp',
   auditExemption: 'sheet',
   approval: 'sheet',
   companyInfo: 'sheet',
@@ -72,6 +74,9 @@ export const VARIANTS = {
   },
 };
 
+// Item 8 addition (Peter): the presentation-currency sentence, as S&P prints it.
+export const CURRENCY = 'The financial statements have been presented in Euro (€) which is also the functional currency of the company.';
+
 // Sentences for attested disclosures (sheet items 8 and 11–14). "none" prints only from a
 // recorded has_items = false row; "items" prints the accountant's own narrative.
 const NONE_TEXT = {
@@ -80,6 +85,7 @@ const NONE_TEXT = {
   commitments: 'The company had no financial commitments, guarantees or contingencies not included in the balance sheet at [yearEnd].',
   dividends: 'No dividends were paid during the year or proposed after the year end.',
   own_shares: 'The company did not hold or acquire any of its own shares during the year.',
+  post_bs_events: 'There have been no significant events affecting the company since the financial year-end.',
 };
 
 // The guard: null when there is no attestation (never a default claim).
@@ -113,9 +119,9 @@ export function balanceSheetStatements({ disclosures = [], companyName, approval
   return out;
 }
 
-// Notes 1–9 as [{ title, paragraphs: string[], table?: [label, amount][] }], numbered by the caller.
+// Notes as [{ title, paragraphs: string[], table?: [label, amount][] }], numbered by the caller.
 export function statementNotes({ companyName, legalForm, country, croNumber, registeredOffice, disclosures = [], yearEndFmt,
-  depreciationRates = {}, assetClasses = [], taxUsed = false, reserves = null }) {
+  depreciationRates = {}, assetClasses = [], taxUsed = false, reserves = null, shareCapital = null }) {
   const by = Object.fromEntries(disclosures.map(d => [d.disclosure_key, d]));
   const notes = [];
   const ph = PLACEHOLDER;
@@ -126,7 +132,7 @@ export function statementNotes({ companyName, legalForm, country, croNumber, reg
     number: croNumber || ph('registered number'), office: registeredOffice || ph('registered office'),
   });
   const liq = disclosureSentence(by.not_in_liquidation, 'not_in_liquidation');
-  notes.push({ title: 'Company information', paragraphs: [info, liq || ph('whether the company is being wound up')] });
+  notes.push({ title: 'Company information', paragraphs: [info, ...(CHOICE.companyInfo === 'sheet' ? [CURRENCY] : []), liq || ph('whether the company is being wound up')] });
 
   // 2 Statement of compliance (s.291(7) via FRS 105 6B.2)
   notes.push({ title: 'Statement of compliance', paragraphs: [VARIANTS.compliance[CHOICE.compliance]] });
@@ -154,8 +160,21 @@ export function statementNotes({ companyName, legalForm, country, croNumber, reg
       paragraphs: [disclosureSentence(by.dividends, 'dividends') || ph('dividends paid or proposed')],
     });
   }
+  // Called-up share capital (Peter): the amount from 3000, the number and class from the year inputs.
+  if (shareCapital) {
+    const { amount = 0, number, shareClass } = shareCapital;
+    const desc = number && shareClass ? `${Number(number).toLocaleString('en-IE')} ${shareClass} shares` : ph('number and class of shares');
+    notes.push({
+      title: 'Called up share capital',
+      table: [[`Allotted, called up and fully paid: ${desc}`, amount]],
+      paragraphs: amount === 0 ? [ph('share capital not in the ledger (3000 is nil)')] : [],
+    });
+  }
   // 7 Own shares (s.320) and the s.328 information otherwise in a directors' report (s.325(1A)(b))
   notes.push({ title: 'Own shares', paragraphs: [disclosureSentence(by.own_shares, 'own_shares') || ph('own shares held or acquired')] });
+  // Events after the balance sheet date (Peter): printed only when attested.
+  const pbse = disclosureSentence(by.post_bs_events, 'post_bs_events');
+  if (pbse) notes.push({ title: 'Events after the balance sheet date', paragraphs: [pbse] });
   // 8–9 conditional: only when recorded with details
   for (const [key, title] of [['format_change', 'Change of format'], ['comparatives_adjusted', 'Comparative amounts']]) {
     const r = by[key];
