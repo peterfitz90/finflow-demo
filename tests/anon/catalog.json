@@ -6,8 +6,9 @@
   },
   "tables": [
     "ap_invoices", "asset_depreciation_runs", "bank_accounts", "bank_connections", "bank_matches",
-    "bank_transactions", "chart_of_accounts", "checklists", "companies", "contracts", "customers",
-    "expenses", "fixed_assets", "invoice_lines", "invoice_sequences", "invoice_settings", "invoices",
+    "bank_transactions", "chart_of_accounts", "checklists", "companies", "company_directors",
+    "company_statutory_profile", "contracts", "customers",
+    "expenses", "fixed_assets", "fs_disclosure_events", "fs_disclosures", "fs_year_inputs", "invoice_lines", "invoice_sequences", "invoice_settings", "invoices",
     "journal_attachments", "journals", "on_account_entries", "pending_business_owner_invites",
     "period_lock_events", "period_signoff_events", "prior_year_balances", "provider_connections",
     "public_stats", "recurring_journal_runs", "recurring_journals", "revenue_events",
