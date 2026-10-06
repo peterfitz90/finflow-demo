@@ -15,6 +15,10 @@
 // - Every liability account in debit at the year end is shown, account by account and with no
 //   netting across accounts, as other debtors within C. A credit balance stays on its creditor
 //   line. This covers 2400 Directors Loan Account (debit: a debtor; credit: a creditor).
+// - Mirror rule: every current-asset account (mapped to C or D) in credit at the year end, such as
+//   an overdrawn bank, is shown as a creditor within E, account by account, with no netting.
+//   Fixed-asset accounts and accumulated depreciation are excluded: a fixed-asset class that nets
+//   to a credit stays within B (the guard lists it for information).
 // - The mapping is the single table MAPPING below: changing a line is a one-line edit.
 
 // Balance sheet Format 1.
@@ -140,16 +144,19 @@ export function computeSchedule3b(journals, { fyStart, yearEnd, chart = [] }) {
       mapping.push({ code, name: name(code), line });
       continue;
     }
-    // A liability account in debit is shown as other debtors, account by account.
+    // A liability account in debit is shown as other debtors, and a current-asset account in
+    // credit as a creditor, account by account.
     const debitLiability = MAPPING[code].type === 'liability' && dTo > 0;
+    const creditCurrentAsset = MAPPING[code].type === 'asset' && (line === 'C' || line === 'D') && dTo < 0;
     if (debitLiability) line = 'C';
+    if (creditCurrentAsset) line = 'E';
     if (line === 'K2') {
       if (code === '3400') reserves.dividends += dTo; else reserves.retainedEarnings += -dTo;
     }
     // Assets (A–D) are shown as debits; creditors, provisions, accruals and capital as credits.
     const sign = ['A', 'B', 'C', 'D'].includes(line) ? 1 : -1;
     if (line !== 'K2') { bs[line].amount += sign * dTo; bs[line].codes.push({ code, amount: eur(sign * dTo) }); }
-    mapping.push({ code, name: name(code), line: debitLiability ? `${place.line}→C (in debit)` : line });
+    mapping.push({ code, name: name(code), line: debitLiability ? `${place.line}→C (in debit)` : creditCurrentAsset ? `${place.line}→E (in credit)` : line });
   }
 
   // P&L subtotal and reserves.

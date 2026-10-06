@@ -19,10 +19,10 @@ test('a clean ledger with an opening journal raises nothing', () => {
   assert.deepEqual(run(js), []);
 });
 
-test('every warning carries a severity; only liability_debit is informational', () => {
+test('every warning carries a severity; only liability_debit and asset_credit are informational', () => {
   const ws = run([J('2025-01-02', '2100', '1000', 50)]);
   assert.deepEqual(ws.map(w => [w.id, w.severity]), [
-    ['no_opening', 'warn'], ['negative_bank', 'warn'], ['negative_bank_in_period', 'warn'], ['liability_debit', 'info'],
+    ['no_opening', 'warn'], ['negative_bank', 'warn'], ['negative_bank_in_period', 'warn'], ['liability_debit', 'info'], ['asset_credit', 'info'],
   ]);
 });
 

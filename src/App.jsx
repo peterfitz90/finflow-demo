@@ -14937,11 +14937,17 @@ function FinancialStatements({ company, companyName }) {
         <div className="no-print" style={{ marginBottom: 14, padding: "12px 16px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border)", borderLeft: "4px solid var(--muted)", background: "var(--surface2)", fontSize: 13, lineHeight: 1.6, color: "var(--text)" }}>
           <div style={{ fontWeight: 700, marginBottom: 4 }}>For information</div>
           {guardInfo.map(w => (
-            <div key={w.id}>
+            <div key={w.id} style={{ marginTop: 6 }}>
               {w.id === 'liability_debit' && <>
                 Liability accounts in debit at the year end. Check whether each is a genuine debit (for example a VAT refund due) or a missing opening balance:
                 <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>
                   {w.items.map(x => <li key={x.code}><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{x.code}</span>{x.name ? ` ${x.name}` : ''}: {fmtEUR(x.debit)} Dr</li>)}
+                </ul>
+              </>}
+              {w.id === 'asset_credit' && <>
+                Asset accounts in credit at the year end. Current-asset accounts in credit are shown as creditors; a fixed-asset class in credit stays within fixed assets. Check each one:
+                <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>
+                  {w.items.map(x => <li key={x.code}><span style={{ fontFamily: "'Source Code Pro',monospace" }}>{x.code}</span>{x.name ? ` ${x.name}` : ''}{x.kind === 'fixed-asset class' ? ' (class, net of depreciation)' : ''}: {fmtEUR(x.credit)} Cr</li>)}
                 </ul>
               </>}
             </div>

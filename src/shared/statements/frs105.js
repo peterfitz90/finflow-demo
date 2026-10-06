@@ -14,7 +14,7 @@ import { LEGACY_GL_ACCOUNTS as GL_ACCOUNTS } from './legacyGlAccounts.js';
 import { GL_ACCOUNTS as CURRENT_GL_ACCOUNTS } from '../glAccounts.js';
 import { fetchAllRows } from '../fetchAllRows.js';
 import { monthEnd } from '../dates.js';
-import { computeSchedule3b } from './schedule3b.js';
+import { computeSchedule3b, MAPPING as S3B_MAPPING } from './schedule3b.js';
 
 export const FRS105_MODES = ['legacy', 'schedule3b'];
 
@@ -133,7 +133,7 @@ const glName = code => CURRENT_GL_ACCOUNTS.find(a => a.code === code)?.name || n
 // output for the same journals. bankCodes: the company's active bank nominals (fallback 1000).
 // yearEnd: the statements' year end. Balances are debit minus credit, the same sum nominal_balance_as_of returns. Every rule works
 // on this one paginated journal set: no further queries, none per month.
-// Each warning has severity 'warn', except 'liability_debit', which is 'info'.
+// Each warning has severity 'warn', except 'liability_debit' and 'asset_credit', which are 'info'.
 export function frs105Warnings(journals, result, { bankCodes = ['1000'], yearEnd = null, ledgerCompleteFrom = null } = {}) {
   const warnings = [];
   const debitNet = code => round2((result.rawD[code] || 0) - (result.rawC[code] || 0));
@@ -214,6 +214,27 @@ export function frs105Warnings(journals, result, { bankCodes = ['1000'], yearEnd
     .filter(x => x.debit > 0.005)
     .sort((x, y) => (x.code < y.code ? -1 : 1));
   if (liabDebit.length) warnings.push({ id: 'liability_debit', severity: 'info', items: liabDebit });
+
+  // (f) information: asset accounts in credit at the year end. Current-asset accounts (Schedule
+  // 3B lines C and D) individually; fixed assets by class, where a class is the cost account and
+  // its accumulated-depreciation account (15x0 and 15x1), listed when the class nets to a credit.
+  const assetCredit = [];
+  const classes = new Map();
+  for (const c of result.allCodes) {
+    const m = S3B_MAPPING[c];
+    if (!m || m.type !== 'asset') continue;
+    const bal = debitNet(c);
+    if (m.line === 'B') {
+      const cls = c.slice(0, 3) + '0';
+      classes.set(cls, round2((classes.get(cls) || 0) + bal));
+    } else if (bal < -0.005) {
+      assetCredit.push({ code: c, name: glName(c), credit: round2(-bal), kind: 'current asset' });
+    }
+  }
+  for (const [cls, bal] of [...classes].sort()) {
+    if (bal < -0.005) assetCredit.push({ code: cls, name: glName(cls), credit: round2(-bal), kind: 'fixed-asset class' });
+  }
+  if (assetCredit.length) warnings.push({ id: 'asset_credit', severity: 'info', items: assetCredit.sort((x, y) => (x.code < y.code ? -1 : 1)) });
 
   return warnings.map(w => ({ severity: 'warn', ...w }));
 }

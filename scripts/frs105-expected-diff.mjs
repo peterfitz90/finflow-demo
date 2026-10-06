@@ -49,9 +49,9 @@ const LEGACY_BS = new Set(['cash', 'debtors', 'fixed assets', 'creditors', 'shar
 w('# FRS 105 Schedule 3B: expected differences', '', `Generated ${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC, read-only.`, '');
 w('## Mapping table', '', '| Code | Type | Schedule 3B line | Legacy placement | Status |', '|---|---|---|---|---|');
 for (const [code, m] of Object.entries(MAPPING).sort()) {
-  w(`| ${code}${STAGE2[code] ? ` ${STAGE2[code]}` : ''} | ${m.type} | ${m.line} ${LINE_LABEL[m.line] || ''}${m.type === 'liability' ? '; C (other debtors) when in debit' : ''} | ${legacyPlace(code)} | ${STAGE2[code] ? 'added in Stage 2' : 'existing'} |`);
+  w(`| ${code}${STAGE2[code] ? ` ${STAGE2[code]}` : ''} | ${m.type} | ${m.line} ${LINE_LABEL[m.line] || ''}${m.type === 'liability' ? '; C (other debtors) when in debit' : (m.line === 'C' || m.line === 'D') ? '; E (creditor) when in credit' : ''} | ${legacyPlace(code)} | ${STAGE2[code] ? 'added in Stage 2' : 'existing'} |`);
 }
-w('', 'Any code not in this table, missing from the company\'s own chart, or whose chart type differs is reported as unmapped. Every liability account in debit at the year end is shown as other debtors within C, account by account. Accruals (2300) are within E; there is no separate J line.', '');
+w('', 'Any code not in this table, missing from the company\'s own chart, or whose chart type differs is reported as unmapped. Every liability account in debit at the year end is shown as other debtors within C, and every current-asset account (C or D) in credit as a creditor within E, account by account, with no netting. Fixed-asset accounts stay in B whatever their sign. Accruals (2300) are within E; there is no separate J line.', '');
 
 const { data: companies, error } = await db.from('companies').select('id, name, year_end_month').eq('company_type', 'Limited Company').order('name');
 if (error) { console.error(error.message); process.exit(2); }
@@ -111,7 +111,8 @@ for (const co of companies) {
       const old = legacyPlace(code);
       const np = placeCode(code, chartByCode);
       const debitLiab = !!np.line && MAPPING[code].type === 'liability' && dn > 0;
-      const newLine = debitLiab ? 'C' : np.line;
+      const creditAsset = !!np.line && MAPPING[code].type === 'asset' && (np.line === 'C' || np.line === 'D') && dn < 0;
+      const newLine = debitLiab ? 'C' : creditAsset ? 'E' : np.line;
       const isPnlNew = newLine && PNL_KEYS.has(newLine);
       const isPnlOld = ['turnover', 'cost of sales', 'administrative expenses', 'interest'].includes(old);
       // Effect on the P&L reserve: legacy puts every non-BS-range balance in the plug; new puts P&L and K2 codes there.
@@ -123,6 +124,7 @@ for (const co of companies) {
       if (!dn && !yr) continue;
       let reason = null;
       if (!np.line) reason = `unmapped balance now visible (${np.reason})`;
+      else if (creditAsset) reason = `current-asset account in credit, shown as a creditor in E (previously netted within ${old})`;
       else if (debitLiab) reason = `liability account in debit, shown as other debtors in C${old === 'absorbed in P&L reserve' ? ' (previously absorbed in the P&L reserve)' : ' (previously netted within creditors)'}`;
       else if (old === 'absorbed in P&L reserve' && !newInReserve) reason = 'previously absorbed in the P&L reserve, now shown on its own line';
       else if (code === '3100' || newLine === 'K2') reason = 'reserve now derived from the ledger';
@@ -138,7 +140,10 @@ for (const co of companies) {
     w(`Profit: legacy ${fmt(L.pfYear)}, Schedule 3B ${fmt(S.profit)}, difference ${fmt(r2(L.pfYear - S.profit))} (explained by codes above: ${fmt(r2(profitDiff))}).`,
       `P&L reserve: legacy balancing figure ${fmt(L.retainedEarns)}, derived ${fmt(b('K2'))}, difference ${fmt(reserveGap)} (explained by codes above: ${fmt(r2(plugDiff))}).`, '');
     if (Math.abs(r2(reserveGap - plugDiff)) >= 0.01 || Math.abs(r2(L.pfYear - S.profit - profitDiff)) >= 0.01) w('**UNEXPLAINED DIFFERENCE: investigate.**', '');
-    const noOpening = frs105Warnings(journals, S, { yearEnd }).some(x => x.id === 'no_opening');
+    const guard = frs105Warnings(journals, S, { yearEnd });
+    const noOpening = guard.some(x => x.id === 'no_opening');
+    const assetCredit = guard.find(x => x.id === 'asset_credit');
+    if (assetCredit) w(`Asset accounts in credit (information): ${assetCredit.items.map(x => `${x.code} ${x.name || ''}${x.kind === 'fixed-asset class' ? ' (fixed-asset class, stays in B)' : ''} ${fmt(x.credit)} Cr`).join('; ')}.`, '');
     const draft = [S.unmapped.length ? 'unmapped' : '', Math.abs(S.imbalance) >= 0.005 ? 'imbalance' : '', noOpening ? 'no opening balances' : ''].filter(Boolean).join(', ');
     w(`DRAFT watermark: ${draft || 'no'}.`, '');
     summary.push({ draft, co: co.name, yearEnd, journals: journals.length, profitOld: L.pfYear, profitNew: S.profit, reserveOld: L.retainedEarns, reserveNew: b('K2'), imbalance: S.imbalance, unmapped: S.unmapped.map(u => u.code).join(' '), draftReasons: [S.unmapped.length ? 'unmapped' : '', Math.abs(S.imbalance) >= 0.005 ? 'imbalance' : ''].filter(Boolean).join(', ') });

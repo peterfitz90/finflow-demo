@@ -177,3 +177,41 @@ test('net current assets = C + D - E with accruals inside E; net assets = G - H 
   assert.equal(res.netAssets, b('G') - b('H') - b('I'));
   assert.equal(res.netAssets, b('K'));
 });
+
+test('mirror rule: current-asset accounts in credit go to creditors account by account, with no netting', () => {
+  const res = s3b([
+    J('2025-01-02', '6100', '1000', 500),     // bank overdrawn 500
+    J('2025-01-03', '1300', '4000', 80),      // Stripe clearing in debit 80
+    J('2025-01-04', '1000', '1100', 40),      // trade debtors in credit 40
+    J('2025-01-05', '1000', '1200', 15),      // prepayments (D) in credit 15
+    J('2025-01-06', '1600', '2100', 23),      // VAT receivable in debit 23
+  ]);
+  assert.deepEqual(res.bs.E.codes, [{ code: '1000', amount: 445 }, { code: '1100', amount: 40 }, { code: '1200', amount: 15 }, { code: '2100', amount: 23 }]);
+  assert.deepEqual(res.bs.C.codes, [{ code: '1300', amount: 80 }, { code: '1600', amount: 23 }]);
+  assert.equal(res.bs.D.amount, 0);
+  assert.equal(res.imbalance, 0);
+  assert.ok(res.mapping.some(m => m.code === '1000' && m.line === 'C→E (in credit)'));
+  assert.ok(res.mapping.some(m => m.code === '1200' && m.line === 'D→E (in credit)'));
+});
+
+test('mirror rule: fixed-asset accounts are excluded; a class netting to a credit stays in fixed assets', () => {
+  const res = s3b([
+    J('2024-12-31', '1000', '3000', 1000, 'OPENING'),
+    J('2025-06-28', '6950', '1500', 600),     // Heros-shaped: depreciation credited to cost, no cost posted
+    J('2025-07-01', '1510', '1000', 400), J('2025-08-01', '6950', '1511', 100),
+  ]);
+  assert.equal(res.bs.B.amount, -300);       // -600 + 400 - 100, still within B
+  assert.ok(!res.bs.E.codes.some(c => c.code.startsWith('15')));
+  const info = frs105Warnings([], res, { yearEnd: '2025-12-31' }).find(w => w.id === 'asset_credit');
+  assert.equal(info.severity, 'info');
+  assert.deepEqual(info.items, [{ code: '1500', name: 'Fixed Assets', credit: 600, kind: 'fixed-asset class' }]);
+});
+
+test('asset-in-credit card lists current assets individually and only classes that net to a credit', () => {
+  const res = s3b([
+    J('2024-12-31', '1000', '3000', 100, 'OPENING'), J('2025-02-01', '6100', '1000', 150),
+    J('2025-03-01', '1000', '1100', 30), J('2025-04-01', '1520', '1000', 500), J('2025-05-01', '6950', '1521', 200),
+  ]);
+  const info = frs105Warnings([], res, { yearEnd: '2025-12-31' }).find(w => w.id === 'asset_credit');
+  assert.deepEqual(info.items.map(x => [x.code, x.credit, x.kind]), [['1000', 520, 'current asset'], ['1100', 30, 'current asset']]);
+});
