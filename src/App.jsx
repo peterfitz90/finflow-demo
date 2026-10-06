@@ -6991,7 +6991,7 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
                       </div>
                       {runway.kind !== 'insufficient' && (
                         <div style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
-                          {runway.kind === 'burning' ? `Net burn · ${fmt(burn.avgNetBurn)}/mo` : `Net inflow · ${fmt(-burn.avgNetBurn)}/mo`} (3-month average)
+                          {runway.kind === 'burning' ? `Net burn · ${fmt(burn.avgNetBurn)}/mo` : `Net inflow · ${fmt(-burn.avgNetBurn)}/mo`} (3-month average, before tax)
                         </div>
                       )}
                     </div>
@@ -7284,7 +7284,7 @@ function SignOffPanel({ companyId, selPeriod, canSignOff }) {
             {cur.signed.reason && <div style={{ color: "var(--text-muted)", marginTop: 4 }}>“{cur.signed.reason}”</div>}
             {cur.signed.snapshot && (
               <div style={{ color: "var(--text-faint)", fontSize: 11, marginTop: 6, fontFamily: "Source Code Pro, monospace" }}>
-                At sign-off: income {fmtEUR(cur.signed.snapshot.income)} · expenses {fmtEUR(cur.signed.snapshot.expenses)} · net {fmtEUR(cur.signed.snapshot.net_profit)} · bank {fmtEUR(cur.signed.snapshot.bank_balance)} · {cur.signed.snapshot.journal_count} journals
+                At sign-off: income {fmtEUR(cur.signed.snapshot.income)} · expenses {fmtEUR(cur.signed.snapshot.expenses)} · profit before tax {fmtEUR(cur.signed.snapshot.net_profit)} · bank {fmtEUR(cur.signed.snapshot.bank_balance)} · {cur.signed.snapshot.journal_count} journals
               </div>
             )}
             <div style={{ marginTop: 8 }}>
@@ -14766,7 +14766,6 @@ function FinancialStatements({ company, companyName }) {
     ["Total assets less current liabilities", "", fa(s3bs.G.amount)],
     s3bs.H.amount !== 0 ? ["Creditors: amounts falling due after more than one year", "", fa(-s3bs.H.amount)] : [],
     s3bs.I.amount !== 0 ? ["Provisions for liabilities", "", fa(-s3bs.I.amount)] : [],
-    s3bs.J.amount !== 0 ? ["Accruals and deferred income", "", fa(-s3bs.J.amount)] : [],
     ["", "", fa(frs105.netAssets)],
     [],
     ["Capital and reserves"],
@@ -15034,7 +15033,6 @@ function FinancialStatements({ company, companyName }) {
           {fsRow("Total assets less current liabilities", { c2: s3bs.G.amount, bold: true })}
           {s3bs.H.amount !== 0 && fsRow("Creditors: amounts falling due after more than one year", { c2: -s3bs.H.amount })}
           {s3bs.I.amount !== 0 && fsRow("Provisions for liabilities", { c2: -s3bs.I.amount })}
-          {s3bs.J.amount !== 0 && fsRow("Accruals and deferred income", { c2: -s3bs.J.amount })}
           {fsRow("", { c2: frs105.netAssets, dbl: true, bold: true })}
           {fsDivider()}
           {fsHead("Capital and reserves")}

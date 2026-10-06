@@ -25,6 +25,7 @@ export const COA_SEED = [
   { code: "2000", name: "Trade Creditors",          account_type: "liability", category: "Current Liabilities",   is_system: true },
   { code: "2100", name: "VAT Control",              account_type: "liability", category: "Current Liabilities",   is_system: true },
   { code: "2200", name: "PAYE & PRSI Payable",      account_type: "liability", category: "Current Liabilities",   is_system: true },
+  { code: "2210", name: "Corporation Tax Payable",  account_type: "liability", category: "Current Liabilities",   is_system: true },
   { code: "2250", name: "Net Wages Payable",        account_type: "liability", category: "Current Liabilities",   is_system: true },
   { code: "2260", name: "Pension Payable",          account_type: "liability", category: "Current Liabilities",   is_system: true },
   { code: "2300", name: "Accruals",                 account_type: "liability", category: "Current Liabilities",   is_system: true },
@@ -33,9 +34,11 @@ export const COA_SEED = [
   { code: "2500", name: "Bank Loan",                account_type: "liability", category: "Long-term Liabilities", is_system: true },
   { code: "3000", name: "Share Capital",            account_type: "equity",    category: "Equity",                is_system: true },
   { code: "3100", name: "Retained Earnings",        account_type: "equity",    category: "Equity",                is_system: true },
+  { code: "3400", name: "Dividends Paid",           account_type: "equity",    category: "Equity",                is_system: true },
   { code: "4000", name: "Sales Revenue",            account_type: "income",    category: "Income",                is_system: true },
   { code: "4100", name: "Service Income",           account_type: "income",    category: "Income",                is_system: true },
   { code: "4200", name: "Other Income",             account_type: "income",    category: "Income",                is_system: true },
+  { code: "4250", name: "Profit on Disposal of Fixed Assets", account_type: "income", category: "Income",          is_system: true },
   { code: "4300", name: "Interest Received",        account_type: "income",    category: "Income",                is_system: true },
   { code: "5000", name: "Cost of Sales",            account_type: "expense",   category: "Cost of Sales",         is_system: true },
   { code: "5100", name: "Materials & Supplies",     account_type: "expense",   category: "Cost of Sales",         is_system: true },
@@ -47,6 +50,7 @@ export const COA_SEED = [
   { code: "6300", name: "Telecoms & IT",            account_type: "expense",   category: "Overheads",             is_system: true },
   { code: "6400", name: "Professional Fees",        account_type: "expense",   category: "Overheads",             is_system: true },
   { code: "6500", name: "Bank Charges & Interest",  account_type: "expense",   category: "Overheads",             is_system: true },
+  { code: "6550", name: "Interest Payable",         account_type: "expense",   category: "Overheads",             is_system: true },
   { code: "6600", name: "Sundry Expenses",          account_type: "expense",   category: "Overheads",             is_system: true },
   { code: "6750", name: "Settlement Rounding",      account_type: "expense",   category: "Overheads",             is_system: true },
   { code: "6700", name: "Marketing & Advertising",  account_type: "expense",   category: "Overheads",             is_system: true },
@@ -54,6 +58,7 @@ export const COA_SEED = [
   { code: "6900", name: "Repairs & Maintenance",       account_type: "expense",   category: "Overheads",  is_system: true },
   { code: "6910", name: "Loss on Disposal of Assets", account_type: "expense",   category: "Overheads",  is_system: true },
   { code: "6950", name: "Depreciation",                account_type: "expense",   category: "Overheads",  is_system: true },
+  { code: "8000", name: "Corporation Tax",          account_type: "expense",   category: "Taxation",              is_system: true },
 ];
 
 // Sole Trader default chart — identical to COA_SEED except: Directors Loan Account (2400) is

@@ -8,7 +8,10 @@
 // Mode 'schedule3b' (STA-01 Stage 2) maps every nominal to a Schedule 3B line with no balancing
 // figure (see schedule3b.js); it needs the company's chart of accounts.
 // scripts/frs105-regression.mjs proves this file matches the pre-extraction code to the cent.
-import { GL_ACCOUNTS } from '../glAccounts.js';
+// Legacy mode types accounts from the frozen pre-Stage-2 list (the moved code below refers to it
+// as GL_ACCOUNTS); names in warnings come from the current list.
+import { LEGACY_GL_ACCOUNTS as GL_ACCOUNTS } from './legacyGlAccounts.js';
+import { GL_ACCOUNTS as CURRENT_GL_ACCOUNTS } from '../glAccounts.js';
 import { fetchAllRows } from '../fetchAllRows.js';
 import { monthEnd } from '../dates.js';
 import { computeSchedule3b } from './schedule3b.js';
@@ -124,7 +127,7 @@ export const FRS105_LEGACY_BS_RANGES = [['1000', '1099'], ['1100', '1299'], ['15
 export const FRS105_LEGACY_PNL_RANGES = [['4000', '4999'], ['5000', '5999'], ['6000', '6999'], ['7000', '7999']];
 const inAnyRange = (code, ranges) => ranges.some(([f, t]) => code >= f && code <= t);
 const round2 = n => Math.round(n * 100) / 100;
-const glName = code => GL_ACCOUNTS.find(a => a.code === code)?.name || null;
+const glName = code => CURRENT_GL_ACCOUNTS.find(a => a.code === code)?.name || null;
 
 // journals: every journal up to the year end (fetchJournalsToDate). result: computeFrs105's
 // output for the same journals. bankCodes: the company's active bank nominals (fallback 1000).

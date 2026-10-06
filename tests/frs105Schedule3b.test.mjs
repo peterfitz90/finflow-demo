@@ -16,17 +16,11 @@ const seed = name => {
     .map(m => ({ code: m[1], name: m[2], account_type: m[3], category: m[4] }));
 };
 const LTD = seed('COA_SEED'), SOLE = seed('COA_SEED_SOLE_TRADER');
-// The Stage 2 proposed nominals (not in the seed until approved).
-const PROPOSED = [
-  { code: '2210', name: 'Corporation Tax Payable', account_type: 'liability', category: 'Current Liabilities' },
-  { code: '3400', name: 'Dividends Paid', account_type: 'equity', category: 'Equity' },
-  { code: '4250', name: 'Profit on Disposal of Fixed Assets', account_type: 'income', category: 'Income' },
-  { code: '6550', name: 'Interest Payable', account_type: 'expense', category: 'Overheads' },
-  { code: '8000', name: 'Corporation Tax', account_type: 'expense', category: 'Taxation' },
-];
-const LTD_NEW = [...LTD, ...PROPOSED];
+// The limited seed now includes the Stage 2 nominals.
+const STAGE2 = ['2210', '3400', '4250', '6550', '8000'];
+const LTD_NEW = LTD;
 const chartMap = rows => new Map(rows.map(r => [r.code, r]));
-const LINE_KEYS = new Set([...BS_LINES, ...RESERVE_LINES, ...PNL_LINES].map(l => l.key).concat('DLA'));
+const LINE_KEYS = new Set([...BS_LINES, ...RESERVE_LINES, ...PNL_LINES].map(l => l.key));
 
 test('every limited-company seed code and proposed code maps to exactly one line with a matching type', () => {
   assert.ok(LTD.length >= 48);
@@ -48,8 +42,11 @@ test('sole-trader-only codes are reported, not placed', () => {
   for (const code of ['3200', '3300']) assert.equal(placeCode(code, chartMap(SOLE)).reason, 'no Schedule 3B line for this code');
 });
 
-test('the mapping covers exactly the limited seed plus the proposed codes', () => {
-  assert.deepEqual(Object.keys(MAPPING).sort(), LTD_NEW.map(r => r.code).sort());
+test('the mapping covers exactly the limited seed, which includes the Stage 2 nominals', () => {
+  assert.deepEqual(Object.keys(MAPPING).sort(), LTD.map(r => r.code).sort());
+  for (const code of STAGE2) assert.ok(LTD.some(r => r.code === code), `${code} missing from the seed`);
+  assert.equal(LTD.find(r => r.code === '8000').category, 'Taxation');
+  assert.ok(!SOLE.some(r => STAGE2.includes(r.code)), 'sole-trader seed must not get the company nominals');
 });
 
 test('every mapped code appears exactly once and every line key is real', () => {
@@ -117,9 +114,9 @@ test('lines, signs and the directors loan placed by sign', () => {
   assert.deepEqual([p('1'), p('2'), p('3'), p('4'), p('5'), p('6'), p('7'), p('8')], [5000, 7, 400, 1000, 150, 300, 90, 3067]);
   assert.equal(amt('B'), 1350);                     // 1500 cost - 150 depreciation
   assert.equal(amt('D'), 120);
-  assert.equal(amt('J'), 300);
   assert.equal(amt('H'), 30000);
-  assert.equal(amt('E'), 90);                       // corporation tax payable
+  assert.equal(amt('E'), 390);                      // accruals 300 + corporation tax payable 90, both within E
+  assert.equal(res.bs.J, undefined);                // no separate J line
   assert.ok(res.bs.C.codes.some(c => c.code === '2400' && c.amount === 250));   // DLA in debit is a debtor
   assert.equal(res.reserves.dividends, 500);
   assert.equal(amt('K2'), 3067 - 500);
@@ -152,4 +149,31 @@ test('ledger_complete_from on or before the period start satisfies condition (b)
   assert.ok(frs105Warnings(js, res, { yearEnd: '2025-12-31' }).some(w => w.id === 'no_opening'));
   assert.ok(!frs105Warnings(js, res, { yearEnd: '2025-12-31', ledgerCompleteFrom: '2025-01-01' }).some(w => w.id === 'no_opening'));
   assert.ok(frs105Warnings(js, res, { yearEnd: '2025-12-31', ledgerCompleteFrom: '2025-03-01' }).some(w => w.id === 'no_opening'));
+});
+
+test('liability accounts in debit go to current assets account by account, with no netting', () => {
+  const res = s3b([
+    J('2024-12-31', '1000', '3000', 100, 'OPENING'),
+    J('2025-02-01', '2100', '1000', 50),      // VAT control in debit 50
+    J('2025-02-02', '1000', '2200', 30),      // PAYE in credit 30
+    J('2025-02-03', '2500', '1000', 20),      // bank loan in debit 20
+    J('2025-02-04', '1000', '2000', 70),      // creditors in credit 70
+  ]);
+  const C = res.bs.C.codes, E = res.bs.E.codes;
+  assert.deepEqual(C.filter(c => c.code !== '1000'), [{ code: '2100', amount: 50 }, { code: '2500', amount: 20 }]);
+  assert.deepEqual(E, [{ code: '2000', amount: 70 }, { code: '2200', amount: 30 }]);
+  assert.equal(res.bs.H.amount, 0);
+  assert.equal(res.bs.E.amount, 100);       // 70 + 30, not reduced by the 50 debit
+  assert.equal(res.imbalance, 0);
+  assert.ok(res.mapping.some(m => m.code === '2100' && m.line === 'E→C (in debit)'));
+  assert.ok(res.mapping.some(m => m.code === '2500' && m.line === 'H→C (in debit)'));
+});
+
+test('net current assets = C + D - E with accruals inside E; net assets = G - H - I', () => {
+  const res = s3b([J('2024-12-31', '1000', '3000', 1000, 'OPENING'), J('2025-03-01', '1200', '1000', 100), J('2025-03-02', '6100', '2300', 40), J('2025-03-03', '1000', '2500', 500)]);
+  const b = k => res.bs[k].amount;
+  assert.equal(b('F'), b('C') + b('D') - b('E'));
+  assert.equal(b('E'), 40);
+  assert.equal(res.netAssets, b('G') - b('H') - b('I'));
+  assert.equal(res.netAssets, b('K'));
 });

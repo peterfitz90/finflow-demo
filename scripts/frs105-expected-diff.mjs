@@ -15,9 +15,8 @@ const url = process.env.VITE_SUPABASE_URL, key = process.env.SUPABASE_SERVICE_RO
 if (!url || !key) { console.error('Set VITE_SUPABASE_URL and SUPABASE_SERVICE_ROLE_KEY (see header).'); process.exit(2); }
 const db = createClient(url, key, { auth: { persistSession: false } });
 
-const PROPOSED = { 2210: 'Corporation Tax Payable', 3400: 'Dividends Paid', 4250: 'Profit on Disposal of Fixed Assets', 6550: 'Interest Payable', 8000: 'Corporation Tax' };
+const STAGE2 = { 2210: 'Corporation Tax Payable', 3400: 'Dividends Paid', 4250: 'Profit on Disposal of Fixed Assets', 6550: 'Interest Payable', 8000: 'Corporation Tax' };
 const LINE_LABEL = Object.fromEntries([...BS_LINES, ...RESERVE_LINES, ...PNL_LINES.map(l => ({ ...l, key: l.key, label: `P&L ${l.key} ${l.label}` }))].map(l => [l.key, l.label]));
-LINE_LABEL.DLA = 'C if in debit, E if in credit (directors loan, by sign)';
 const PNL_KEYS = new Set(PNL_LINES.map(l => l.key));
 
 const fmt = n => (Math.abs(n) < 0.005 ? '–' : n.toLocaleString('en-IE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
@@ -50,9 +49,9 @@ const LEGACY_BS = new Set(['cash', 'debtors', 'fixed assets', 'creditors', 'shar
 w('# FRS 105 Schedule 3B: expected differences', '', `Generated ${new Date().toISOString().slice(0, 16).replace('T', ' ')} UTC, read-only.`, '');
 w('## Mapping table', '', '| Code | Type | Schedule 3B line | Legacy placement | Status |', '|---|---|---|---|---|');
 for (const [code, m] of Object.entries(MAPPING).sort()) {
-  w(`| ${code}${PROPOSED[code] ? ` ${PROPOSED[code]}` : ''} | ${m.type} | ${m.line} ${LINE_LABEL[m.line] || ''} | ${legacyPlace(code)} | ${PROPOSED[code] ? 'proposed, awaiting approval' : 'existing'} |`);
+  w(`| ${code}${STAGE2[code] ? ` ${STAGE2[code]}` : ''} | ${m.type} | ${m.line} ${LINE_LABEL[m.line] || ''}${m.type === 'liability' ? '; C (other debtors) when in debit' : ''} | ${legacyPlace(code)} | ${STAGE2[code] ? 'added in Stage 2' : 'existing'} |`);
 }
-w('', 'Any code not in this table, missing from the company\'s own chart, or whose chart type differs is reported as unmapped.', '');
+w('', 'Any code not in this table, missing from the company\'s own chart, or whose chart type differs is reported as unmapped. Every liability account in debit at the year end is shown as other debtors within C, account by account. Accruals (2300) are within E; there is no separate J line.', '');
 
 const { data: companies, error } = await db.from('companies').select('id, name, year_end_month').eq('company_type', 'Limited Company').order('name');
 if (error) { console.error(error.message); process.exit(2); }
@@ -95,7 +94,7 @@ for (const co of companies) {
 
     w('**Balance sheet**', '', '| Legacy | € | Schedule 3B Format 1 | € |', '|---|---:|---|---:|');
     const oldB = [['Tangible assets', L.fixedAssets], ['Debtors', L.debtors], ['Cash at bank and in hand', L.cashAtBank], ['Creditors < 1 year', -L.creditors], ['Net current assets', L.netCurrAssets], ['Total assets less current liabilities', L.totAssetsLCL], ['', null], ['', null], ['', null], ['Called up share capital', L.shareCapital], ['Profit and loss account (balancing figure)', L.retainedEarns], ['Capital and reserves', L.totAssetsLCL], ['', null]];
-    const newB = [['B Fixed assets', b('B')], ['C Current assets', b('C')], ['D Prepayments and accrued income', b('D')], ['E Creditors < 1 year', -b('E')], ['F Net current assets', b('F')], ['G Total assets less current liabilities', b('G')], ['H Creditors > 1 year', -b('H')], ['J Accruals and deferred income', -b('J')], ['Net assets', S.netAssets], ['K Called up share capital', b('K1')], ['K Profit and loss account (derived)', b('K2')], ['K Capital and reserves', b('K')], ['Imbalance (unmapped balances)', S.imbalance]];
+    const newB = [['B Fixed assets', b('B')], ['C Current assets', b('C')], ['D Prepayments and accrued income', b('D')], ['E Creditors < 1 year', -b('E')], ['F Net current assets', b('F')], ['G Total assets less current liabilities', b('G')], ['H Creditors > 1 year', -b('H')], ['', null], ['Net assets', S.netAssets], ['K Called up share capital', b('K1')], ['K Profit and loss account (derived)', b('K2')], ['K Capital and reserves', b('K')], ['Imbalance (unmapped balances)', S.imbalance]];
     for (let k = 0; k < Math.max(oldB.length, newB.length); k++) {
       const o = oldB[k] || ['', null], n = newB[k] || ['', null];
       w(`| ${o[0]} | ${o[1] == null ? '' : fmt(o[1])} | ${n[0]} | ${n[1] == null ? '' : fmt(n[1])} |`);
@@ -111,7 +110,8 @@ for (const co of companies) {
       const yr = r2((L.pnlRawD[code] || 0) - (L.pnlRawC[code] || 0));
       const old = legacyPlace(code);
       const np = placeCode(code, chartByCode);
-      const newLine = np.line === 'DLA' ? (dn > 0 ? 'C' : 'E') : np.line;
+      const debitLiab = !!np.line && MAPPING[code].type === 'liability' && dn > 0;
+      const newLine = debitLiab ? 'C' : np.line;
       const isPnlNew = newLine && PNL_KEYS.has(newLine);
       const isPnlOld = ['turnover', 'cost of sales', 'administrative expenses', 'interest'].includes(old);
       // Effect on the P&L reserve: legacy puts every non-BS-range balance in the plug; new puts P&L and K2 codes there.
@@ -123,6 +123,7 @@ for (const co of companies) {
       if (!dn && !yr) continue;
       let reason = null;
       if (!np.line) reason = `unmapped balance now visible (${np.reason})`;
+      else if (debitLiab) reason = `liability account in debit, shown as other debtors in C${old === 'absorbed in P&L reserve' ? ' (previously absorbed in the P&L reserve)' : ' (previously netted within creditors)'}`;
       else if (old === 'absorbed in P&L reserve' && !newInReserve) reason = 'previously absorbed in the P&L reserve, now shown on its own line';
       else if (code === '3100' || newLine === 'K2') reason = 'reserve now derived from the ledger';
       else {
@@ -132,7 +133,6 @@ for (const co of companies) {
       }
       if (reason) reasons.push(`| ${code} ${chartByCode.get(code)?.name || ''} | ${fmt(Math.abs(shown))} ${shown >= 0 ? 'Dr' : 'Cr'} | ${old} | ${newLine ? `${newLine} ${LINE_LABEL[newLine] || ''}` : 'unmapped'} | ${reason} |`);
     }
-    if (L.creditors < 0) reasons.push(`| 2000–2399 total | ${fmt(-L.creditors)} Dr | creditors (shown as – on the legacy screen) | E | display: the legacy screen showed creditors in net debit as a dash while including them in net current assets; Schedule 3B shows the amount |`);
     if (reasons.length) w('**Reasons for differences**', '', '| Code | Amount | Legacy | Schedule 3B | Reason |', '|---|---:|---|---|---|', ...reasons, '');
     const reserveGap = r2(L.retainedEarns - b('K2'));
     w(`Profit: legacy ${fmt(L.pfYear)}, Schedule 3B ${fmt(S.profit)}, difference ${fmt(r2(L.pfYear - S.profit))} (explained by codes above: ${fmt(r2(profitDiff))}).`,

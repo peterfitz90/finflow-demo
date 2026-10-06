@@ -34,6 +34,7 @@ const inRange = (code, lo, hi) => code >= lo && code < hi;
 // window's first day (a feed that starts mid-window — e.g. Moyvencap from 16 Jun — would make
 // the first month partial) AND every month has at least one journal (a month with none, e.g. a
 // bank-import gap, would drag the average toward zero). Otherwise no figure is shown.
+// Expenses are 5000–6999 only, so corporation tax (8000) is excluded: net burn is before tax.
 export function netBurn(journals, months, { firstJournalDate = null } = {}) {
   const by = Object.fromEntries(months.map(k => [k, { month: k, income: 0, expenses: 0, journals: 0 }]));
   for (const j of journals || []) {

@@ -82,7 +82,7 @@ export async function buildChatContext({ companyId, company, companyName, period
         ? months12.map(([mo, v]) => {
             const top5 = Object.entries(v.byAcct).sort(([,x],[,y]) => y - x).slice(0, 5)
               .map(([acct, total]) => `    ${acct} ${chatAcctName(acct)}: ${fmtE(total)}`).join('\n');
-            return `  ${mo}: income ${fmtE(v.income)}, expenses ${fmtE(v.expenses)}, net ${fmtE(v.income - v.expenses)}${top5 ? '\n  top expense accounts:\n' + top5 : ''}`;
+            return `  ${mo}: income ${fmtE(v.income)}, expenses ${fmtE(v.expenses)}, profit before tax ${fmtE(v.income - v.expenses)}${top5 ? '\n  top expense accounts:\n' + top5 : ''}`;
           }).join('\n')
         : "  No journal data in trailing 12 months";
 
@@ -136,7 +136,7 @@ SELECTED PERIOD: ${period} (${periodStart} → ${periodEnd})
 - Bank balance at period end: ${currentBal !== null ? fmtE(currentBal) : "No bank data imported yet"}
 - Period income (4xxx credit journals): ${fmtE(pIncome)}
 - Period expenses (5xxx-6xxx debit journals): ${fmtE(pExpenses)}
-- Period net: ${fmtE(pIncome - pExpenses)}
+- Period profit before tax (income less 5xxx-6xxx expenses; corporation tax on 8000 is not included): ${fmtE(pIncome - pExpenses)}
 - Overdue invoices (AR): ${overdueN} invoice${overdueN !== 1 ? 's' : ''} totalling ${fmtE(overdueAmt)}
 - Invoices due in next 30 days: ${upcomingN} invoice${upcomingN !== 1 ? 's' : ''} totalling ${fmtE(upcomingAmt)}
 - Company: ${companyName} | VAT period: ${vatPeriod} | Accounting year end: ${yem}

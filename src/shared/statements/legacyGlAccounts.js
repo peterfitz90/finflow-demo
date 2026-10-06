@@ -1,7 +1,7 @@
-// The static GL account list (code, name, type). Moved verbatim out of chartOfAccounts.js so
-// pure modules (src/shared/statements, server code, node scripts) can use it without pulling in
-// React or the browser Supabase client. chartOfAccounts.js re-exports it unchanged.
-export const GL_ACCOUNTS = [
+// The GL account list exactly as it stood at 352c9f6, before STA-01 Stage 2 added 2210, 3400, 4250,
+// 6550 and 8000. The legacy FRS 105 engine (frs105.js, mode 'legacy') types accounts from this
+// frozen copy so its figures can never change when GL_ACCOUNTS grows. Do not edit.
+export const LEGACY_GL_ACCOUNTS = [
   // Assets
   { code: "1000", name: "Bank — Current Account",  type: "Asset" },
   { code: "1100", name: "Trade Debtors",            type: "Asset" },
@@ -23,7 +23,6 @@ export const GL_ACCOUNTS = [
   { code: "2100", name: "VAT Control",              type: "Liability" },
   { code: "1250", name: "Supplier Prepayments",     type: "Asset" },
   { code: "2200", name: "PAYE & PRSI Payable",      type: "Liability" },
-  { code: "2210", name: "Corporation Tax Payable",  type: "Liability" },
   { code: "2250", name: "Net Wages Payable",        type: "Liability" },
   { code: "2260", name: "Pension Payable",          type: "Liability" },
   { code: "2300", name: "Accruals",                 type: "Liability" },
@@ -33,12 +32,10 @@ export const GL_ACCOUNTS = [
   // Capital
   { code: "3000", name: "Share Capital",            type: "Equity" },
   { code: "3100", name: "Retained Earnings",        type: "Equity" },
-  { code: "3400", name: "Dividends Paid",           type: "Equity" },
   // Income
   { code: "4000", name: "Sales Revenue",            type: "Income" },
   { code: "4100", name: "Service Income",           type: "Income" },
   { code: "4200", name: "Other Income",             type: "Income" },
-  { code: "4250", name: "Profit on Disposal of Fixed Assets", type: "Income" },
   { code: "4300", name: "Interest Received",        type: "Income" },
   // Cost of Sales
   { code: "5000", name: "Cost of Sales",            type: "Expense" },
@@ -52,7 +49,6 @@ export const GL_ACCOUNTS = [
   { code: "6300", name: "Telecoms & IT",            type: "Expense" },
   { code: "6400", name: "Professional Fees",        type: "Expense" },
   { code: "6500", name: "Bank Charges & Interest",  type: "Expense" },
-  { code: "6550", name: "Interest Payable",         type: "Expense" },
   { code: "6600", name: "Sundry Expenses",          type: "Expense" },
   { code: "6750", name: "Settlement Rounding",      type: "Expense" },
   { code: "6700", name: "Marketing & Advertising",  type: "Expense" },
@@ -60,5 +56,4 @@ export const GL_ACCOUNTS = [
   { code: "6900", name: "Repairs & Maintenance",    type: "Expense" },
   { code: "6910", name: "Loss on Disposal of Assets", type: "Expense" },
   { code: "6950", name: "Depreciation",             type: "Expense" },
-  { code: "8000", name: "Corporation Tax",          type: "Expense" },
 ];

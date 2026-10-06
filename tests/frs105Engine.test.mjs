@@ -8,17 +8,22 @@ import { readFileSync } from 'node:fs';
 import { loadBaseline, diffResults, FIGURES } from './statements/baseline.mjs';
 import { computeFrs105, frs105FiscalYear } from '../src/shared/statements/frs105.js';
 import { GL_ACCOUNTS } from '../src/shared/glAccounts.js';
+import { LEGACY_GL_ACCOUNTS } from '../src/shared/statements/legacyGlAccounts.js';
 import { localDateStr } from '../src/shared/dates.js';
 
 const base = loadBaseline();
 const engineSrc = readFileSync(new URL('../src/shared/statements/frs105.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
-const glSrc = readFileSync(new URL('../src/shared/glAccounts.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
+const legacyGlSrc = readFileSync(new URL('../src/shared/statements/legacyGlAccounts.js', import.meta.url), 'utf8').replace(/\r\n/g, '\n');
 
 test('the moved blocks are byte-identical to the baseline', () => {
   assert.ok(engineSrc.includes(base.blocks.fiscalYear), 'fiscal-year block changed');
   assert.ok(engineSrc.includes(base.blocks.figures), 'figures block changed');
-  assert.ok(glSrc.includes(base.blocks.glAccounts), 'GL_ACCOUNTS changed');
-  assert.deepEqual(GL_ACCOUNTS, base.GL_ACCOUNTS);
+  // The legacy engine types accounts from a frozen copy of the baseline GL_ACCOUNTS.
+  assert.ok(engineSrc.includes("import { LEGACY_GL_ACCOUNTS as GL_ACCOUNTS } from './legacyGlAccounts.js';"), 'legacy engine not on the frozen list');
+  assert.ok(legacyGlSrc.includes(base.blocks.glAccounts.replace('export const GL_ACCOUNTS = [', 'export const LEGACY_GL_ACCOUNTS = [')), 'frozen legacy GL list changed');
+  assert.deepEqual(LEGACY_GL_ACCOUNTS, base.GL_ACCOUNTS);
+  // GL_ACCOUNTS may only grow: every baseline entry is still there, unchanged.
+  for (const a of base.GL_ACCOUNTS) assert.deepEqual(GL_ACCOUNTS.find(g => g.code === a.code), a);
   // The query moved into fetchJournalsToDate with only the client and id renamed.
   const norm = s => s.replace(/\s+/g, '').replace('supabase.from', 'db.from').replace('company.id', 'companyId');
   const q = engineSrc.slice(engineSrc.indexOf('fetchAllRows(() => db.from'), engineSrc.indexOf(".order('id'));") + 14);
