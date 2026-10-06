@@ -56,14 +56,12 @@
     "user_is_accountant": { "args": { "p_company_id": "client" }, "expect": false },
     "slugify_company_name": { "args": { "p_name": "Anon Check Ltd" }, "expect": "anoncheckltd" }
   },
-  "_anon_readable_comment": "Tables anon may read on purpose, limited to rows where the named column is null (shared reference data, no company). Any row with a value there is a FAIL.",
-  "anon_readable": {
-    "transaction_rules": "company_id"
-  },
+  "_anon_readable_comment": "Tables anon may read on purpose, as { table: column }: only rows where that column is null are allowed (shared reference data, no company); any other row is a FAIL. Empty since 2026-10-06, when the shared transaction_rules rows became signed-in only. Adding an entry needs Peter's approval.",
+  "anon_readable": {},
   "buckets": ["journal-attachments", "Ledgrly"],
   "storage": {
-    "_comment": "read_object: a real client file (read and sign only, never deleted). delete_sentinel: a Fitzsimons Test object that exists only so anon delete has a real target.",
+    "_comment": "read_object: a real client file (read and sign only, never deleted). delete_target: a Fitzsimons Test path that does not exist (the bucket holds client files only, and a real client file must never be a delete target), so anon delete is checked for refusal/0 removed but cannot prove a regression on an existing object; the select/list/read checks cover visibility.",
     "read_object": { "bucket": "journal-attachments", "name": "ap/59fc55e0-10ac-471b-a3e4-283ae510f1db/93aab01a-04e6-461b-8ba2-9fb0643c25e5.pdf" },
-    "delete_sentinel": { "bucket": "journal-attachments", "name": "5f4e4585-8937-4624-b0fc-079a8379a160/anon-check/sentinel.txt" }
+    "delete_target": { "bucket": "journal-attachments", "name": "5f4e4585-8937-4624-b0fc-079a8379a160/anon-check/does-not-exist.txt" }
   }
 }

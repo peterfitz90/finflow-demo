@@ -145,7 +145,7 @@ for (const b of cat.buckets) {
   record(sign.json?.signedURL || sign.json?.signedUrl ? 'FAIL' : 'PASS', 'storage sign', `${bucket}/${name}`, sign.json?.signedURL || sign.json?.signedUrl ? 'SIGNED URL ISSUED' : `refused ${short(sign)}`);
 }
 {
-  const { bucket, name } = cat.storage.delete_sentinel;
+  const { bucket, name } = cat.storage.delete_target;
   const del = await call(`/storage/v1/object/${encodeURIComponent(bucket)}`, { method: 'DELETE', body: { prefixes: [name] } });
   const n = Array.isArray(del.json) ? del.json.length : null;
   record(n === 0 || (n === null && del.status >= 400) ? 'PASS' : 'FAIL', 'storage delete', `${bucket}/${name}`, n === null ? `refused ${short(del)}` : n === 0 ? '0 removed' : `${n} REMOVED`);
