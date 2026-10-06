@@ -25,7 +25,7 @@ import { NARROW_QUERY, matches as matchesMedia, goToMobile } from './shared/view
 import { BANK_NOMINAL_CODE, fetchNominalBalanceAsOf, fetchActiveBankNominals } from './shared/bankBalance.js';
 import { GL_ACCOUNTS, COA_SEED_SOLE_TRADER, COA_STATIC_FALLBACK, useChartOfAccounts } from './shared/chartOfAccounts.js';
 import { computeFrs105, frs105FiscalYear, fetchJournalsToDate, fetchChartForStatements, frs105Warnings } from './shared/statements/frs105.js';
-import { DISCLOSURES, LEGAL_FORMS, LEGAL_FORM_NOTE, informationRequired, ledgerEvidence, suggestion, fixedAssetClasses, directorsInOffice } from './shared/statements/statementInputs.js';
+import { DISCLOSURES, LEGAL_FORMS, LEGAL_FORM_NOTE, informationRequired, ledgerEvidence, suggestion, ledgerNote, suggestionCaution, fixedAssetClasses, directorsInOffice } from './shared/statements/statementInputs.js';
 import { useTransactionRules, preCleanDesc, applyRules } from './shared/txRules.js';
 import { suggestExpenseAccount, suggestExpenseVatCode, EXPENSE_VAT_CODES, VAT_SOURCE_LABEL } from './shared/expenseSuggest.js';
 import { CURRENCY_SYMBOLS, fmtCurrencyFull } from './shared/currency.js';
@@ -14621,7 +14621,7 @@ function Settings({ company, onUpdate, onNavigate }) {
 // "nothing to disclose" is the accountant's own recorded attestation: a suggestion from the
 // ledger is only shown until confirmed, and last year's text is offered, never copied in.
 // The database stamps who attested and when. Not printed.
-function StatementInputsPanel({ company, yearEnd, regime = 'FRS105', inputs, evidence, assetClasses, onSaved }) {
+function StatementInputsPanel({ company, yearEnd, regime = 'FRS105', inputs, evidence, assetClasses, draftConditions = [], onSaved }) {
   const { profile, directors, yearInputs, disclosures, lastYear } = inputs;
   const [busy, setBusy] = useState(false);
   const [err, setErr] = useState(null);
@@ -14683,6 +14683,9 @@ function StatementInputsPanel({ company, yearEnd, regime = 'FRS105', inputs, evi
     .eq('company_id', company.id).eq('year_end_date', yearEnd).eq('regime', regime).eq('disclosure_key', key)));
 
   const suggestions = DISCLOSURES.filter(d => !byKey[d.key] && d.suggest).map(d => ({ d, sug: suggestion(d.suggest, evidence) })).filter(x => x.sug);
+  // A ledger DRAFT condition (no opening balances, unmapped balances, an imbalance) means the
+  // evidence behind a suggestion may be incomplete: caution on each, and confirm one at a time.
+  const caution = suggestionCaution(draftConditions);
   const confirmAllSuggested = () => run(async () => {
     for (const { d, sug } of suggestions) check(await attest(d.key, false, { basis: 'confirmed_suggestion', evidence: sug.evidence }));
   });
@@ -14792,7 +14795,9 @@ function StatementInputsPanel({ company, yearEnd, regime = 'FRS105', inputs, evi
           {suggestions.length > 0 && (
             <div style={{ ...box, borderLeft: "3px solid var(--accent)" }}>
               <div style={{ marginBottom: 6 }}>The ledger shows nothing for {suggestions.length === 1 ? 'one item' : `${suggestions.length} items`} below. Each is suggested as "nothing to disclose" beside its evidence; confirming records your own attestation for each.</div>
-              <button className="btn btn-p btn-sm" disabled={busy} onClick={confirmAllSuggested}>Confirm all suggested ({suggestions.length})</button>
+              {caution
+                ? <div style={{ color: "var(--red)" }}>Confirm these one at a time: {caution.replace(/^Caution: /, '').replace(/ Check this item before confirming it\.$/, '')}</div>
+                : <button className="btn btn-p btn-sm" disabled={busy} onClick={confirmAllSuggested}>Confirm all suggested ({suggestions.length})</button>}
             </div>
           )}
           {groups.map(g => (
@@ -14819,6 +14824,8 @@ function StatementInputsPanel({ company, yearEnd, regime = 'FRS105', inputs, evi
                     ) : (
                       <div style={{ marginTop: 4 }}>
                         {sug && <div style={{ color: "var(--accent)", marginBottom: 4 }}>Suggested from the ledger: {sug.text}</div>}
+                        {sug && caution && <div style={{ color: "var(--red)", fontSize: 12, marginBottom: 4 }}>{caution}</div>}
+                        {!sug && d.suggest && ledgerNote(d.suggest, evidence) && <div style={{ color: "var(--muted)", fontSize: 12, marginBottom: 4 }}>{ledgerNote(d.suggest, evidence)}</div>}
                         {last && <div style={{ fontSize: 12, color: "var(--muted)", marginBottom: 4 }}>Last year: {last.has_items ? d.yes : d.no}{last.narrative ? ` — ${last.narrative}` : ''}{' '}
                           {last.narrative && <button className="btn btn-s btn-sm" onClick={() => setDrafts(p => ({ ...p, [d.key]: { mode: 'yes', narrative: last.narrative, section: last.details?.section || '' } }))}>Start from last year's text</button>}</div>}
                         {!dr && (
@@ -14939,6 +14946,12 @@ function FinancialStatements({ company, companyName }) {
   const inputsEvidence = generated && fyStart ? ledgerEvidence(journals, { fyStart, yearEnd }) : null;
   const assetClasses = generated && fyStart ? fixedAssetClasses(journals, { fyStart }) : [];
   const infoRequired = generated ? informationRequired({ company: company || {}, ...fsInputs, assetClasses, yearEnd }) : [];
+  // Ledger-side DRAFT conditions (missing inputs excluded): these put a caution on suggestions.
+  const ledgerDraftConditions = generated ? [
+    guardWarnings.some(w => w.id === 'no_opening') ? 'no opening balances' : null,
+    s3Unmapped.length > 0 ? 'unmapped balances' : null,
+    Math.abs(s3Imbalance) >= 0.005 ? 'an imbalance' : null,
+  ].filter(Boolean) : [];
   // DRAFT watermark (prints): unmapped balances, an imbalance, no opening position, or a required
   // input missing.
   const isDraft = generated && (s3Unmapped.length > 0 || Math.abs(s3Imbalance) >= 0.005 || guardWarnings.some(w => w.id === 'no_opening') || infoRequired.length > 0);
@@ -15167,7 +15180,16 @@ function FinancialStatements({ company, companyName }) {
               <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: "0.05em", textTransform: "uppercase", color: "var(--muted)", marginRight: 8 }}>{sec}</span>
               {infoRequired.filter(m => m.section === sec).map(m => (
                 <button key={m.key} className="btn btn-s btn-sm" style={{ margin: "2px 6px 2px 0" }}
-                  onClick={() => { const el = document.getElementById(m.field); if (el) { el.closest('details')?.setAttribute('open', ''); el.scrollIntoView({ behavior: 'smooth', block: 'center' }); el.focus?.(); } }}>
+                  onClick={() => {
+                    const el = document.getElementById(m.field);
+                    if (!el) return;
+                    el.closest('details')?.setAttribute('open', '');
+                    // Instant scroll (a smooth scroll in the content pane did not complete), then
+                    // move keyboard focus to the field, or to the section when it is not a field.
+                    el.scrollIntoView({ block: 'center' });
+                    if (!el.matches('input, select, textarea, button')) el.setAttribute('tabindex', '-1');
+                    el.focus({ preventScroll: true });
+                  }}>
                   {m.label}
                 </button>
               ))}
@@ -15177,7 +15199,7 @@ function FinancialStatements({ company, companyName }) {
       )}
       {inputsEvidence && (
         <StatementInputsPanel key={`${company?.id}|${yearEnd}`} company={company} yearEnd={yearEnd} inputs={fsInputs}
-          evidence={inputsEvidence} assetClasses={assetClasses} onSaved={loadInputs} />
+          evidence={inputsEvidence} assetClasses={assetClasses} draftConditions={ledgerDraftConditions} onSaved={loadInputs} />
       )}
 
       {/* Interim guard (STA-01): warnings only, does not block, never printed */}

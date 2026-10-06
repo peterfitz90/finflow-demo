@@ -78,12 +78,16 @@ export function ledgerEvidence(journals, { fyStart, yearEnd }) {
   return {
     directors_loan: { code: '2400', movementsInYear: touch('2400').length, balanceAtYearEnd: bal('2400') },
     dividends: { code: '3400', movementsInYear: touch('3400').length, balanceAtYearEnd: bal('3400') },
-    share_capital: { code: '3000', movementsInYear: touch('3000').length },
+    share_capital: { code: '3000', movementsInYear: touch('3000').length,
+      balanceAtStart: round2(journals.filter(j => j.date < fyStart).reduce((s, j) => s + (j.debit_account === '3000' ? Number(j.amount) : 0) - (j.credit_account === '3000' ? Number(j.amount) : 0), 0)),
+      balanceAtYearEnd: bal('3000') },
   };
 }
 
 // A suggestion is offered only when the ledger shows nothing: 2400 nil with no movements in the
-// year; 3400 nil with no movements; no share-capital (3000) postings in the year.
+// year; 3400 nil with no movements; share capital (3000) recorded, non-nil at the start and the
+// end of the year, with no postings in between. Where 3000 is nil there is no evidence either way,
+// so nothing is suggested (see ledgerNote).
 export function suggestion(rule, ev) {
   if (rule === 'directors_loan') {
     const e = ev.directors_loan;
@@ -95,9 +99,25 @@ export function suggestion(rule, ev) {
   }
   if (rule === 'share_capital') {
     const e = ev.share_capital;
-    return e.movementsInYear === 0 ? { evidence: e, text: 'Share Capital (3000): no postings in the year.' } : null;
+    return e.balanceAtStart !== 0 && e.balanceAtYearEnd !== 0 && e.movementsInYear === 0
+      ? { evidence: e, text: 'Share Capital (3000): recorded at the start and end of the year, with no postings in the year.' } : null;
   }
   return null;
+}
+
+// A note shown instead of a suggestion where the ledger cannot support one.
+export function ledgerNote(rule, ev) {
+  if (rule === 'share_capital' && ev.share_capital.balanceAtYearEnd === 0 && ev.share_capital.balanceAtStart === 0) {
+    return 'Share capital not in ledger (3000 is nil), so nothing is suggested.';
+  }
+  return null;
+}
+
+// When the statements carry a ledger DRAFT condition, every suggestion carries this caution and
+// suggestions must be confirmed one at a time (no "Confirm all suggested").
+export function suggestionCaution(draftConditions = []) {
+  if (!draftConditions.length) return null;
+  return `Caution: these statements are DRAFT because of ${draftConditions.join(', ')}, so the ledger evidence may be incomplete. Check this item before confirming it.`;
 }
 
 // Fixed-asset classes (15x0 + 15x1) with a balance at the year end or movements in the year:

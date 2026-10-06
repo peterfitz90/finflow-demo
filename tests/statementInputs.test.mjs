@@ -2,7 +2,7 @@
 // Run: node --test "tests/*.test.mjs"
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { DISCLOSURES, LEGAL_FORMS, informationRequired, ledgerEvidence, suggestion, fixedAssetClasses, directorsInOffice } from '../src/shared/statements/statementInputs.js';
+import { DISCLOSURES, LEGAL_FORMS, informationRequired, ledgerEvidence, suggestion, ledgerNote, suggestionCaution, fixedAssetClasses, directorsInOffice } from '../src/shared/statements/statementInputs.js';
 
 const J = (date, debit_account, credit_account, amount) => ({ date, debit_account, credit_account, amount: String(amount) });
 const period = { fyStart: '2025-01-01', yearEnd: '2025-12-31' };
@@ -54,7 +54,7 @@ test('each fixed-asset class with a balance or movement needs a depreciation rat
 });
 
 test('suggestions only where the ledger shows nothing, never for commitments or post-balance-sheet events', () => {
-  const quiet = ledgerEvidence([J('2025-02-01', '1000', '4000', 50)], period);
+  const quiet = ledgerEvidence([J('2020-01-15', '1000', '3000', 100), J('2025-02-01', '1000', '4000', 50)], period);
   assert.ok(suggestion('directors_loan', quiet));
   assert.ok(suggestion('dividends', quiet));
   assert.ok(suggestion('share_capital', quiet));
@@ -70,6 +70,25 @@ test('suggestions only where the ledger shows nothing, never for commitments or 
   assert.equal(suggestion('share_capital', ledgerEvidence([J('2025-01-15', '1000', '3000', 100)], period)), null);
   // share capital issued before the year: still suggested (no postings in the year)
   assert.ok(suggestion('share_capital', ledgerEvidence([J('2020-01-15', '1000', '3000', 100)], period)));
+});
+
+test('own shares: suggested only where share capital is recorded at the start and end with no postings; nil says so', () => {
+  const nil = ledgerEvidence([J('2025-02-01', '1000', '4000', 50)], period);
+  assert.equal(suggestion('share_capital', nil), null);
+  assert.equal(ledgerNote('share_capital', nil), 'Share capital not in ledger (3000 is nil), so nothing is suggested.');
+  // issued during the year (S&P-shaped OPENING inside the year): nil at the start, so no suggestion and no nil note
+  const issued = ledgerEvidence([J('2025-10-09', '1000', '3000', 2)], period);
+  assert.equal(suggestion('share_capital', issued), null);
+  assert.equal(ledgerNote('share_capital', issued), null);
+  // recorded before the year, untouched: suggested, with the balances as evidence
+  const held = ledgerEvidence([J('2020-01-15', '1000', '3000', 100)], period);
+  assert.deepEqual(suggestion('share_capital', held).evidence, { code: '3000', movementsInYear: 0, balanceAtStart: -100, balanceAtYearEnd: -100 });
+  assert.equal(ledgerNote('share_capital', held), null);
+});
+
+test('a ledger DRAFT condition puts a caution on suggestions', () => {
+  assert.equal(suggestionCaution([]), null);
+  assert.match(suggestionCaution(['no opening balances', 'an imbalance']), /^Caution: these statements are DRAFT because of no opening balances, an imbalance/);
 });
 
 test('directors in office and the legal-form list', () => {
