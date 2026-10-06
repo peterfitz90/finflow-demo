@@ -25,6 +25,8 @@ import { NARROW_QUERY, matches as matchesMedia, goToMobile } from './shared/view
 import { BANK_NOMINAL_CODE, fetchNominalBalanceAsOf, fetchActiveBankNominals } from './shared/bankBalance.js';
 import { GL_ACCOUNTS, COA_SEED_SOLE_TRADER, COA_STATIC_FALLBACK, useChartOfAccounts } from './shared/chartOfAccounts.js';
 import { computeFrs105, frs105FiscalYear, fetchJournalsToDate, fetchChartForStatements, frs105Warnings } from './shared/statements/frs105.js';
+import { microEligibility } from './shared/statements/eligibility.js';
+import { MICRO } from './shared/statements/thresholds.js';
 import { DISCLOSURES, LEGAL_FORMS, LEGAL_FORM_NOTE, informationRequired, ledgerEvidence, suggestion, ledgerNote, suggestionCaution, fixedAssetClasses, directorsInOffice } from './shared/statements/statementInputs.js';
 import { useTransactionRules, preCleanDesc, applyRules } from './shared/txRules.js';
 import { suggestExpenseAccount, suggestExpenseVatCode, EXPENSE_VAT_CODES, VAT_SOURCE_LABEL } from './shared/expenseSuggest.js';
@@ -14946,6 +14948,14 @@ function FinancialStatements({ company, companyName }) {
   const inputsEvidence = generated && fyStart ? ledgerEvidence(journals, { fyStart, yearEnd }) : null;
   const assetClasses = generated && fyStart ? fixedAssetClasses(journals, { fyStart }) : [];
   const infoRequired = generated ? informationRequired({ company: company || {}, ...fsInputs, assetClasses, yearEnd }) : [];
+  // Stage 3e: micro eligibility from the ledger plus inputs and attestations. Warn only.
+  const eligibility = generated ? microEligibility({
+    turnover: s3pnl['1'].amount,
+    grossAssets: Math.round((s3bs.A.amount + s3bs.B.amount + s3bs.C.amount + s3bs.D.amount) * 100) / 100,
+    employees: fsInputs.yearInputs?.average_employees ?? null,
+    legalForm: fsInputs.profile?.legal_form || null,
+    disclosures: fsInputs.disclosures,
+  }) : null;
   // Ledger-side DRAFT conditions (missing inputs excluded): these put a caution on suggestions.
   const ledgerDraftConditions = generated ? [
     guardWarnings.some(w => w.id === 'no_opening') ? 'no opening balances' : null,
@@ -15195,6 +15205,20 @@ function FinancialStatements({ company, companyName }) {
               ))}
             </div>
           ))}
+        </div>
+      )}
+      {/* Micro eligibility (STA-01 Stage 3e): warning only, never blocks, not printed */}
+      {eligibility && (
+        <div className="no-print" style={{ marginBottom: 14, padding: "12px 16px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border)", borderLeft: `4px solid ${eligibility.warnings.length ? 'var(--gold)' : 'var(--green)'}`, background: "var(--surface2)", fontSize: 13, lineHeight: 1.6 }}>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>Micro companies regime: eligibility check (warning only)</div>
+          <div style={{ display: "flex", gap: 18, flexWrap: "wrap", fontFamily: "'Source Code Pro',monospace", fontSize: 12 }}>
+            <span>Turnover {fmtEUR(eligibility.tests.turnover.value)} / limit {fmtEUR(MICRO.turnover)}: {eligibility.tests.turnover.ok ? 'within' : 'over'}</span>
+            <span>Balance sheet total {fmtEUR(eligibility.tests.balanceSheetTotal.value)} / limit {fmtEUR(MICRO.balanceSheetTotal)}: {eligibility.tests.balanceSheetTotal.ok ? 'within' : 'over'}</span>
+            <span>Employees {eligibility.tests.employees.value ?? 'not recorded'} / limit {MICRO.employees}{eligibility.tests.employees.ok == null ? '' : `: ${eligibility.tests.employees.ok ? 'within' : 'over'}`}</span>
+          </div>
+          <div style={{ marginTop: 4 }}>{eligibility.sizeResult === 'meets' ? `Meets ${eligibility.met} of 3 size criteria (2 needed).` : eligibility.sizeResult === 'fails' ? 'Fails the size test.' : 'Size test undetermined.'}</div>
+          {eligibility.warnings.length > 0 && <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>{eligibility.warnings.map(w => <li key={w}>{w}</li>)}</ul>}
+          <div style={{ fontSize: 11, color: "var(--muted)", marginTop: 6 }}>{eligibility.notes.join(' ')} Source: {eligibility.source}.</div>
         </div>
       )}
       {inputsEvidence && (
