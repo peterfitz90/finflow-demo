@@ -21292,8 +21292,10 @@ function BankBalances({ companyId, onDrillToGL }) {
   );
 }
 
-function BankHub({ companyId, company, isBusinessOwner = false, onDrillToGL }) {
-  const [tab, setTab] = useState('feeds'); // 'feeds' | 'csv' | 'balances'
+// tabRequest: open this tab when it changes (the "bank-import" deep links ask for 'csv').
+function BankHub({ companyId, company, isBusinessOwner = false, onDrillToGL, tabRequest = null }) {
+  const [tab, setTab] = useState(tabRequest || 'feeds'); // 'feeds' | 'csv' | 'balances'
+  useEffect(() => { if (tabRequest) setTab(tabRequest); }, [tabRequest]);
   return (
     <div className="fade-up">
       <div style={{ display: 'flex', gap: 3, marginBottom: 14 }}>
@@ -21362,7 +21364,8 @@ const NAV = [
   ]},
   { section: "BANK", items: [
     // "bank-import" + "bank-feeds" merged into one "Bank" nav item (BankHub — feeds/CSV tabs).
-    // Routes/components intact: page === "bank-import" still renders <BankImport/> and
+    // page === "bank-import" opens the Bank hub on its CSV tab (one statement import, not a second
+    // copy) and
     // page === "bank-feeds" still renders <YapilyBankFeeds/> (unreachable from the sidebar,
     // but working — e.g. via the scattered onNavigate("bank-import") deep-links elsewhere).
     // Un-merge by restoring these two entries and removing "bank" below:
@@ -21605,6 +21608,9 @@ export default function App() {
   if (typeof document !== 'undefined') document.documentElement.setAttribute('data-theme', 'dark');
 
   const [page, setPage] = useState("overview");
+  // The Bank hub (with the one statement import) mounts on the first visit and then stays mounted.
+  const [bankVisited, setBankVisited] = useState(false);
+  useEffect(() => { if (page === "bank" || page === "bank-import") setBankVisited(true); }, [page]);
 
   // Collapsible nav sections
   const DEFAULT_OPEN_SECTIONS = ['HOME', 'BANK', 'MONEY IN', 'MONEY OUT', 'TAXES & DEADLINES', 'REPORTS'];
@@ -22299,10 +22305,17 @@ export default function App() {
                   {page === "checklist"    && <SuggestedJournals period={selPeriod || period} companyId={company?.id} company={company} />}
                   {page === "journals"     && <Journals period={period} selPeriod={selPeriod} companyName={companyName} companyId={company?.id} readOnly={isReadOnly} company={company} />}
                   {page === "gl"           && <GLReport period={period} selPeriod={selPeriod} setSelPeriod={setSelPeriod} companyId={company?.id} companyName={companyName} company={company} readOnly={isReadOnly} drillAccountCode={drillAccountCode} setDrillAccountCode={setDrillAccountCode} />}
-                  {page === "bank"         && <BankHub companyId={company?.id} company={company} isBusinessOwner={isBusinessOwner} onDrillToGL={drillToGLAccount} />}
-                  <div style={{display: page === "bank-import" ? "block" : "none"}}>
-                    <BankImportErrorBoundary><BankImport companyId={company?.id} isActive={page === "bank-import"} company={company} /></BankImportErrorBoundary>
-                  </div>
+                  {/* One statement import (inside BankHub). Mounted on the first visit to the Bank page and
+                      kept mounted, hidden, after that, so an import keeps categorising while you look
+                      elsewhere: the job the separate hidden "bank-import" copy used to do. Two copies
+                      shared one session and could run the same preview twice. The "bank-import" deep
+                      links open this hub on its CSV tab. */}
+                  {bankVisited && (
+                    <div style={{display: page === "bank" || page === "bank-import" ? "block" : "none"}}>
+                      <BankHub companyId={company?.id} company={company} isBusinessOwner={isBusinessOwner} onDrillToGL={drillToGLAccount}
+                        tabRequest={page === "bank-import" ? "csv" : null} />
+                    </div>
+                  )}
                   {page === "bank-feeds"     && <YapilyBankFeeds companyId={company?.id} company={company} isActive={page === "bank-feeds"} />}
                   {page === "reconciliation" && <Reconciliation companyId={company?.id} onNavigate={setPage} selPeriod={selPeriod} />}
                   {page === "revenue"        && <RevenueFeed companyId={company?.id} company={company} />}
