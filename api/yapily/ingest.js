@@ -21,6 +21,7 @@ import { decryptToken } from '../_token-crypto.js';
 import { findContentDuplicates, postImportBatch } from '../../src/shared/importDedup.js';
 import { fetchAllRows } from '../../src/shared/fetchAllRows.js';
 import { TRANSFER, TRANSFER_LABEL, isTransferHold, assertDistinctAccounts } from '../../src/shared/transferHold.js';
+import { categoriseFeedPayees } from '../_categorise.js';
 import { requireCompanyMember, AuthError } from '../_auth.js';
 
 // ── Yapily auth ───────────────────────────────────────────────────────────────
@@ -573,6 +574,7 @@ export default withSentry(async function handler(req, res) {
 
   console.log(`[yapily/ingest] rules: ${toProcess.length - needAI.length} matched, ${needAI.length} → AI`);
 
+  let aiCategorise = { status: needAI.length ? 'ok' : 'not needed' };
   if (needAI.length) {
     const payeeMap = {};
     for (const row of needAI) {
@@ -588,31 +590,24 @@ export default withSentry(async function handler(req, res) {
       direction: p.pos > p.count / 2 ? 'income' : 'expense',
     }));
 
-    try {
-      const proto  = req.headers['x-forwarded-proto'] || 'https';
-      const host   = req.headers['x-forwarded-host'] || req.headers.host;
-      const catRes = await fetch(`${proto}://${host}/api/categorise`, {
-        method:  'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body:    JSON.stringify({ payees: uniquePayees }),
-      });
-      if (catRes.ok) {
-        const { results } = await catRes.json();
-        const aiMap = Object.fromEntries(results.map(r => [r.key, r.code]));
-        for (const row of needAI) {
-          const key = preCleanDesc(row.description) || row.description.toLowerCase().slice(0, 40);
-          if (aiMap[key]) {
-            nominals[row.extId]     = aiMap[key];
-            nominalNames[row.extId] = coaMap[aiMap[key]]?.name || aiMap[key];
-          }
-        }
-        console.log(`[yapily/ingest] AI categorised ${results.length} unique payees`);
-      } else {
-        console.warn(`[yapily/ingest] AI categorise failed ${catRes.status} — defaults kept`);
+    // In-process (api/_categorise.js), not over HTTP: the HTTP call carried no token and has been
+    // refused since the 29 Sep 2026 auth lock-down, leaving every feed line on the defaults.
+    const cat = await categoriseFeedPayees(uniquePayees, { company_id });
+    for (const row of needAI) {
+      const key = preCleanDesc(row.description) || row.description.toLowerCase().slice(0, 40);
+      const code = cat.codes[key];
+      if (code) {
+        nominals[row.extId]     = code;
+        nominalNames[row.extId] = code === TRANSFER ? TRANSFER_LABEL : (coaMap[code]?.name || code);
       }
-    } catch (aiErr) {
-      captureError(aiErr, { company_id, operation: 'yapily-ingest-categorise' });
-      console.warn('[yapily/ingest] AI categorise threw:', aiErr.message, '— defaults kept');
+    }
+    if (cat.ai === 'ok') {
+      console.log(`[yapily/ingest] AI categorised ${uniquePayees.length} unique payees`);
+    } else {
+      // Not swallowed: reported to Sentry and returned to the preview, which shows a warning.
+      aiCategorise = { status: cat.ai, failedChunks: cat.failedChunks, error: cat.error };
+      captureError(new Error(`Feed AI categorisation ${cat.ai}: ${cat.error}`), { company_id, operation: 'yapily-ingest-categorise', failed_chunks: cat.failedChunks });
+      console.warn(`[yapily/ingest] AI categorisation ${cat.ai} (${cat.error}) — defaults kept for those payees`);
     }
   }
 
@@ -640,6 +635,7 @@ export default withSentry(async function handler(req, res) {
     console.log(`[yapily/ingest] dry_run — previewing ${preview.length} transactions`);
     return res.status(200).json({
       dry_run:              true,
+      ai_categorise:        aiCategorise,
       preview,
       total_new:            newTxns.length,      // total available to import
       showing:              preview.length,
@@ -902,6 +898,7 @@ export default withSentry(async function handler(req, res) {
     import_from:          importFromValid,
     rules_saved:          rulesSaved,
     transfers_held:       transferHeldExtIds.size,
+    ai_categorise:        aiCategorise,
     ...(accountErrors.length ? { account_errors: accountErrors } : {}),
   });
 });

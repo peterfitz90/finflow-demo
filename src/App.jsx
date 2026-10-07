@@ -20666,6 +20666,13 @@ function YapilyBankFeeds({ companyId, company, isActive, isBusinessOwner = false
             </div>
           )}
 
+          {/* AI categorisation failed (api/_categorise.js): say so instead of silently defaulting */}
+          {preview.ai_categorise && !['ok', 'not needed'].includes(preview.ai_categorise.status) && (
+            <div role="alert" style={{ marginBottom: 10, padding: '8px 12px', borderRadius: 8, border: '1px solid rgba(251,191,36,0.4)', background: 'var(--warn-dim)', fontSize: 12, color: 'var(--text)' }}>
+              <strong>AI categorisation {preview.ai_categorise.status === 'partial' ? 'partly failed' : 'failed'}.</strong> Lines it could not categorise show the default (Other Income for money in, Sundry Expenses for money out). Check them before importing, or try the preview again.
+            </div>
+          )}
+
           {/* Transaction preview table */}
           <div style={{ overflowX: 'auto', maxHeight: 340, overflowY: 'auto', border: '1px solid var(--border)', borderRadius: 8, marginBottom: 14 }}>
             <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 11 }}>
