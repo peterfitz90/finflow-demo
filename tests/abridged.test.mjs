@@ -66,7 +66,8 @@ test('abridged dividends note: the amount and sentence when 3400 moved; the atte
   assert.equal(div(0, [row('dividends', false)]).table, undefined);
   assert.deepEqual(div(0, [row('dividends', false)]).paragraphs, ['No dividends were paid during the year or proposed after the year end.']);
   assert.deepEqual(div(0, []).paragraphs, [PLACEHOLDER('dividends paid or proposed')]);
-  assert.equal(WORDING_STATUS['abridged.dividends'].status, 'unverified');
+  const st = WORDING_STATUS['abridged.dividends'];
+  assert.deepEqual([st.status, st.by, st.on], ['verified', 'Peter', '2026-10-09']);
 });
 
 test('information required: certification signatories and date only when abridged filing is elected', () => {

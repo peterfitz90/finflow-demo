@@ -235,8 +235,8 @@ export const WORDING_STATUS = {
   'abridged.A7': { ...AGREED, item: 'Statement (e): micro wording, ss.352–353' },
   'abridged.A8': { ...AGREED, item: 'Approval line and signatories with typed names, as the full set' },
   'abridged.notes': { ...AGREED, item: "Notes as the full set, without the creditors analysis and the reserves movement notes" },
-  // Proposed 7 October 2026, awaiting Peter's agreement.
-  'abridged.dividends': { status: 'unverified', by: null, on: null, source: 'Proposal, 7 October 2026', item: 'Dividends note: stand-alone, where the reserves note would be; the amount when 3400 moved in the year, and the dividends attestation sentence as the full set' },
+  // Proposed 7 October 2026; approved by Peter on 9 October 2026.
+  'abridged.dividends': { status: 'verified', by: 'Peter', on: '2026-10-09', source: 'Dividends proposal, 7 October 2026', item: 'Dividends note: stand-alone, where the reserves note would be; the amount when 3400 moved in the year, and the dividends attestation sentence as the full set' },
 };
 
 // The balance sheet statements for the abridged copy: the full set's items 3–5 with (e) added at
