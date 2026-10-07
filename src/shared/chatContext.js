@@ -5,8 +5,10 @@ import { supabase } from '../supabase.js';
 import { todayStr as localToday, monthEnd, localDateStr } from './dates.js';
 import { fetchActiveBankNominals, fetchNominalBalanceAsOf, BANK_NOMINAL_CODE } from './bankBalance.js';
 import { fetchAllRows } from './fetchAllRows.js';
-import { MONTH_NAMES_LONG, getVATPeriods, defaultVatPeriod, fetchVat3PeriodData, computeVat3, isPeriodLocked } from './vat3.js';
+import { getVATPeriods, defaultVatPeriod, fetchVat3PeriodData, computeVat3, isPeriodLocked } from './vat3.js';
 import { applicableDeadlines, isCurrentDeadline, daysFromToday } from './computeDeadlines.js';
+import { fiscalConfig, yearEndLabel } from './fiscalYear.js';
+import { fetchFinancialPeriods } from './useFinancialPeriods.js';
 import { fetchInvoiceDocs, overdueInvoices, dueSoonInvoices } from './invoice.js';
 import { GL_ACCOUNTS } from './chartOfAccounts.js';
 import { fmtCurrencyFull } from './currency.js';
@@ -33,7 +35,7 @@ export async function buildChatContext({ companyId, company, companyName, period
         return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,'0')}-01`;
       })();
 
-      const [btLatest, invoiceDocs, periodJournals, trail12Journals, lockedRes] = await Promise.all([
+      const [btLatest, invoiceDocs, periodJournals, trail12Journals, lockedRes, periodsRes] = await Promise.all([
         // Bank balance = ledger balance of the active bank nominals at period end (the same source
         // as Overview / Practice Dashboard). Was bank_transactions.balance of the latest row, which
         // the live feed never populates — so the AI was told €0.00.
@@ -46,6 +48,8 @@ export async function buildChatContext({ companyId, company, companyName, period
         fetchAllRows(() => db.from('journals').select('debit_account,credit_account,amount,date').eq('company_id', companyId).gte('date', trail12Start).lte('date', periodEnd).order('date').order('id')),
         // Filed VAT periods — get_locked_periods, readable by every role (vat_returns isn't).
         db.rpc('get_locked_periods', { p_company_id: companyId }),
+        // Recorded financial periods (CT1 deadlines follow their ends).
+        fetchFinancialPeriods(db, [companyId]),
       ]);
 
       const currentBal = btLatest ?? null;
@@ -56,7 +60,9 @@ export async function buildChatContext({ companyId, company, companyName, period
       const upcomingAmt= dueSoonList.reduce((s, i) => s + i.owed, 0);
       const upcomingN  = dueSoonList.length;
       const locked     = lockedRes.error ? null : (lockedRes.data || []);
-      const yem        = company?.year_end_month ? MONTH_NAMES_LONG[company.year_end_month - 1] : "December";
+      const fyPeriods  = periodsRes?.data || [];
+      // "8 October", or the month alone for a month-end year (src/shared/fiscalYear.js).
+      const yem        = yearEndLabel(fiscalConfig(company, fyPeriods));
       const vatPeriod  = company?.vat_period === 'monthly' ? 'Monthly' : 'Bi-monthly';
       // baseCurrency was never declared in Chat (lost in 61a88b8, 2026-06-27): every fmtE call threw,
       // the catch below swallowed it, and the AI silently got "live account data could not be loaded"
@@ -98,7 +104,7 @@ export async function buildChatContext({ companyId, company, companyName, period
       const ymd = d => localDateStr(d);
       const inDays = n => (n < 0 ? `${-n} day${n === -1 ? '' : 's'} overdue — return not filed` : n === 0 ? 'due today' : `in ${n} day${n === 1 ? '' : 's'}`);
       const deadlineLines = !locked ? '  Deadline data unavailable'
-        : (applicableDeadlines(company, locked).filter(isCurrentDeadline).slice(0, 8)
+        : (applicableDeadlines(company, locked, fyPeriods).filter(isCurrentDeadline).slice(0, 8)
             .map(dl => `  - ${dl.desc.startsWith(dl.type) ? dl.desc : `${dl.type} ${dl.desc}`}: due ${ymd(dl.due)} — ${inDays(daysFromToday(dl.due))}`)
             .join('\n') || '  None in the coming months');
       const rosNote = company?.ros_efiler ? 'yes — VAT3 and P30 are due the 23rd' : 'no — VAT3 is due the 19th, P30 the 14th';

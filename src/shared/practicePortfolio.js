@@ -68,7 +68,7 @@ export function crossClientDeadlines(companies, data, computeDeadlines, { today 
   const out = [];
   for (const c of companies) {
     const vatFiled = data[c.id]?.vatFiled;
-    for (const dl of computeDeadlines(c)) {
+    for (const dl of computeDeadlines(c, data[c.id]?.periods || [])) {
       const daysUntil = Math.floor((dl.due - t0) / 86400000);
       if (daysUntil < -pastDays || daysUntil > aheadDays) continue;
       if (!deadlineApplies(c, dl, vatFiled)) continue;

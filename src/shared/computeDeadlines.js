@@ -1,14 +1,15 @@
 import { vatDueDay, p30DueDay } from './vat3.js';
 import { deadlineApplies } from './practicePortfolio.js';
+import { fiscalConfig, ct1Deadlines } from './fiscalYear.js';
 
 const MONTH_SHORT = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
 
-export function computeDeadlines(company) {
+// periods: the company's financial_periods rows (optional; CT1 follows recorded period ends).
+export function computeDeadlines(company, periods = []) {
   const today = new Date(); today.setHours(0,0,0,0);
   const diff  = d => Math.floor((d - today) / 86400000);
   const deadlines = [];
   const vatPeriod = company?.vat_period || 'bimonthly';
-  const yem       = Number(company?.year_end_month || 12);
   const ardMonth  = company?.ard_month ? Number(company.ard_month) : null;
   const ardDay    = company?.ard_day   ? Number(company.ard_day)   : null;
   // ROS e-filers get the 23rd for VAT3 and P30 (vatDueDay / p30DueDay — the VAT screens' rule).
@@ -42,11 +43,11 @@ export function computeDeadlines(company) {
         deadlines.push({ type:"VAT3", desc:`VAT3 — ${MONTH_SHORT[m.getMonth()]} ${m.getFullYear()}`, due, period_val: `m-${m.getFullYear()}-${m.getMonth()}` });
     }
   }
-  for (let y = today.getFullYear()-1; y <= today.getFullYear()+1; y++) {
-    const due = new Date(y, yem - 1 + 9, 23);
+  // CT1: 23rd of the ninth month after each period end (src/shared/fiscalYear.js).
+  for (const { due, fy } of ct1Deadlines(today.getFullYear()-1, today.getFullYear()+1, fiscalConfig(company, periods))) {
     const d = diff(due);
     if (d >= -30 && d <= 400)
-      deadlines.push({ type:"CT1", desc:`Corp Tax — FY${y}`, due });
+      deadlines.push({ type:"CT1", desc:`Corp Tax — FY${fy}`, due });
   }
   for (let y = today.getFullYear()-1; y <= today.getFullYear(); y++) {
     const due = new Date(y+1, 1, 15);
@@ -101,8 +102,8 @@ export const nextDeadline = deadlines => deadlines.find(isLateDeadline) || deadl
 // The company's deadlines that actually apply — VAT3 only if VAT-registered and that period isn't
 // filed, P30/P35 only if PAYE-registered, no CT1 for a sole trader (deadlineApplies).
 // lockedPeriods = get_locked_periods rows. Used by /mobile and the AI chat context.
-export function applicableDeadlines(company, lockedPeriods) {
-  const all = computeDeadlines(company);
+export function applicableDeadlines(company, lockedPeriods, periods = []) {
+  const all = computeDeadlines(company, periods);
   const vatFiled = filedVatPeriodVals(all, lockedPeriods);
   return all.filter(dl => deadlineApplies(company, dl, vatFiled));
 }

@@ -26,6 +26,8 @@ import { BANK_NOMINAL_CODE, fetchNominalBalanceAsOf, fetchActiveBankNominals } f
 import { GL_ACCOUNTS, COA_SEED_SOLE_TRADER, COA_STATIC_FALLBACK, useChartOfAccounts } from './shared/chartOfAccounts.js';
 import { computeFrs105, frs105FiscalYear, fetchJournalsToDate, fetchChartForStatements, frs105Warnings } from './shared/statements/frs105.js';
 import { listPeriods, isYearEnd } from './shared/statements/periods.js';
+import { fiscalConfig, fiscalYearContaining, ytdStartForMonth, ct1Deadlines } from './shared/fiscalYear.js';
+import { useFinancialPeriods, fetchFinancialPeriods } from './shared/useFinancialPeriods.js';
 import { microEligibility } from './shared/statements/eligibility.js';
 import { balanceSheetStatements, statementNotes } from './shared/statements/wording.js';
 import { MICRO } from './shared/statements/thresholds.js';
@@ -1781,6 +1783,7 @@ function useActiveBankNominals(companyId) {
 
 // ─── CASH FLOW PAGE ───────────────────────────────────────────────────────────
 function CashFlow({ selPeriod, setSelPeriod, onNavigate, companyId, company }) {
+  const fyPeriods = useFinancialPeriods(company?.id); // recorded financial periods (src/shared/fiscalYear.js)
   const now = new Date();
   const currentMonth = `${now.getFullYear()}-${String(now.getMonth() + 1).padStart(2, '0')}`;
   const baseCurrency = company?.base_currency || company?.currency || "EUR";
@@ -1796,11 +1799,8 @@ function CashFlow({ selPeriod, setSelPeriod, onNavigate, companyId, company }) {
   // Part 2.3 — window-narrowing toggle, same YTD-start calc as GLReport's ytdMode. Defaults to
   // false (single month) so existing behavior is unchanged unless the user opts in.
   const [ytdMode, setYtdMode] = useState(false);
-  const [ytdPy, ytdPm] = selPeriod.split('-').map(Number);
-  const ytdYearEndMonth   = company?.year_end_month || 12;
-  const ytdYearStartMonth = (ytdYearEndMonth % 12) + 1;
-  const ytdStartYear = ytdPm >= ytdYearStartMonth ? ytdPy : ytdPy - 1;
-  const ytdStart = `${ytdStartYear}-${String(ytdYearStartMonth).padStart(2, '0')}-01`;
+  // Start of the financial year containing the selected month's end (src/shared/fiscalYear.js).
+  const ytdStart = ytdStartForMonth(selPeriod, fiscalConfig(company, fyPeriods), localToday());
 
   // Balance comparison — "Balance as at [date] vs. as at [date]". Unlike GLReport's cmpMode
   // (which compares two PERIOD FLOWS and so must gate "Previous period" behind !ytdMode, since
@@ -5122,6 +5122,7 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
 }
 
 function Compliance({ company, onNavigate }) {
+  const fyPeriods = useFinancialPeriods(company?.id); // recorded financial periods (src/shared/fiscalYear.js)
   const [settings, setSettings] = useState({
     vat_period:      company?.vat_period      || 'bimonthly',
     year_end_month:  company?.year_end_month  || 12,
@@ -5193,13 +5194,11 @@ function Compliance({ company, onNavigate }) {
     }
   }
 
-  // CT1 — due 23rd day of 9th month after year end
-  const yem = Number(settings.year_end_month) || 12;
-  for (let y = today.getFullYear() - 1; y <= today.getFullYear() + 1; y++) {
-    const due = new Date(y, yem - 1 + 9, 23); // Date handles month overflow
+  // CT1 — due 23rd day of 9th month after each period end (src/shared/fiscalYear.js)
+  for (const { due, fy, periodEnd } of ct1Deadlines(today.getFullYear() - 1, today.getFullYear() + 1, fiscalConfig({ ...company, year_end_month: settings.year_end_month }, fyPeriods))) {
     const d = daysDiff(due);
     if (d >= -60 && d <= 400)
-      deadlines.push({ type: "CT1", desc: `Corporation Tax Return — FY${y}`, detail: `Annual CT return for year ending ${MONTH_NAMES_SHORT[yem-1]} ${y}`, due });
+      deadlines.push({ type: "CT1", desc: `Corporation Tax Return — FY${fy}`, detail: `Annual CT return for the period ending ${new Date(periodEnd + "T00:00:00").toLocaleDateString("en-IE", { day: "numeric", month: "short", year: "numeric" })}`, due });
   }
 
   // P35 — Annual employer return due 15 February following the year (only if PAYE registered)
@@ -5951,6 +5950,7 @@ const TILE_META = {
 };
 
 function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, company, onNavigate, recurringPosted, recurringSkipped, onOpenWizard, onDismissGetStarted }) {
+  const fyPeriods = useFinancialPeriods(company?.id); // recorded financial periods (src/shared/fiscalYear.js)
   const { user } = useUser();
   // Item 2 — sum across every active bank account instead of a single hardcoded nominal;
   // falls back to BANK_NOMINAL_CODE if a company somehow has no bank_accounts rows yet.
@@ -6009,10 +6009,7 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
   // only affects `chartRangeStart`, used solely by the sparkline's transaction fetch and its
   // opening-balance anchor.
   const [ytdMode, setYtdMode] = useState(false);
-  const ovYearEndMonth   = company?.year_end_month || 12;
-  const ovYearStartMonth = (ovYearEndMonth % 12) + 1;
-  const ovYtdStartYear   = selMo >= ovYearStartMonth ? selYear : selYear - 1;
-  const ytdStart         = `${ovYtdStartYear}-${String(ovYearStartMonth).padStart(2, '0')}-01`;
+  const ytdStart         = ytdStartForMonth(selPeriod, fiscalConfig(company, fyPeriods), localToday()); // src/shared/fiscalYear.js
   const chartRangeStart  = ytdMode ? ytdStart : periodStart;
 
   // Balance comparison — "Balance as at [date] vs. as at [date]", entirely self-contained and
@@ -6338,11 +6335,9 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
       }
     }
   }
-  const yem = Number(cs.year_end_month) || 12;
-  for (let y = today.getFullYear() - 1; y <= today.getFullYear() + 1; y++) {
-    const due = new Date(y, yem - 1 + 9, 23);
+  for (const { due, fy } of ct1Deadlines(today.getFullYear() - 1, today.getFullYear() + 1, fiscalConfig(company, fyPeriods))) {
     const d   = daysDiff(due);
-    if (d >= -14 && d <= 400) deadlines.push({ type: "CT1", desc: `Corp Tax — FY${y}`, due });
+    if (d >= -14 && d <= 400) deadlines.push({ type: "CT1", desc: `Corp Tax — FY${fy}`, due });
   }
   if (cs.paye_registered) {
     for (let y = today.getFullYear() - 1; y <= today.getFullYear(); y++) {
@@ -8840,6 +8835,7 @@ function buildPnL(journals, coaAccounts) {
 }
 
 function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "Company", company, drillAccountCode, setDrillAccountCode }) {
+  const fyPeriods = useFinancialPeriods(company?.id); // recorded financial periods (src/shared/fiscalYear.js)
   const now = new Date();
   const { accounts: coaAccounts } = useChartOfAccounts(companyId);
   const { balances: pyBalances }  = usePriorYearBalances(companyId);
@@ -8877,11 +8873,10 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
   const periodLabel = new Date(selPeriod + '-01').toLocaleDateString("en-IE", { month: "long", year: "numeric" });
 
   // YTD start: first month of the accounting year that contains selPeriod
-  const yearEndMonth  = company?.year_end_month || 12; // 1–12
-  const yearStartMonth = (yearEndMonth % 12) + 1;      // Dec(12)→Jan(1), Mar(3)→Apr(4)
   const [py, pm] = selPeriod.split('-').map(Number);
-  const ytdStartYear  = pm >= yearStartMonth ? py : py - 1;
-  const ytdStart      = `${ytdStartYear}-${String(yearStartMonth).padStart(2, '0')}-01`;
+  const fyCfg         = fiscalConfig(company, fyPeriods);
+  const ytdStart      = ytdStartForMonth(selPeriod, fyCfg, localToday()); // src/shared/fiscalYear.js
+  const fyOfPeriod    = fiscalYearContaining(localToday() < monthEnd(py, pm) ? localToday() : monthEnd(py, pm), fyCfg);
   const periodEnd     = monthEnd(py, pm);
 
   const rangeStart    = ytdMode ? ytdStart : `${selPeriod}-01`;
@@ -8897,7 +8892,7 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
     if (cmpMode === "none") return [null, null, ""];
     if (cmpMode === "prev_year") {
       const start = ytdMode
-        ? `${ytdStartYear - 1}-${String(yearStartMonth).padStart(2, '0')}-01`
+        ? ytdStartForMonth(`${py - 1}-${String(pm).padStart(2, '0')}`, fyCfg)
         : `${py - 1}-${String(pm).padStart(2, '0')}-01`;
       const end = monthEnd(py - 1, pm);
       const label = ytdMode ? `YTD ${py - 1}` : new Date(py - 1, pm - 1, 1).toLocaleDateString("en-IE", { month: "short", year: "numeric" });
@@ -8958,23 +8953,25 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
     })();
   }, [companyId, tab]); // eslint-disable-line
 
-  // P&L Trend — the fiscal year's 12 months, computed from the same ytdStartYear/yearStartMonth
-  // already derived above (not from selPeriod's own month), so the trend always shows the
-  // whole fiscal year regardless of which single period is currently selected.
+  // P&L Trend — the calendar months of the financial year containing the selected period (not
+  // selPeriod's own month), so the trend always shows the whole financial year. A year ending
+  // mid-month (S&P: 9 Oct to 8 Oct) gives 13 buckets, the first and last partial; a month-end
+  // year gives the same 12 as before.
   const trendMonths = useMemo(() => {
     const months = [];
-    for (let i = 0; i < 12; i++) {
-      const mIdx = yearStartMonth - 1 + i;
-      const y = ytdStartYear + Math.floor(mIdx / 12);
-      const m = (mIdx % 12) + 1;
-      const start = `${y}-${String(m).padStart(2, '0')}-01`;
-      const endDate = new Date(y, m, 0);
-      const end = `${endDate.getFullYear()}-${String(endDate.getMonth() + 1).padStart(2, '0')}-${String(endDate.getDate()).padStart(2, '0')}`;
+    let [y, m] = fyOfPeriod.start.split('-').map(Number);
+    const [ey, em] = fyOfPeriod.end.split('-').map(Number);
+    while (y < ey || (y === ey && m <= em)) {
+      const mStart = `${y}-${String(m).padStart(2, '0')}-01`;
+      const mEnd = monthEnd(y, m);
+      const start = mStart < fyOfPeriod.start ? fyOfPeriod.start : mStart;
+      const end = mEnd > fyOfPeriod.end ? fyOfPeriod.end : mEnd;
       const key = `${y}-${String(m).padStart(2, '0')}`;
       months.push({ key, label: new Date(y, m - 1, 1).toLocaleDateString('en-IE', { month: 'short' }), start, end });
+      m++; if (m > 12) { m = 1; y++; }
     }
     return months;
-  }, [ytdStartYear, yearStartMonth]);
+  }, [fyOfPeriod.start, fyOfPeriod.end]);
 
   const [trendJournals, setTrendJournals] = useState([]);
   const [trendLoading, setTrendLoading]   = useState(false);
@@ -8985,7 +8982,7 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
       // One query for the whole fiscal year, not twelve — bucketing happens in memory below.
       const { data } = await fetchAllRows(() => supabase.from('journals').select('*')
         .eq('company_id', companyId)
-        .gte('date', trendMonths[0].start).lte('date', trendMonths[11].end)
+        .gte('date', trendMonths[0].start).lte('date', trendMonths[trendMonths.length - 1].end)
         .order('date').order('id'));
       setTrendJournals(data || []);
       setTrendLoading(false);
@@ -8995,7 +8992,7 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
   // buildPnL is a pure, in-memory function (no DB calls) — calling it once per month bucket
   // here is cheap; the only real query is the single fetch above.
   const trendByMonth = useMemo(() => trendMonths.map(mo => {
-    const monthJournals = trendJournals.filter(j => j.date.slice(0, 7) === mo.key);
+    const monthJournals = trendJournals.filter(j => j.date >= mo.start && j.date <= mo.end);
     return monthJournals.length ? buildPnL(monthJournals, coaAccounts) : { revRows: [], cosRows: [], opexRows: [], totRev: 0, gp: 0, np: 0 };
   }), [trendJournals, trendMonths, coaAccounts]);
 
@@ -9449,7 +9446,7 @@ function GLReport({ period, selPeriod, setSelPeriod, companyId, companyName = "C
       {tab === "pl_trend" && (
         <div className="card">
           <div className="card-header">
-            <span className="card-title">P&L Trend — FY {trendMonths[0]?.key?.slice(0, 4)}–{trendMonths[11]?.key?.slice(0, 4)}</span>
+            <span className="card-title">P&L Trend — FY {trendMonths[0]?.key?.slice(0, 4)}–{trendMonths[trendMonths.length - 1]?.key?.slice(0, 4)}</span>
           </div>
           {trendLoading ? (
             <div style={{ padding: 48, textAlign: "center", color: "var(--dim)", fontSize: 12 }}>Loading…</div>
@@ -9891,18 +9888,16 @@ function GLExtract({ period, glLines, bsGlLines = [], glAccounts, accountTypeMap
 
 
 function FullGLReport({ companyId, companyName, company, coaAccounts }) {
+  const fyPeriods = useFinancialPeriods(company?.id); // recorded financial periods (src/shared/fiscalYear.js)
   const now        = new Date();
   const [mode, setMode]         = useState("ytd"); // "month" | "ytd"
   const [journals, setJournals] = useState([]);
   const [loading, setLoading]   = useState(true);
   const [reclassTarget, setReclassTarget] = useState(null); // { journal, side } | null
 
-  const yearEndMonth  = company?.year_end_month || 12;
-  const yearStartMonth = (yearEndMonth % 12) + 1;
   const curYear  = now.getFullYear();
   const curMonth = now.getMonth() + 1;
-  const ytdStartYear  = curMonth >= yearStartMonth ? curYear : curYear - 1;
-  const ytdStart      = `${ytdStartYear}-${String(yearStartMonth).padStart(2, '0')}-01`;
+  const ytdStart      = ytdStartForMonth(`${curYear}-${String(curMonth).padStart(2, '0')}`, fiscalConfig(company, fyPeriods), localToday()); // src/shared/fiscalYear.js
   const monthStart    = `${curYear}-${String(curMonth).padStart(2, '0')}-01`;
   const periodEnd     = monthEnd(curYear, curMonth);
   const rangeStart    = mode === "ytd" ? ytdStart : monthStart;
@@ -15492,27 +15487,16 @@ function Form11({ company, companyName }) {
   };
 
   const yeMonth = company?.year_end_month || 12;
-  const yearEndOptions = (() => {
-    const now = new Date();
-    const thisYE = new Date(now.getFullYear(), yeMonth, 0);
-    const startYear = thisYE <= now ? now.getFullYear() : now.getFullYear() - 1;
-    return Array.from({ length: 3 }, (_, i) => {
-      const y = startYear - i;
-      const d = new Date(y, yeMonth, 0);
-      return {
-        val: localDateStr(d),
-        label: d.toLocaleDateString("en-IE", { day: "numeric", month: "long", year: "numeric" }),
-      };
-    });
-  })();
+  // Periods as the statements page lists them (recorded periods first, then the three most recent
+  // regular years ended), honouring fy_end_day (src/shared/statements/periods.js).
+  const fyPeriods = useFinancialPeriods(company?.id);
+  const yearEndOptions = listPeriods({ yeMonth, fyEndDay: company?.fy_end_day ?? null, periods: fyPeriods, today: localToday() });
   const [yearEnd, setYearEnd] = useState(yearEndOptions[0]?.val || "");
-
-  // Fiscal year start for the SELECTED yearEnd — identical formula to FinancialStatements'
-  // fyStart (verified this session, incl. the leap-year Feb boundary edge case).
+  useEffect(() => {
+    if (yearEndOptions.length && !yearEndOptions.some(o => o.val === yearEnd)) setYearEnd(yearEndOptions[0].val);
+  }, [yearEndOptions.map(o => o.val).join()]); // eslint-disable-line react-hooks/exhaustive-deps
+  const fyStart = yearEndOptions.find(o => o.val === yearEnd)?.start || null;
   const [yeSelYear] = yearEnd ? yearEnd.split('-').map(Number) : [null];
-  const yearStartMonth = (yeMonth % 12) + 1;
-  const fyStartYear = yeSelYear != null ? (yeMonth >= yearStartMonth ? yeSelYear : yeSelYear - 1) : null;
-  const fyStart = fyStartYear != null ? `${fyStartYear}-${String(yearStartMonth).padStart(2, '0')}-01` : null;
 
   const generate = async () => {
     if (!company?.id) return;
@@ -16236,7 +16220,7 @@ function PracticeDashboard({ companies, onSelectCompany, onAddCompany }) {
         // accounts, replacing the raw bank_transactions.balance read (which returns null for
         // every real company today, since the most recent transaction is almost always
         // Yapily-fed and that source never populates the column).
-        const [nominals, importRes, arRes, vatRes] = await Promise.all([
+        const [nominals, importRes, arRes, vatRes, periodsRes] = await Promise.all([
           fetchActiveBankNominals(c.id),
           supabase.from('bank_transactions').select('created_at')
             .eq('company_id', c.id).order('created_at', { ascending: false }).limit(1),
@@ -16246,6 +16230,7 @@ function PracticeDashboard({ companies, onSelectCompany, onAddCompany }) {
             .neq('status', 'credited').neq('status', 'paid'),
           supabase.from('vat_returns').select('period_val')
             .eq('company_id', c.id).eq('status', 'filed'),
+          fetchFinancialPeriods(supabase, [c.id]), // CT1 follows recorded period ends
         ]);
         const bankCodes = nominals.length ? nominals : [BANK_NOMINAL_CODE];
         const balance = await fetchNominalBalanceAsOf(c.id, bankCodes, today).catch(() => null);
@@ -16265,6 +16250,7 @@ function PracticeDashboard({ companies, onSelectCompany, onAddCompany }) {
             arTotal,
             arOverdue,
             vatFiled:   new Set((vatRes.data || []).map(r => r.period_val)),
+            periods:    periodsRes.data || [],
           },
         }));
       } catch (_) {}

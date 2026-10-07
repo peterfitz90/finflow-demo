@@ -5,6 +5,7 @@ import { goToFullSite } from './shared/viewMode.js';
 import { isPending, can } from './entitlements.js';
 import { SignIn } from '@clerk/clerk-react';
 import { supabase } from './supabase.js';
+import { useFinancialPeriods } from './shared/useFinancialPeriods.js';
 import { approveApBill, confirmBankTxn, approveExpense, rejectExpense, updateExpenseNominal, updateExpenseVatCode, fetchExpenseBankNominal } from './shared/approvals.js';
 import { orgRoleFor } from './shared/orgRole.js';
 import { CHAT_SUGGESTIONS, buildChatContext, buildChatSystemPrompt, chatGreeting, sendChatMessage, chatPeriodLabel } from './shared/chatContext.js';
@@ -319,6 +320,7 @@ const fetchOverdueInvoices = async companyId => overdueInvoices(await fetchInvoi
 // silently empty and every filed period would show as late.
 function useApplicableDeadlines(company) {
   const companyId = company?.id;
+  const fyPeriods = useFinancialPeriods(companyId); // recorded periods: CT1 follows their ends
   const [locked, setLocked] = useState(null); // [{ period_start, period_end }]
   useEffect(() => {
     if (!companyId) return;
@@ -329,8 +331,8 @@ function useApplicableDeadlines(company) {
   }, [companyId]);
   return useMemo(() => {
     if (!company || !locked) return null;
-    return applicableDeadlines(company, locked);
-  }, [company, locked]);
+    return applicableDeadlines(company, locked, fyPeriods);
+  }, [company, locked, fyPeriods]);
 }
 
 const isLate = isLateDeadline;
