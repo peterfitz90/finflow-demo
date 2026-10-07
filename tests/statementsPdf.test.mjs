@@ -55,7 +55,7 @@ test('the draft PDF renders (cover, P&L, balance sheet, notes) with the embedded
   assert.equal(head, '%PDF-');
   const text = Buffer.from(pdf).toString('latin1');
   assert.match(text, /\/Count 4/, 'four pages');
-  assert.match(text, /SourceSans3/i, 'Source Sans 3 embedded');
+  assert.match(text, /LedgrlySans/, 'Ledgrly Sans embedded');
   assert.equal(fa(-2161), '(€2,161)');
   assert.equal(fa(0.4), '—');
 });
@@ -65,4 +65,17 @@ test('the endpoint is accountant-only and reads with the caller\'s token, never 
   assert.match(src, /await requireAccountant\(req, company_id\)/);
   assert.match(src, /accessToken: async \(\) => token/);
   assert.doesNotMatch(src, /SERVICE_ROLE/);
+});
+
+test('the embedded font has no ligatures (PDF text extracts and searches as written) and has the euro sign', async () => {
+  const { createRequire } = await import('node:module');
+  const fontkit = createRequire(import.meta.url)('fontkit');
+  for (const w of ['400', '700']) {
+    const f = fontkit.openSync(new URL(`../api/_fonts/ledgrly-sans-${w}.woff`, import.meta.url).pathname.replace(/^\/([A-Za-z]:)/, '$1'));
+    assert.equal(f.familyName, 'Ledgrly Sans', 'renamed: "Source" is a Reserved Font Name');
+    for (const tag of ['liga', 'clig', 'dlig', 'rlig']) assert.ok(!f.availableFeatures.includes(tag), `${w}: no ${tag}`);
+    assert.ok(f.glyphForCodePoint(0x20AC).id > 0, 'has the euro sign');
+    const run = f.layout('Staff office profit difference affiliated');
+    assert.equal(run.glyphs.length, 'Staff office profit difference affiliated'.length, 'one glyph per character: nothing joined');
+  }
 });

@@ -5,7 +5,8 @@
 // uses), so the PDF shows what the screen shows. Pages: cover, profit and loss account (the full
 // set; the CRO variant omits it later), balance sheet with items 3-5 and signatures, notes.
 // Running header and footer, "Page n of m", and a DRAFT watermark on every page until approved.
-// Font: Source Sans 3, embedded (OFL; api/_fonts/LICENSE-source-sans-3.txt), which has the € sign.
+// Font: Ledgrly Sans, embedded: Source Sans 3 with its ligatures removed (so PDF text extracts and
+// searches as written) and renamed as the OFL requires (api/_fonts/README.txt). It has the € sign.
 import React from 'react';
 import path from 'node:path';
 
@@ -26,9 +27,9 @@ const longFmt = d => (d ? new Date(d + 'T00:00:00').toLocaleDateString('en-IE', 
 //      ledgrlyApprovedAt (ISO, later) }
 export async function renderStatementsPdf(m) {
   const { Document, Page, View, Text, Font, renderToBuffer } = await import('@react-pdf/renderer');
-  Font.register({ family: 'Source Sans 3', fonts: [
-    { src: path.join(FONT_DIR, 'source-sans-3-latin-400-normal.woff'), fontWeight: 400 },
-    { src: path.join(FONT_DIR, 'source-sans-3-latin-700-normal.woff'), fontWeight: 700 },
+  Font.register({ family: 'Ledgrly Sans', fonts: [
+    { src: path.join(FONT_DIR, 'ledgrly-sans-400.woff'), fontWeight: 400 },
+    { src: path.join(FONT_DIR, 'ledgrly-sans-700.woff'), fontWeight: 700 },
   ] });
   Font.registerHyphenationCallback(w => [w]);
 
@@ -40,7 +41,7 @@ export async function renderStatementsPdf(m) {
   const titleCase = periodPhrase.charAt(0).toUpperCase() + periodPhrase.slice(1);
 
   const S = {
-    page: { fontFamily: 'Source Sans 3', fontSize: 10, color: INK, paddingTop: 64, paddingBottom: 64, paddingHorizontal: 56, lineHeight: 1.35 },
+    page: { fontFamily: 'Ledgrly Sans', fontSize: 10, color: INK, paddingTop: 64, paddingBottom: 64, paddingHorizontal: 56, lineHeight: 1.35 },
     header: { position: 'absolute', top: 28, left: 56, right: 56, flexDirection: 'row', justifyContent: 'space-between', fontSize: 8, color: MUTED, borderBottomWidth: 0.5, borderBottomColor: RULE, paddingBottom: 4 },
     // positioned from the top: A4 is 841.89pt tall (react-pdf drops fixed elements anchored with bottom)
     footer: { position: 'absolute', top: 800, left: 56, right: 56, flexDirection: 'row', justifyContent: 'space-between', fontSize: 8, color: MUTED, borderTopWidth: 0.5, borderTopColor: RULE, paddingTop: 4 },
