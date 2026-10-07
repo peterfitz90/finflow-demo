@@ -26,6 +26,7 @@ import { BANK_NOMINAL_CODE, fetchNominalBalanceAsOf, fetchActiveBankNominals } f
 import { GL_ACCOUNTS, COA_SEED_SOLE_TRADER, COA_STATIC_FALLBACK, useChartOfAccounts } from './shared/chartOfAccounts.js';
 import { computeFrs105, frs105FiscalYear, fetchJournalsToDate, fetchChartForStatements, frs105Warnings } from './shared/statements/frs105.js';
 import { listPeriods, isYearEnd } from './shared/statements/periods.js';
+import { TRANSFER, TRANSFER_LABEL, isTransferHold, assertDistinctAccounts } from './shared/transferHold.js';
 import { fiscalConfig, fiscalYearContaining, ytdStartForMonth, ct1Deadlines } from './shared/fiscalYear.js';
 import { useFinancialPeriods, fetchFinancialPeriods } from './shared/useFinancialPeriods.js';
 import { microEligibility } from './shared/statements/eligibility.js';
@@ -10924,6 +10925,8 @@ function Journals({ period, selPeriod, companyName, companyId: propCompanyId, re
 
     let cid;
     try { cid = requireCompanyId(companyId); } catch (err) { setPostError(err.message); return; }
+    // Same-account guard (src/shared/transferHold.js)
+    try { assertDistinctAccounts(form); } catch (err) { setPostError(err.message); return; }
 
     // Period-lock check before writing
     const dateStr = sanitiseDate(form.date);
@@ -12286,8 +12289,9 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
         setSiblingPrompt(null);
       }
 
-      // Queue a learn prompt so user can confirm whether to always code this payee
-      if (changedRow) {
+      // Queue a learn prompt so user can confirm whether to always code this payee. Not for a
+      // transfer: it has no nominal to learn, and a rule must never re-code journals to it.
+      if (changedRow && code !== TRANSFER) {
         const kw = extractKeyword(changedRow.description || '');
         if (kw.length >= 3) {
           const nomName   = GL_ACCOUNTS.find(a => a.code === code)?.name || code;
@@ -12354,7 +12358,11 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
       // (e.g. a company mid-onboarding before Item 2's backfill/first sync has run).
       const bankAcct    = bankAccounts.find(a => a.id === selectedBankAccountId);
       const bankNominal = bankAcct?.nominal_code || "1000";
+      // Same-account guard (src/shared/transferHold.js): a transfer, or a line coded to its own
+      // bank nominal, posts no journal and is held in Reconciliation to choose the other account.
+      const heldIds = new Set(toPost.filter(r => isTransferHold(nominals[r.revolut_id] || "6600", bankNominal)).map(r => r.revolut_id));
       const journals = toPost.map(r => {
+        if (heldIds.has(r.revolut_id)) return null;
         const nominal  = nominals[r.revolut_id] || "6600";
         const isIn     = r.amount >= 0;
         const vatCode  = coaAccounts.find(a => a.code === nominal)?.default_vat_code ?? null;
@@ -12368,14 +12376,19 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
         };
       });
       const now = new Date().toISOString();
-      const btRows = toPost.map(r => ({
-        company_id: cid, revolut_id: r.revolut_id, date: r.date,
-        description: r.description, amount: r.amount, currency: r.currency,
-        balance: r.balance, nominal_account: nominals[r.revolut_id] || "6600",
-        bank_account_id: bankAcct?.id ?? null,
-        bank_format: bankFormat, import_batch_id: batchId,
-        reconciled: true, reconciled_at: now,
-      }));
+      const btRows = toPost.map(r => {
+        const held = heldIds.has(r.revolut_id);
+        return {
+          company_id: cid, revolut_id: r.revolut_id, date: r.date,
+          description: r.description, amount: r.amount, currency: r.currency,
+          balance: r.balance, nominal_account: held ? null : (nominals[r.revolut_id] || "6600"),
+          bank_account_id: bankAcct?.id ?? null,
+          bank_format: bankFormat, import_batch_id: batchId,
+          reconciled: !held, reconciled_at: held ? null : now,
+          hold_reason: held ? 'transfer' : null,
+        };
+      });
+      assertDistinctAccounts(journals.filter(Boolean));
       // Bank transactions first, journals second (shared with the live feed): the unique
       // (company_id, revolut_id) constraint rejects an already-imported row BEFORE any journal
       // exists for it; a failed journal insert rolls this batch's bank transactions back.
@@ -12394,8 +12407,9 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
         if (Object.values(allByRef).some(ids => ids.length > 1)) {
           // Duplicate revolut_ids in batch (should not happen with index-salted hashes) — fall back to positional pairing
           console.warn('[post] duplicate revolut_ids detected — pairing journals to bank_transactions by position');
+          const btsWithJournal = insertedBts.filter(b => !heldIds.has(b.revolut_id)); // held transfers have none
           matchRows = insertedJournals.map((j, k) => {
-            const btId = insertedBts[k]?.id;
+            const btId = btsWithJournal[k]?.id;
             return btId ? { company_id: cid, bank_transaction_id: btId, matched_type: 'journal', matched_id: j.id, confidence: 100, status: 'confirmed', matched_by: 'auto', confirmed_at: now } : null;
           }).filter(Boolean);
         } else {
@@ -12414,8 +12428,10 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
       setSelected(new Set());
       sessionStorage.removeItem('ledgrly_import_session');
       sessionStorage.removeItem('ledgrly_import_nominals');
-      const postedN = insertedBts.length;
+      const heldN = insertedBts.filter(b => heldIds.has(b.revolut_id)).length;
+      const postedN = insertedBts.length - heldN;
       setAlert({ type: "ok", msg: `${postedN} transaction${postedN !== 1 ? "s" : ""} posted to the ledger.` +
+        (heldN ? ` ${heldN} transfer${heldN !== 1 ? "s" : ""} held in Reconciliation: choose the other account there.` : "") +
         (skippedDuplicates ? ` ${skippedDuplicates} already in the ledger ${skippedDuplicates !== 1 ? "were" : "was"} skipped.` : "") });
       loadHistory();
     } catch (e) {
@@ -13131,6 +13147,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
                             value={nominals[r.revolut_id] || "6600"}
                             onChange={e => handleNominalChange(r.revolut_id, e.target.value)}
                           >
+                            <option value={TRANSFER}>{TRANSFER_LABEL}</option>
                             {nominalOptions.map(grp => (
                               <optgroup key={grp.label} label={grp.label}>
                                 {grp.items.map(a => <option key={a.code} value={a.code}>{a.code} · {a.name}</option>)}
@@ -13239,6 +13256,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
                             }}
                             style={isChanged ? { borderColor: "var(--teal)", color: "var(--teal)" } : undefined}
                           >
+                            <option value={TRANSFER}>{TRANSFER_LABEL}</option>
                             {nominalOptions.map(grp => (
                               <optgroup key={grp.label} label={grp.label}>
                                 {grp.items.map(a => <option key={a.code} value={a.code}>{a.code} · {a.name}</option>)}
@@ -17451,6 +17469,9 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
   const [allCandidates, setAllCandidates]     = useState([]);
   const [createJnlFor, setCreateJnlFor]       = useState(null);
   const [jnlForm, setJnlForm]                 = useState(null);
+  // Held transfers (bank_transactions.hold_reason = 'transfer'): the other account to post to.
+  const [transferFor, setTransferFor]         = useState(null);
+  const [transferTo, setTransferTo]           = useState('');
   const [savingJnl, setSavingJnl]             = useState(false);
   const [toast, setToast]                     = useState(null);
   const [migrationNeeded, setMigrationNeeded] = useState(false);
@@ -17848,6 +17869,7 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
 
   const saveJnl = async () => {
     if (!jnlForm || !createJnlFor || savingJnl) return;
+    try { assertDistinctAccounts(jnlForm); } catch (e) { showToast(e.message); return; }
     setSavingJnl(true);
     const ref = jnlForm.reference.trim() || `REC-${Date.now().toString(36).toUpperCase().slice(-5)}`;
     const { data: jnl, error } = await supabase.from('journals').insert({
@@ -17866,6 +17888,34 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
     await supabase.from('bank_transactions').update({ reconciled: true, reconciled_at: now, settlement_type: 'categorise' }).eq('id', createJnlFor.id);
     setCreateJnlFor(null); setJnlForm(null);
     showToast('Journal posted and transaction reconciled');
+    await refreshCurrentView();
+    setSavingJnl(false);
+  };
+
+  // Post a held transfer against the other bank account the accountant chose: money out of this
+  // account is Dr other / Cr this; money in is Dr this / Cr other.
+  const saveTransfer = async () => {
+    const bt = transferFor;
+    if (!bt || !transferTo || savingJnl) return;
+    const thisNominal = bankAccounts.find(a => a.id === bt.bank_account_id)?.nominal_code || '1000';
+    const isOut = Number(bt.amount) < 0;
+    const row = {
+      company_id: companyId, date: sanitiseDate(bt.date), description: bt.description || 'Transfer',
+      debit_account: isOut ? transferTo : thisNominal, credit_account: isOut ? thisNominal : transferTo,
+      amount: Math.abs(Number(bt.amount)), reference: bt.revolut_id || `TRF-${Date.now().toString(36).toUpperCase().slice(-5)}`,
+    };
+    try { assertDistinctAccounts(row); } catch (e) { showToast(e.message); return; }
+    setSavingJnl(true);
+    const { data: jnl, error } = await supabase.from('journals').insert(row).select().single();
+    if (error) { showToast('Error: ' + error.message); setSavingJnl(false); return; }
+    const now = new Date().toISOString();
+    await supabase.from('bank_matches').insert({
+      company_id: companyId, bank_transaction_id: bt.id, matched_type: 'journal', matched_id: jnl.id,
+      confidence: 100, status: 'confirmed', matched_by: 'user', confirmed_at: now, suggestion_kept: false,
+    });
+    await supabase.from('bank_transactions').update({ reconciled: true, reconciled_at: now, settlement_type: 'categorise', nominal_account: transferTo, hold_reason: null }).eq('id', bt.id);
+    setTransferFor(null); setTransferTo('');
+    showToast('Transfer posted and transaction reconciled');
     await refreshCurrentView();
     setSavingJnl(false);
   };
@@ -18049,8 +18099,16 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
         ) : unmatchedTxns.map((bt) => (
           <div key={bt.id}>
             <div style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '12px 18px', borderBottom: '1px solid var(--border)' }}>
-              <div style={{ flex: 1, minWidth: 0 }}><BtCell bt={bt} /></div>
-              <button className="btn btn-p btn-sm" onClick={() => openSettleModal(bt)}>Settle…</button>
+              <div style={{ flex: 1, minWidth: 0 }}>
+                <BtCell bt={bt} />
+                {bt.hold_reason === 'transfer' && <span style={{ display: 'inline-block', marginTop: 4, fontSize: 10, fontWeight: 700, color: 'var(--warn)', border: '1px solid rgba(251,191,36,0.3)', background: 'var(--warn-dim)', borderRadius: 'var(--radius-pill)', padding: '1px 8px' }}>Transfer: choose the other account</span>}
+              </div>
+              {bt.hold_reason === 'transfer' && (
+                <button className="btn btn-p btn-sm" onClick={() => { setTransferFor(transferFor?.id === bt.id ? null : bt); setTransferTo(''); }}>
+                  {transferFor?.id === bt.id ? 'Close' : 'Choose account…'}
+                </button>
+              )}
+              <button className={`btn ${bt.hold_reason === 'transfer' ? 'btn-s' : 'btn-p'} btn-sm`} onClick={() => openSettleModal(bt)}>Settle…</button>
               <button className="btn btn-s btn-sm" onClick={() => createJnlFor?.id === bt.id ? setCreateJnlFor(null) : openCreateJnl(bt)}>
                 {createJnlFor?.id === bt.id ? 'Close' : 'Categorise'}
               </button>
@@ -18058,6 +18116,28 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
                 {findFor?.id === bt.id ? 'Close' : 'Find match…'}
               </button>
             </div>
+
+            {/* Held transfer: post against the other bank account */}
+            {transferFor?.id === bt.id && (() => {
+              const thisNominal = bankAccounts.find(a => a.id === bt.bank_account_id)?.nominal_code || '1000';
+              const others = bankAccounts.filter(a => a.nominal_code && a.nominal_code !== thisNominal);
+              return (
+                <div style={{ padding: '14px 18px', background: 'var(--surface-2)', borderBottom: '1px solid var(--border)', fontSize: 12 }}>
+                  <div style={{ fontSize: 10, color: 'var(--text-faint)', fontWeight: 600, letterSpacing: '0.08em', textTransform: 'uppercase', marginBottom: 8 }}>TRANSFER — {Number(bt.amount) < 0 ? 'money out to' : 'money in from'} another account</div>
+                  {others.length ? (
+                    <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+                      <select className="f-input" style={{ fontSize: 12, maxWidth: 320 }} value={transferTo} onChange={e => setTransferTo(e.target.value)}>
+                        <option value="">Choose the other account…</option>
+                        {others.map(a => <option key={a.id} value={a.nominal_code}>{a.nominal_code} · {a.display_name || 'Bank account'}</option>)}
+                      </select>
+                      <button className="btn btn-p btn-sm" disabled={!transferTo || savingJnl} onClick={saveTransfer}>{savingJnl ? 'Posting…' : 'Post transfer'}</button>
+                    </div>
+                  ) : (
+                    <div style={{ color: 'var(--text-muted)', lineHeight: 1.6 }}>No other bank account is set up for this company. Add it on the Bank page (it gets its own nominal), then come back here. If this isn't a transfer, use Categorise.</div>
+                  )}
+                </div>
+              );
+            })()}
 
             {/* Inline find-match */}
             {findFor?.id === bt.id && (
@@ -20444,8 +20524,10 @@ function YapilyBankFeeds({ companyId, company, isActive, isBusinessOwner = false
                           }}
                           style={{ fontSize: 10.5, padding: '3px 5px', borderRadius: 6, border: `1px solid ${edited ? 'var(--accent)' : 'var(--border)'}`, background: 'var(--surface-2)', color: 'var(--text)', maxWidth: 200 }}
                         >
+                          <option value={TRANSFER}>{TRANSFER_LABEL}</option>
                           {nomOptions.map(a => <option key={a.code} value={a.code}>{a.code} — {a.name}</option>)}
                         </select>
+                        {row.held === 'transfer' && edit.nominal_code === row.nominal_code && <div style={{ fontSize: 10, color: 'var(--warn)', marginTop: 2 }}>Held: choose the other account in Reconciliation</div>}
                       </td>
                       <td style={{ padding: '5px 10px', whiteSpace: 'nowrap' }}>
                         <select

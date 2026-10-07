@@ -16,16 +16,18 @@ const AI_SYSTEM = `You are a bookkeeper categorising Irish bank transactions. Fo
 6900 Repairs & Maintenance - repairs, maintenance, contractors
 2100 VAT Control - Revenue, ROS, Collector General payments
 2000 Trade Creditors - supplier invoices being paid
-1000 Bank - internal transfers between own accounts
+TRANSFER Transfer - money moved between the company's own accounts (e.g. "To EUR", "Exchanged to EUR", "To savings", a transfer to another account in the company's own name)
 
 Rules:
 - Positive amount = money IN = use 4000 or 4100
 - Payment to a person's name = 6000 Payroll if negative, 4100 if positive
 - When unsure, pick the closest match — avoid 6600 Sundry unless truly unidentifiable
+- Never return a bank account code (1000-1099): an internal transfer is TRANSFER
 
 Return ONLY a JSON array: [{"id":"payee_key","nominal_code":"6000","nominal_name":"Payroll & PAYE","confidence":"high"}]`;
 
 import { withSentry, captureError } from './_sentry.js';
+import { categoryFromAI } from '../src/shared/transferHold.js';
 import { requireCompanyMember, AuthError } from './_auth.js';
 import { AI_MODEL, callClaude } from './_anthropic.js';
 
@@ -97,9 +99,12 @@ export default withSentry(async function handler(req, res) {
       // Accept both "key" and "id" fields from the model response
       const key = r.key || r.id;
       resultKeys.add(key);
+      // A bank nominal as the category would post Dr bank / Cr bank (same-account guard,
+      // src/shared/transferHold.js): an internal transfer is held for the accountant instead.
+      const code = categoryFromAI(r.nominal_code || (r.direction === "income" ? "4000" : "6600"));
       return {
         key,
-        code: String(r.nominal_code || (r.direction === "income" ? "4000" : "6600")),
+        code,
         confidence: ["high", "medium", "low"].includes(r.confidence) ? r.confidence : "medium",
       };
     });

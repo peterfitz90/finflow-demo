@@ -20,6 +20,7 @@ import { withSentry, captureError } from '../_sentry.js';
 import { decryptToken } from '../_token-crypto.js';
 import { findContentDuplicates, postImportBatch } from '../../src/shared/importDedup.js';
 import { fetchAllRows } from '../../src/shared/fetchAllRows.js';
+import { TRANSFER, TRANSFER_LABEL, isTransferHold, assertDistinctAccounts } from '../../src/shared/transferHold.js';
 import { requireCompanyMember, AuthError } from '../_auth.js';
 
 // ── Yapily auth ───────────────────────────────────────────────────────────────
@@ -627,8 +628,10 @@ export default withSentry(async function handler(req, res) {
       currency:     row.currency,
       is_income:    row.amount >= 0,
       nominal_code: nominal,
-      nominal_name: nominalNames[row.extId] || coaMap[nominal]?.name || nominal,
+      nominal_name: nominal === TRANSFER ? TRANSFER_LABEL : (nominalNames[row.extId] || coaMap[nominal]?.name || nominal),
       vat_code:     vatCode,
+      // Same-account guard: a transfer, or the line's own bank nominal, is held in Reconciliation.
+      held:         isTransferHold(nominal, bankNominalFor(row)) ? 'transfer' : null,
     };
   });
 
@@ -671,14 +674,15 @@ export default withSentry(async function handler(req, res) {
 
     const ov = overrides?.[row.extId];
     if (ov) {
-      if (ov.nominal_code && coaMap[ov.nominal_code]) finalNominal = ov.nominal_code;
+      if (ov.nominal_code && (coaMap[ov.nominal_code] || ov.nominal_code === TRANSFER)) finalNominal = ov.nominal_code;
       else if (ov.nominal_code) console.warn('[yapily/ingest] ignoring override with unknown nominal_code:', ov.nominal_code, '| extId:', row.extId);
 
       if (ov.vat_code === null) finalVat = null;
       else if (ov.vat_code && KNOWN_VAT_CODES.has(ov.vat_code)) finalVat = ov.vat_code;
       else if (ov.vat_code) console.warn('[yapily/ingest] ignoring override with unknown vat_code:', ov.vat_code, '| extId:', row.extId);
 
-      if (ov.save_rule) rulesToSave.push({ row, nominal: finalNominal, vat: finalVat });
+      // No rule is saved for a transfer: it has no nominal to learn.
+      if (ov.save_rule && finalNominal !== TRANSFER) rulesToSave.push({ row, nominal: finalNominal, vat: finalVat });
     }
 
     finalNominals[row.extId] = finalNominal;
@@ -712,6 +716,11 @@ export default withSentry(async function handler(req, res) {
     .filter(b => b.outstanding > 0.005);
 
   const suppressedExtIds = new Set();
+  // Same-account guard (src/shared/transferHold.js): a line categorised as a transfer, or to its
+  // own bank nominal (which would post Dr bank / Cr bank and lose the movement), gets no journal
+  // and is held unreconciled in Reconciliation as "transfer: choose the other account".
+  const transferHeldExtIds = new Set(toProcess.filter(row => isTransferHold(finalNominals[row.extId], bankNominalFor(row))).map(row => row.extId));
+  if (transferHeldExtIds.size) console.log(`[yapily/ingest] holding ${transferHeldExtIds.size} transfer(s) for Reconciliation (category is a transfer or the line's own bank account)`);
   if (openBillOutstanding.length) {
     for (const row of toProcess) {
       if (row.amount >= 0) continue; // only outgoing payments can be paying a bill
@@ -734,7 +743,7 @@ export default withSentry(async function handler(req, res) {
   const now     = new Date().toISOString();
 
   const journals = toProcess
-    .filter(row => !suppressedExtIds.has(row.extId))
+    .filter(row => !suppressedExtIds.has(row.extId) && !transferHeldExtIds.has(row.extId))
     .map(row => {
       const nominal     = finalNominals[row.extId];
       const bankNominal = bankNominalFor(row);
@@ -755,7 +764,8 @@ export default withSentry(async function handler(req, res) {
     });
 
   const btRows = toProcess.map(row => {
-    const suppressed = suppressedExtIds.has(row.extId);
+    const held = transferHeldExtIds.has(row.extId);
+    const suppressed = suppressedExtIds.has(row.extId) || held;
     return {
       company_id,
       revolut_id:      row.extId,
@@ -770,9 +780,11 @@ export default withSentry(async function handler(req, res) {
       import_batch_id: batchId,
       reconciled:      !suppressed,
       reconciled_at:   suppressed ? null : now,
+      hold_reason:     held ? 'transfer' : null,
     };
   });
 
+  assertDistinctAccounts(journals); // never reached with a same-account journal: belt and braces
   // Bank transactions first, journals second (postImportBatch): the unique
   // (company_id, revolut_id) constraint rejects any already-imported row BEFORE a journal
   // exists for it, and a failed journal insert rolls the batch's bank transactions back.
@@ -889,6 +901,7 @@ export default withSentry(async function handler(req, res) {
     from_date:            fromDate,
     import_from:          importFromValid,
     rules_saved:          rulesSaved,
+    transfers_held:       transferHeldExtIds.size,
     ...(accountErrors.length ? { account_errors: accountErrors } : {}),
   });
 });
