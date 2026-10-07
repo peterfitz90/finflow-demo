@@ -11428,25 +11428,41 @@ async function categoriseWithAI(uniquePayees, { onProgress, cancelRef, businessC
     onProgress?.(chunkIndex - 1, chunks.length,
       `Categorising payees with AI… chunk ${chunkIndex} of ${chunks.length}`);
 
-    const timeoutPromise = new Promise((_, reject) =>
-      setTimeout(() => reject(new Error(`Chunk timed out after ${CAT_CHUNK_TIMEOUT / 1000}s`)), CAT_CHUNK_TIMEOUT)
-    );
     const body = businessContext ? { payees: chunk, businessContext, company_id: companyId } : { payees: chunk, company_id: companyId };
-    const catToken = await window.Clerk?.session?.getToken();
-    const fetchPromise = fetch("/api/categorise", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${catToken}` },
-      body: JSON.stringify(body),
-      signal,
-    }).then(async res => {
-      if (!res.ok) throw new Error(`HTTP ${res.status}`);
-      const data = await res.json();
-      if (!data.results) throw new Error("No results in response");
-      return data.results;
-    });
+    // One request for the chunk. The endpoint answers 200 with ai:'fallback' when the model fails
+    // (api/_categorise.js): that counts as a failure here, so it is retried and then falls back to
+    // the keyword rules below rather than being taken as a real answer.
+    const requestChunk = async () => {
+      const timeoutPromise = new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`Chunk timed out after ${CAT_CHUNK_TIMEOUT / 1000}s`)), CAT_CHUNK_TIMEOUT)
+      );
+      const catToken = await window.Clerk?.session?.getToken();
+      const fetchPromise = fetch("/api/categorise", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "Authorization": `Bearer ${catToken}` },
+        body: JSON.stringify(body),
+        signal,
+      }).then(async res => {
+        if (!res.ok) throw new Error(`HTTP ${res.status}`);
+        const data = await res.json();
+        if (!data.results) throw new Error("No results in response");
+        if (data.ai && data.ai !== 'ok') throw new Error(`AI ${data.ai}`);
+        return data.results;
+      });
+      return Promise.race([fetchPromise, timeoutPromise]);
+    };
 
     try {
-      const results = await Promise.race([fetchPromise, timeoutPromise]);
+      let results;
+      try {
+        results = await requestChunk();
+      } catch (firstErr) {
+        if (firstErr.name === "AbortError" || firstErr.message?.includes("aborted") || cancelRef?.current) throw firstErr;
+        // One retry for a failed chunk, then the keyword-rule fallback.
+        console.warn(`[categoriseWithAI] chunk ${chunkIndex}/${chunks.length} failed (${firstErr.message}); retrying once`);
+        await new Promise(r => setTimeout(r, CAT_CHUNK_DELAY));
+        results = await requestChunk();
+      }
       results.forEach(r => { map[r.key] = { code: r.code, confidence: r.confidence }; });
       successfulChunks++;
       console.log(`[categoriseWithAI] chunk ${chunkIndex}/${chunks.length} done — ${results.length} results`);

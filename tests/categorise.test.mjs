@@ -51,3 +51,16 @@ test('categorisePayees: unparseable or thrown replies fall back to low-confidenc
   assert.equal(thrown.ai, 'fallback');
   assert.equal(thrown.error, 'boom');
 });
+
+test('a failed chunk is retried once: a transient failure still categorises, a persistent one is reported', async () => {
+  let calls = 0;
+  const flaky = async a => (++calls === 1 ? { ok: false, status: 529, text: '' } : answering(a));
+  const r = await categoriseFeedPayees(payees(10), { company_id: 'c', call: flaky });
+  assert.equal(r.ai, 'ok');
+  assert.equal(calls, 2, 'one retry');
+  let n = 0;
+  const down = async () => { n++; return { ok: false, status: 500, text: '' }; };
+  const d = await categoriseFeedPayees(payees(FEED_CHUNK * 2), { company_id: 'c', call: down });
+  assert.equal(d.ai, 'fallback');
+  assert.equal(n, 4, 'two chunks, each tried twice');
+});

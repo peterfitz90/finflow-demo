@@ -92,7 +92,9 @@ export async function categoriseFeedPayees(payees, { company_id, call } = {}) {
   let failedChunks = 0, chunks = 0, error = null;
   for (let i = 0; i < payees.length; i += FEED_CHUNK) {
     chunks++;
-    const r = await categorisePayees(payees.slice(i, i + FEED_CHUNK), { company_id, ...(call ? { call } : {}) });
+    const slice = payees.slice(i, i + FEED_CHUNK);
+    let r = await categorisePayees(slice, { company_id, ...(call ? { call } : {}) });
+    if (r.ai !== 'ok') r = await categorisePayees(slice, { company_id, ...(call ? { call } : {}) }); // one retry
     if (r.ai !== 'ok') { failedChunks++; error = r.error; continue; }
     for (const x of r.results) if (x.key) codes[x.key] = x.code;
   }
