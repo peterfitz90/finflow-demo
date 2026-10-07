@@ -1,4 +1,5 @@
-// POST /api/statements-pdf { company_id, year_end } -> a DRAFT FRS 105 statements PDF (STA-01 Stage 5a).
+// POST /api/statements-pdf { company_id, year_end, variant? } -> a DRAFT FRS 105 statements PDF (STA-01 Stage 5a):
+// variant 'full' (default; the members' copy, with the P&L) or 'abridged' (the CRO abridged copy).
 // Accountant-only (requireAccountant: the caller must be the accountant of company_id). The figures are
 // computed here from the ledger, never taken from the browser, and every read uses a Supabase client
 // carrying the caller's own token, so RLS applies exactly as it does on the statements page; nothing
@@ -15,6 +16,7 @@ const ISO = /^\d{4}-\d{2}-\d{2}$/;
 export default withSentry(async function handler(req, res) {
   if (req.method !== 'POST') return res.status(405).end();
   const { company_id, year_end } = req.body ?? {};
+  const variant = (req.body ?? {}).variant === 'abridged' ? 'abridged' : 'full';
   if (!company_id || !ISO.test(year_end || '')) return res.status(400).json({ error: 'company_id and year_end (YYYY-MM-DD) required' });
   try {
     await requireAccountant(req, company_id);
@@ -31,10 +33,10 @@ export default withSentry(async function handler(req, res) {
 
   try {
     const { company, assembled } = await loadStatements(db, company_id, year_end, todayStr());
-    const pdf = await renderStatementsPdf({ companyName: company.name, croNumber: company.cro_number, assembled, yearEnd: year_end, approved: false });
+    const pdf = await renderStatementsPdf({ companyName: company.name, croNumber: company.cro_number, assembled, yearEnd: year_end, approved: false, variant });
     const safe = company.name.replace(/[^A-Za-z0-9]+/g, '-').replace(/^-|-$/g, '');
     res.setHeader('Content-Type', 'application/pdf');
-    res.setHeader('Content-Disposition', `attachment; filename="${safe}-FRS105-${year_end}-DRAFT.pdf"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${safe}-FRS105-${year_end}${variant === 'abridged' ? '-ABRIDGED' : ''}-DRAFT.pdf"`);
     res.setHeader('Cache-Control', 'no-store');
     return res.status(200).send(Buffer.from(pdf));
   } catch (e) {

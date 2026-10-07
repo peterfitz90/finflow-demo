@@ -8,7 +8,7 @@ import { computeFrs105, frs105FiscalYear, frs105Warnings } from './frs105.js';
 import { listPeriods, isYearEnd } from './periods.js';
 import { fiscalConfig, fiscalYearContaining } from '../fiscalYear.js';
 import { ledgerEvidence, fixedAssetClasses, informationRequired, directorsInOffice } from './statementInputs.js';
-import { balanceSheetStatements, statementNotes } from './wording.js';
+import { balanceSheetStatements, statementNotes, abridgedStatements, certificationPage } from './wording.js';
 import { microEligibility } from './eligibility.js';
 import { ledgerLines, priorColumn, ledgerDifferences } from './comparatives.js';
 import { addDaysStr } from '../dates.js';
@@ -55,20 +55,24 @@ export function assembleStatements({ generated = true, company, companyName, jou
   const compDiffs = ledgerDifferences(prior, priorLedger);
   const hadPriorYear = generated && !!fyStart && selectedPeriod?.kind !== 'first' && journals.some(j => j.date < fyStart);
   const comparativesNeeded = { bs: hadPriorYear && !prior.bs, pnl: hadPriorYear && !prior.pnl };
-  const infoRequired = generated ? informationRequired({ company: company || {}, ...fsInputs, assetClasses, yearEnd, shareCapitalNeeded: hasShareCapital, comparativesNeeded }) : [];
+  // CRO abridged copy inputs (policy_inputs.abridged): { elected, certification: { director_ids, secretary_name, date } }
+  const abridgedInput = fsInputs.yearInputs?.policy_inputs?.abridged || {};
+  const infoRequired = generated ? informationRequired({ company: company || {}, ...fsInputs, assetClasses, yearEnd, shareCapitalNeeded: hasShareCapital, comparativesNeeded, abridged: abridgedInput }) : [];
   // Stage 3d: statutory wording (wording.js) from the inputs and figures.
   const approvalISO = fsInputs.yearInputs?.approval_date || null;
   const inOfficeAtApproval = approvalISO ? directorsInOffice(fsInputs.directors, approvalISO) : [];
   const nameOf = id => fsInputs.directors.find(d => d.id === id)?.full_name;
-  const bsStatements = balanceSheetStatements({
+  const bsArgs = {
     disclosures: fsInputs.disclosures, companyName,
     approvalDate: approvalISO ? longFmt(approvalISO) : null,
     signatories: (fsInputs.yearInputs?.signatory_ids || []).map(nameOf).filter(Boolean),
     soleDirector: inOfficeAtApproval.length === 1,
-  });
+  };
+  const bsStatements = balanceSheetStatements(bsArgs);
+  const abridgedBs = abridgedStatements(bsArgs);
   const dividendsInYear = generated && fyStart ? Math.round(journals.filter(j => j.date >= fyStart)
     .reduce((t, j) => t + (j.debit_account === '3400' ? Number(j.amount) : 0) - (j.credit_account === '3400' ? Number(j.amount) : 0), 0) * 100) / 100 : 0;
-  const notes = generated ? statementNotes({
+  const notesArgs = {
     companyName, legalForm: fsInputs.profile?.legal_form, country: fsInputs.profile?.country, croNumber: company?.cro_number,
     registeredOffice: fsInputs.profile?.registered_office, disclosures: fsInputs.disclosures,
     yearEndFmt: yearEnd ? longFmt(yearEnd) : '',
@@ -76,7 +80,9 @@ export function assembleStatements({ generated = true, company, companyName, jou
     taxUsed: s3pnl['7'].amount !== 0 || [...s3bs.E.codes, ...s3bs.C.codes].some(c => c.code === '2210'),
     reserves: { atStart: Math.round((s3bs.K2.amount - pfYear + dividendsInYear) * 100) / 100, result: pfYear, dividendsInYear, atEnd: s3bs.K2.amount },
     shareCapital: hasShareCapital ? { amount: s3bs.K1.amount, number: fsInputs.yearInputs?.policy_inputs?.share_capital?.number, shareClass: fsInputs.yearInputs?.policy_inputs?.share_capital?.class } : null,
-  }) : [];
+  };
+  const notes = generated ? statementNotes(notesArgs) : [];
+  const abridgedNotes = generated ? statementNotes({ ...notesArgs, abridged: true }) : [];
   // Stage 3e: micro eligibility, warn only.
   const eligibility = generated ? microEligibility({
     turnover: s3pnl['1'].amount,
@@ -98,11 +104,19 @@ export function assembleStatements({ generated = true, company, companyName, jou
   const yeFmt = yearEnd ? longFmt(yearEnd) : '';
   const notAYear = !!selectedPeriod && selectedPeriod.months !== 12;
   const periodPhrase = notAYear ? `period from ${longFmt(selectedPeriod.start)} to ${yeFmt}` : `year ended ${yeFmt}`;
+  // A1 certification page (abridged copy): two directors, or a director and the company secretary.
+  const cert = abridgedInput.certification || {};
+  const certification = certificationPage({
+    periodPhrase: notAYear ? `period ended ${yeFmt}` : periodPhrase,
+    directorNames: (cert.director_ids || []).map(nameOf).filter(Boolean),
+    secretaryName: (cert.secretary_name || '').trim() || null,
+    date: cert.date ? longFmt(cert.date) : null,
+  });
 
   return {
     yeMonth, fyEndDay, selectedPeriod, fyStart, isCompanyYearEnd, frs105, s3bs, s3pnl, pfYear, s3Imbalance, s3Unmapped,
     guardWarnings, inputsEvidence, assetClasses, hasShareCapital, priorYE, priorStart, priorLedger, prior, showPrior, compDiffs,
     hadPriorYear, comparativesNeeded, infoRequired, bsStatements, notes, eligibility, ledgerDraftConditions, isDraft,
-    yeFmt, notAYear, periodPhrase, approvalISO,
+    yeFmt, notAYear, periodPhrase, approvalISO, abridgedBs, abridgedNotes, certification, abridgedElected: !!abridgedInput.elected,
   };
 }

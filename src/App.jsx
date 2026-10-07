@@ -14713,6 +14713,10 @@ function StatementInputsPanel({ company, yearEnd, regime = 'FRS105', inputs, evi
     approval_date: yearInputs?.approval_date || '', average_employees: yearInputs?.average_employees ?? '',
     signatory_ids: yearInputs?.signatory_ids || [], depreciation: { ...(yearInputs?.policy_inputs?.depreciation || {}) },
     share_number: yearInputs?.policy_inputs?.share_capital?.number ?? '', share_class: yearInputs?.policy_inputs?.share_capital?.class || '',
+    ab_elected: !!yearInputs?.policy_inputs?.abridged?.elected,
+    ab_directors: yearInputs?.policy_inputs?.abridged?.certification?.director_ids || [],
+    ab_secretary: yearInputs?.policy_inputs?.abridged?.certification?.secretary_name || '',
+    ab_date: yearInputs?.policy_inputs?.abridged?.certification?.date || '',
   });
   const [newDir, setNewDir] = useState({ full_name: '', appointed_on: '', resigned_on: '' });
   const [drafts, setDrafts] = useState({}); // disclosure_key -> { mode: 'yes', narrative, section }
@@ -14722,7 +14726,11 @@ function StatementInputsPanel({ company, yearEnd, regime = 'FRS105', inputs, evi
   useEffect(() => {
     setYear({ approval_date: yearInputs?.approval_date || '', average_employees: yearInputs?.average_employees ?? '',
       signatory_ids: yearInputs?.signatory_ids || [], depreciation: { ...(yearInputs?.policy_inputs?.depreciation || {}) },
-      share_number: yearInputs?.policy_inputs?.share_capital?.number ?? '', share_class: yearInputs?.policy_inputs?.share_capital?.class || '' });
+      share_number: yearInputs?.policy_inputs?.share_capital?.number ?? '', share_class: yearInputs?.policy_inputs?.share_capital?.class || '',
+      ab_elected: !!yearInputs?.policy_inputs?.abridged?.elected,
+      ab_directors: yearInputs?.policy_inputs?.abridged?.certification?.director_ids || [],
+      ab_secretary: yearInputs?.policy_inputs?.abridged?.certification?.secretary_name || '',
+      ab_date: yearInputs?.policy_inputs?.abridged?.certification?.date || '' });
   }, [yearInputs]);
 
   const byKey = Object.fromEntries(disclosures.map(d => [d.disclosure_key, d]));
@@ -14751,7 +14759,12 @@ function StatementInputsPanel({ company, yearEnd, regime = 'FRS105', inputs, evi
     average_employees: year.average_employees === '' ? null : Number(year.average_employees),
     signatory_ids: year.signatory_ids,
     policy_inputs: { ...(yearInputs?.policy_inputs || {}), depreciation: Object.fromEntries(Object.entries(year.depreciation).filter(([, v]) => String(v || '').trim())),
-      share_capital: { number: year.share_number === '' ? null : Number(year.share_number), class: year.share_class.trim() || null } },
+      share_capital: { number: year.share_number === '' ? null : Number(year.share_number), class: year.share_class.trim() || null },
+      // CRO abridged copy (Stage 5): election and the certification page (two directors, or a
+      // director and the company secretary)
+      abridged: { elected: !!year.ab_elected, certification: {
+        director_ids: year.ab_directors.slice(0, year.ab_secretary.trim() ? 1 : 2),
+        secretary_name: year.ab_secretary.trim() || null, date: year.ab_date || null } } },
   }, { onConflict: 'company_id,year_end_date,regime' })));
   const attest = (key, has_items, extra = {}) => supabase.from('fs_disclosures').upsert({
     company_id: company.id, year_end_date: yearEnd, regime, disclosure_key: key, has_items,
@@ -14861,6 +14874,33 @@ function StatementInputsPanel({ company, yearEnd, regime = 'FRS105', inputs, evi
               <input id="fsi-share-class" className="f-input" placeholder="e.g. Ordinary" value={year.share_class} onChange={e => setYear(p => ({ ...p, share_class: e.target.value }))} />
               <div style={{ fontSize: 11, color: "var(--dim)", marginTop: 3 }}>For the called up share capital note; the amount comes from 3000.</div>
             </div>
+          </div>
+          <div id="fsi-cert" tabIndex={-1} style={{ marginBottom: 8 }}>
+            <label style={{ display: "inline-flex", gap: 6, alignItems: "center" }}>
+              <input type="checkbox" checked={year.ab_elected} onChange={e => setYear(p => ({ ...p, ab_elected: e.target.checked }))} />
+              File abridged financial statements with the CRO (a CRO abridged copy is produced with the full set)
+            </label>
+            {year.ab_elected && (
+              <div style={{ marginTop: 6, paddingLeft: 22 }}>
+                <div className="f-label">Certification page: signed by {year.ab_secretary.trim() ? 'a director and the company secretary' : 'two directors'}</div>
+                {directors.filter(d => !d.resigned_on).map(d => (
+                  <label key={d.id} style={{ display: "inline-flex", gap: 6, alignItems: "center", marginRight: 14 }}>
+                    <input type="checkbox" checked={year.ab_directors.includes(d.id)}
+                      onChange={() => setYear(p => ({ ...p, ab_directors: p.ab_directors.includes(d.id) ? p.ab_directors.filter(x => x !== d.id) : [...p.ab_directors, d.id].slice(-(p.ab_secretary.trim() ? 1 : 2)) }))} /> {d.full_name}
+                  </label>
+                ))}
+                <div className="f-row" style={{ marginTop: 6 }}>
+                  <div className="f-group">
+                    <label className="f-label" htmlFor="fsi-cert-secretary">Company secretary (optional, if the secretary signs)</label>
+                    <input id="fsi-cert-secretary" className="f-input" value={year.ab_secretary} onChange={e => setYear(p => ({ ...p, ab_secretary: e.target.value }))} placeholder="Full name" />
+                  </div>
+                  <div className="f-group">
+                    <label className="f-label" htmlFor="fsi-cert-date">Certification date</label>
+                    <input id="fsi-cert-date" type="date" className="f-input" value={year.ab_date} onChange={e => setYear(p => ({ ...p, ab_date: e.target.value }))} />
+                  </div>
+                </div>
+              </div>
+            )}
           </div>
           <div id="fsi-signatories" style={{ marginBottom: 8 }}>
             <div className="f-label">Signatories {approval ? `(directors in office on ${fmtIE(approval)})` : '(set the approval date first)'}</div>
@@ -15110,26 +15150,27 @@ function FinancialStatements({ company, companyName }) {
   // caller's own token; nothing is stored.
   const [pdfBusy, setPdfBusy] = useState(false);
   const [pdfError, setPdfError] = useState(null);
-  const downloadDraftPdf = async () => {
+  // variant: 'full' (the members' copy, with the P&L) or 'abridged' (the CRO abridged copy)
+  const downloadDraftPdf = async (variant = 'full') => {
     if (!company?.id || !yearEnd) return;
-    setPdfBusy(true); setPdfError(null);
+    setPdfBusy(variant); setPdfError(null);
     try {
       const token = await window.Clerk?.session?.getToken();
       const res = await fetch('/api/statements-pdf', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ company_id: company.id, year_end: yearEnd }),
+        body: JSON.stringify({ company_id: company.id, year_end: yearEnd, variant }),
       });
       if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
       const blob = await res.blob();
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');
       a.href = url;
-      a.download = (res.headers.get('Content-Disposition') || '').match(/filename="([^"]+)"/)?.[1] || `FRS105-${yearEnd}-DRAFT.pdf`;
+      a.download = (res.headers.get('Content-Disposition') || '').match(/filename="([^"]+)"/)?.[1] || `FRS105-${yearEnd}${variant === 'abridged' ? '-ABRIDGED' : ''}-DRAFT.pdf`;
       document.body.appendChild(a); a.click(); a.remove();
       setTimeout(() => URL.revokeObjectURL(url), 10000);
     } catch (e) {
-      captureError(e, { company_id: company.id, operation: 'statements-draft-pdf' });
+      captureError(e, { company_id: company.id, operation: 'statements-draft-pdf', variant });
       setPdfError(e.message || String(e));
     }
     setPdfBusy(false);
@@ -15430,8 +15471,11 @@ function FinancialStatements({ company, companyName }) {
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <ExportDropdown onCSV={exportCSV} onPrint={() => window.print()} />
-          <button className="btn btn-s btn-sm" disabled={pdfBusy} onClick={downloadDraftPdf} title="The server builds the PDF from the ledger, as on this screen">
-            {pdfBusy ? 'Building PDF…' : 'Draft PDF ↓'}
+          <button className="btn btn-s btn-sm" disabled={!!pdfBusy} onClick={() => downloadDraftPdf('full')} title="The full set (members' copy, with the P&L), built by the server from the ledger as on this screen">
+            {pdfBusy === 'full' ? 'Building PDF…' : 'Draft PDF ↓'}
+          </button>
+          <button className="btn btn-s btn-sm" disabled={!!pdfBusy} onClick={() => downloadDraftPdf('abridged')} title="The CRO abridged copy (no P&L), from the same figures">
+            {pdfBusy === 'abridged' ? 'Building PDF…' : 'Abridged draft ↓'}
           </button>
           <button className="btn btn-s btn-sm" onClick={() => setGenerated(false)}>← Settings</button>
         </div>

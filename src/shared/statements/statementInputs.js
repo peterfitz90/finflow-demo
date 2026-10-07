@@ -144,7 +144,7 @@ export const directorsInOffice = (directors, date) =>
 // Everything still needed, as [{ key, label, section, field }]. field is the panel element id.
 // comparativesNeeded: { bs, pnl } true when the company had a prior year and that statement's
 // comparatives are not confirmed (STA-01 Stage 4a).
-export function informationRequired({ company = {}, profile = null, directors = [], yearInputs = null, disclosures = [], assetClasses = [], yearEnd, shareCapitalNeeded = false, comparativesNeeded = {} }) {
+export function informationRequired({ company = {}, profile = null, directors = [], yearInputs = null, disclosures = [], assetClasses = [], yearEnd, shareCapitalNeeded = false, comparativesNeeded = {}, abridged = {} }) {
   const missing = [];
   const need = (key, label, section, field) => missing.push({ key, label, section, field });
   // Company
@@ -167,6 +167,15 @@ export function informationRequired({ company = {}, profile = null, directors = 
   }
   const sc = yearInputs?.policy_inputs?.share_capital;
   if (shareCapitalNeeded && !(sc?.number > 0 && sc?.class?.trim())) need('share_capital', 'Number and class of shares', 'This year', 'fsi-share-capital');
+  // CRO abridged copy, when elected: the certification page's signatories (two directors, or a
+  // director and the company secretary) and its date.
+  if (abridged.elected) {
+    const c = abridged.certification || {};
+    const ids = (c.director_ids || []).filter(Boolean);
+    const needDirectors = (c.secretary_name || '').trim() ? 1 : 2;
+    if (ids.length < needDirectors) need('certification_signatories', needDirectors === 1 ? 'Abridged copy: certifying director' : 'Abridged copy: two certifying directors (or a director and the secretary)', 'Abridged copy', 'fsi-cert');
+    if (!c.date) need('certification_date', 'Abridged copy: certification date', 'Abridged copy', 'fsi-cert');
+  }
   // Comparatives (prior-year figures), confirmed per statement
   if (comparativesNeeded.bs) need('comparatives_bs', 'Comparatives: confirm the prior-year balance sheet', 'Comparatives', 'fsc-bs');
   if (comparativesNeeded.pnl) need('comparatives_pnl', 'Comparatives: confirm the prior-year profit and loss account', 'Comparatives', 'fsc-pnl');

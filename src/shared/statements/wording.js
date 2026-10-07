@@ -120,8 +120,10 @@ export function balanceSheetStatements({ disclosures = [], companyName, approval
 }
 
 // Notes as [{ title, paragraphs: string[], table?: [label, amount][] }], numbered by the caller.
+// abridged: the CRO abridged copy's notes (agreed by Peter, 7 October 2026): the full set's notes
+// without the reserves movement note (no creditors analysis note exists to leave out).
 export function statementNotes({ companyName, legalForm, country, croNumber, registeredOffice, disclosures = [], yearEndFmt,
-  depreciationRates = {}, assetClasses = [], taxUsed = false, reserves = null, shareCapital = null }) {
+  depreciationRates = {}, assetClasses = [], taxUsed = false, reserves = null, shareCapital = null, abridged = false }) {
   const by = Object.fromEntries(disclosures.map(d => [d.disclosure_key, d]));
   const notes = [];
   const ph = PLACEHOLDER;
@@ -152,7 +154,7 @@ export function statementNotes({ companyName, legalForm, country, croNumber, reg
   // 5 Financial commitments, guarantees and contingencies (Sch 3B paras 34–35)
   notes.push({ title: 'Financial commitments, guarantees and contingencies', paragraphs: [disclosureSentence(by.commitments, 'commitments', { yearEnd: yearEndFmt }) || ph('commitments, guarantees and contingencies')] });
   // 6 Reserves and dividends (Sch 3B para 33): movement from the ledger, dividends from the attestation
-  if (reserves) {
+  if (reserves && !abridged) {
     notes.push({
       title: 'Reserves and dividends',
       table: [['Profit and loss account at the start of the year', reserves.atStart], ['Profit or loss for the year', reserves.result],
@@ -181,6 +183,62 @@ export function statementNotes({ companyName, legalForm, country, croNumber, reg
     if (r?.has_items && (r.narrative || '').trim()) notes.push({ title, paragraphs: [r.narrative.trim()] });
   }
   return notes;
+}
+
+// ── CRO abridged copy (STA-01 Stage 5) ──────────────────────────────────────────────────────
+// From the abridged wording sheet, based on S&P's filed abridged accounts and agreed by Peter on
+// 7 October 2026 item by item (A1–A8 and the notes). No member notification or consent condition
+// applies to abridged filing under ss.352–353 (Peter, 7 October 2026), so there is no attestation.
+export const ABRIDGED = {
+  // A1: certification page. Section 347 (S&P's filed copy cited s.1303, which concerns EEA companies).
+  certification: 'We hereby certify that the accounting documents of the Company for the [period], which are required by section 347 of the Companies Act 2014 to be delivered to the Registrar, are true copies of the originals.',
+  // A2 cover and A3 contents
+  coverTitle: 'Abridged Unaudited Financial Statements',
+  contentsBalanceSheet: 'Balance Sheet',
+  contentsNotes: 'Notes to the abridged financial statements',
+  notesTitle: 'Notes to the Abridged Financial Statements',
+  // A7: statement (e), the sheet's micro wording
+  statementE: '(e) the company has relied on the exemption in section 352 of the Companies Act 2014 on the grounds that it is entitled to that exemption as a micro company, and these abridged financial statements have been properly prepared in accordance with section 353 of the Companies Act 2014.',
+};
+
+// Wording verification record (Stage 5b's gate reads it): every printed item, its status, who and
+// when. The abridged items were agreed by Peter on the sheet on 7 October 2026.
+const AGREED = { status: 'verified', by: 'Peter', on: '2026-10-07', source: 'Abridged wording sheet' };
+export const WORDING_STATUS = {
+  'abridged.A1': { ...AGREED, item: 'Certification page: section 347; two directors by default, or a director and the company secretary; named and dated' },
+  'abridged.A2': { ...AGREED, item: 'Cover: "Abridged Unaudited Financial Statements"' },
+  'abridged.A3': { ...AGREED, item: 'Contents page' },
+  'abridged.A4': { ...AGREED, item: 'Statement of financial position: Schedule 3B with comparatives, no profit and loss account, same title as the full set' },
+  'abridged.A5': { ...AGREED, item: 'Micro-regime statement, as the full set' },
+  'abridged.A6': { ...AGREED, item: "Directors' statements (a)–(d), as the full set" },
+  'abridged.A7': { ...AGREED, item: 'Statement (e): micro wording, ss.352–353' },
+  'abridged.A8': { ...AGREED, item: 'Approval line and signatories with typed names, as the full set' },
+  'abridged.notes': { ...AGREED, item: "Notes as the full set, without the creditors analysis and the reserves movement notes" },
+};
+
+// The balance sheet statements for the abridged copy: the full set's items 3–5 with (e) added at
+// the end of the directors' statements ((c) loses its "and", (d) gains it).
+export function abridgedStatements(args) {
+  const out = balanceSheetStatements(args);
+  const ae = out.auditExemption ? [...out.auditExemption] : [];
+  const iC = ae.findIndex(l => /^\(c\)/.test(l)), iD = ae.findIndex(l => /^\(d\)/.test(l));
+  if (iC >= 0) ae[iC] = ae[iC].replace(/;?\s*and$/, ';').replace(/,$/, ',');
+  if (iD >= 0) ae[iD] = ae[iD].replace(/\.$/, '; and').replace(/,$/, ', and');
+  out.auditExemption = [...ae, ABRIDGED.statementE];
+  return out;
+}
+
+// A1: the certification text and its signatories: two directors by default, or a director and the
+// company secretary when a secretary is named. Missing names and the date show as placeholders.
+export function certificationPage({ periodPhrase, directorNames = [], secretaryName = null, date = null }) {
+  const people = secretaryName
+    ? [{ name: directorNames[0] || null, role: 'Director' }, { name: secretaryName, role: 'Secretary' }]
+    : [{ name: directorNames[0] || null, role: 'Director' }, { name: directorNames[1] || null, role: 'Director' }];
+  return {
+    text: fill(ABRIDGED.certification, { period: `financial ${periodPhrase}` }),
+    signatories: people.map(p => ({ ...p, name: p.name || PLACEHOLDER(`certification signatory (${p.role.toLowerCase()})`) })),
+    date: date || PLACEHOLDER('certification date'),
+  };
 }
 
 export const LEGAL_FORM_LABELS = Object.fromEntries(LEGAL_FORMS.map(f => [f.value, f.label]));

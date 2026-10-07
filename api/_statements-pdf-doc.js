@@ -2,13 +2,17 @@
 // @react-pdf/renderer loaded by dynamic import (ESM-only; see api/_invoice-pdf-doc.js).
 //
 // The model comes from src/shared/statements/assemble.js (the same function the statements page
-// uses), so the PDF shows what the screen shows. Pages: cover, profit and loss account (the full
-// set; the CRO variant omits it later), balance sheet with items 3-5 and signatures, notes.
+// uses), so the PDF shows what the screen shows. Two variants from the same figures:
+//   full      cover, profit and loss account, balance sheet with items 3-5 and signatures, notes
+//   abridged  the CRO abridged copy (wording sheet agreed by Peter, 7 October 2026): certification
+//             page (s.347), cover, contents, balance sheet with comparatives and statements
+//             (a)-(e), abridged notes; no profit and loss account
 // Running header and footer, "Page n of m", and a DRAFT watermark on every page until approved.
 // Font: Ledgrly Sans, embedded: Source Sans 3 with its ligatures removed (so PDF text extracts and
 // searches as written) and renamed as the OFL requires (api/_fonts/README.txt). It has the € sign.
 import React from 'react';
 import path from 'node:path';
+import { ABRIDGED } from '../src/shared/statements/wording.js';
 
 const e = (type, props, ...children) => React.createElement(type, props, ...children);
 const FONT_DIR = path.join(process.cwd(), 'api', '_fonts');
@@ -24,17 +28,34 @@ export const fa = n => {
 const longFmt = d => (d ? new Date(d + 'T00:00:00').toLocaleDateString('en-IE', { day: 'numeric', month: 'long', year: 'numeric' }) : '');
 
 // m: { companyName, croNumber, assembled (assembleStatements output), yearEnd, approved (bool),
-//      ledgrlyApprovedAt (ISO, later) }
+//      variant: 'full' (default) | 'abridged' }
 export async function renderStatementsPdf(m) {
-  const { Document, Page, View, Text, Font, renderToBuffer } = await import('@react-pdf/renderer');
-  Font.register({ family: 'Ledgrly Sans', fonts: [
+  const R = await import('@react-pdf/renderer');
+  R.Font.register({ family: 'Ledgrly Sans', fonts: [
     { src: path.join(FONT_DIR, 'ledgrly-sans-400.woff'), fontWeight: 400 },
     { src: path.join(FONT_DIR, 'ledgrly-sans-700.woff'), fontWeight: 700 },
   ] });
-  Font.registerHyphenationCallback(w => [w]);
+  R.Font.registerHyphenationCallback(w => [w]);
+  if (m.variant !== 'abridged') return R.renderToBuffer(buildDoc(m, R, null, {}));
+  // The abridged contents page lists page numbers: a first pass records where the sections land.
+  const seen = {};
+  await R.renderToBuffer(buildDoc(m, R, null, seen));
+  return R.renderToBuffer(buildDoc(m, R, seen, {}));
+}
 
+// known: { bs, notes } page numbers for the contents page (second pass); seen: filled on the first.
+function buildDoc(m, R, known, seen) {
+  const { Document, Page, View, Text } = R;
+  const abridged = m.variant === 'abridged';
   const A = m.assembled;
-  const { s3bs, s3pnl, pfYear, frs105, prior, showPrior, bsStatements, notes, periodPhrase, yeFmt, priorYE, approvalISO } = A;
+  const { s3bs, s3pnl, pfYear, frs105, prior, showPrior, periodPhrase, yeFmt, priorYE, approvalISO } = A;
+  const bsStatements = abridged ? A.abridgedBs : A.bsStatements;
+  const notes = abridged ? A.abridgedNotes : A.notes;
+  // a heading that records the page it lands on (for the contents page)
+  // (a static heading, plus an empty marker that records the page: render-prop text is not laid out)
+  const mark = (key, text, style) => e(View, null,
+    e(Text, { style }, text),
+    e(Text, { style: { fontSize: 1, height: 0 }, render: ({ pageNumber }) => { if (seen[key] == null) seen[key] = pageNumber; return ''; } }));
   const draft = !m.approved;
   const pv = (g, k, sign = 1) => (prior[g] && k in prior[g] ? sign * prior[g][k] : undefined);
   const yearLabel = (m.yearEnd || '').slice(0, 4), priorLabel = (priorYE || '').slice(0, 4);
@@ -106,7 +127,7 @@ export async function renderStatementsPdf(m) {
   const b = s3bs;
   const bsPage = e(Page, { size: 'A4', style: S.page },
     ...chrome(),
-    e(Text, { style: S.h1 }, 'Balance Sheet'),
+    mark('bs', 'Balance Sheet', S.h1),
     e(Text, { style: S.h2 }, `As at ${yeFmt}`),
     cols(),
     ...((b.A.amount !== 0 || pv('bs', 'bs.A')) ? [row('Called up share capital not paid', { c2: b.A.amount, p2: pv('bs', 'bs.A') })] : []),
@@ -138,7 +159,7 @@ export async function renderStatementsPdf(m) {
 
   const notesPage = e(Page, { size: 'A4', style: S.page },
     ...chrome(),
-    e(Text, { style: S.h1 }, 'Notes to the Financial Statements'),
+    mark('notes', abridged ? ABRIDGED.notesTitle : 'Notes to the Financial Statements', S.h1),
     e(Text, { style: S.h2 }, `For the ${periodPhrase}`),
     ...notes.map((n, k) => e(View, { key: n.title, style: { marginBottom: 10 } },
       e(Text, { style: { fontWeight: 700, marginBottom: 3 }, minPresenceAhead: 40 }, `${k + 1}. ${n.title}`),
@@ -151,12 +172,35 @@ export async function renderStatementsPdf(m) {
     ...chrome(false),
     e(View, { style: { marginTop: 180 } },
       e(Text, { style: { fontSize: 22, fontWeight: 700, lineHeight: 1.2, marginBottom: 10 } }, m.companyName),
-      e(Text, { style: { fontSize: 13, marginBottom: 4 } }, 'Unaudited Financial Statements'),
+      e(Text, { style: { fontSize: 13, marginBottom: 4 } }, abridged ? ABRIDGED.coverTitle : 'Unaudited Financial Statements'),
       e(Text, { style: { fontSize: 11, color: MUTED, marginBottom: 18 } }, `For the ${periodPhrase}`),
       e(Text, { style: { fontSize: 10, color: m.croNumber ? MUTED : '#a61b1b' } }, `Registered number ${m.croNumber || '[Information required: registered number]'}`),
       e(Text, { style: { fontSize: 9, color: MUTED, marginTop: 40 } }, 'Prepared under FRS 105, The Financial Reporting Standard applicable to the Micro-entities Regime.')));
 
-  const doc = e(Document, { title: `${m.companyName} — financial statements, ${periodPhrase}`, author: 'Ledgrly', creator: 'Ledgrly', producer: 'Ledgrly' },
-    cover, pnlPage, bsPage, notesPage);
-  return renderToBuffer(doc);
+  // A1 certification page (abridged): section 347, signatories named and dated.
+  const C = A.certification;
+  const certPage = e(Page, { size: 'A4', style: S.page },
+    ...chrome(false),
+    e(Text, { style: { fontWeight: 700, color: m.croNumber ? INK : '#a61b1b' } }, `Company number: ${m.croNumber || '[Information required: registered number]'}`),
+    e(View, { style: { marginTop: 60, alignItems: 'center' } },
+      e(Text, { style: { fontSize: 12, fontWeight: 700 } }, m.companyName),
+      e(Text, { style: { fontSize: 10 } }, '(the "Company")')),
+    e(Text, { style: { marginTop: 50, fontWeight: 700, lineHeight: 1.45 } }, C.text),
+    e(View, { style: { marginTop: 60 } },
+      ...C.signatories.map((sg, k) => e(View, { key: k, style: { width: 260, marginBottom: 36 }, wrap: false },
+        e(Text, { style: { borderTopWidth: 0.5, borderTopColor: INK, paddingTop: 3, color: /^\[Information required/.test(sg.name) ? '#a61b1b' : INK } }, sg.name),
+        e(Text, { style: { fontSize: 8, color: MUTED } }, sg.role))),
+      e(Text, { style: { color: /^\[Information required/.test(C.date) ? '#a61b1b' : INK } }, `Date: ${C.date}`)));
+
+  // A3 contents (abridged)
+  const contentsRow = (label, pg) => e(View, { style: [S.row, { width: 400 }] }, e(Text, { style: S.label }, label), e(Text, { style: { width: 40, textAlign: 'right' } }, pg == null ? '' : String(pg)));
+  const contentsPage = e(Page, { size: 'A4', style: S.page },
+    ...chrome(),
+    e(Text, { style: [S.h1, { marginBottom: 14 }] }, 'Contents'),
+    contentsRow(ABRIDGED.contentsBalanceSheet, known?.bs),
+    contentsRow(ABRIDGED.contentsNotes, known?.notes));
+
+  const docTitle = `${m.companyName} — ${abridged ? 'abridged financial statements' : 'financial statements'}, ${periodPhrase}`;
+  const pages = abridged ? [certPage, cover, contentsPage, bsPage, notesPage] : [cover, pnlPage, bsPage, notesPage];
+  return e(Document, { title: docTitle, author: 'Ledgrly', creator: 'Ledgrly', producer: 'Ledgrly' }, ...pages);
 }
