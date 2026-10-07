@@ -142,7 +142,9 @@ export const directorsInOffice = (directors, date) =>
   (directors || []).filter(d => (!d.appointed_on || d.appointed_on <= date) && (!d.resigned_on || d.resigned_on >= date));
 
 // Everything still needed, as [{ key, label, section, field }]. field is the panel element id.
-export function informationRequired({ company = {}, profile = null, directors = [], yearInputs = null, disclosures = [], assetClasses = [], yearEnd, shareCapitalNeeded = false }) {
+// comparativesNeeded: { bs, pnl } true when the company had a prior year and that statement's
+// comparatives are not confirmed (STA-01 Stage 4a).
+export function informationRequired({ company = {}, profile = null, directors = [], yearInputs = null, disclosures = [], assetClasses = [], yearEnd, shareCapitalNeeded = false, comparativesNeeded = {} }) {
   const missing = [];
   const need = (key, label, section, field) => missing.push({ key, label, section, field });
   // Company
@@ -165,6 +167,9 @@ export function informationRequired({ company = {}, profile = null, directors = 
   }
   const sc = yearInputs?.policy_inputs?.share_capital;
   if (shareCapitalNeeded && !(sc?.number > 0 && sc?.class?.trim())) need('share_capital', 'Number and class of shares', 'This year', 'fsi-share-capital');
+  // Comparatives (prior-year figures), confirmed per statement
+  if (comparativesNeeded.bs) need('comparatives_bs', 'Comparatives: confirm the prior-year balance sheet', 'Comparatives', 'fsc-bs');
+  if (comparativesNeeded.pnl) need('comparatives_pnl', 'Comparatives: confirm the prior-year profit and loss account', 'Comparatives', 'fsc-pnl');
   // Disclosures and attestations
   const have = new Set(disclosures.map(d => d.disclosure_key));
   for (const d of DISCLOSURES) if (!have.has(d.key)) need(d.key, d.title, d.group, `fsi-d-${d.key}`);

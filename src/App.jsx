@@ -26,6 +26,7 @@ import { BANK_NOMINAL_CODE, fetchNominalBalanceAsOf, fetchActiveBankNominals } f
 import { GL_ACCOUNTS, COA_SEED_SOLE_TRADER, COA_STATIC_FALLBACK, useChartOfAccounts } from './shared/chartOfAccounts.js';
 import { computeFrs105, frs105FiscalYear, fetchJournalsToDate, fetchChartForStatements, frs105Warnings } from './shared/statements/frs105.js';
 import { listPeriods, isYearEnd } from './shared/statements/periods.js';
+import { COMPARATIVE_LINES, groupOf, ledgerLines, priorColumn, ledgerDifferences } from './shared/statements/comparatives.js';
 import { TRANSFER, TRANSFER_LABEL, isTransferHold, assertDistinctAccounts } from './shared/transferHold.js';
 import { fiscalConfig, fiscalYearContaining, ytdStartForMonth, ct1Deadlines } from './shared/fiscalYear.js';
 import { useFinancialPeriods, fetchFinancialPeriods } from './shared/useFinancialPeriods.js';
@@ -14914,6 +14915,140 @@ function StatementInputsPanel({ company, yearEnd, regime = 'FRS105', inputs, evi
 }
 const companyNameOf = c => c?.name || 'this company';
 
+// STA-01 Stage 4a: comparatives entry (accountant-only; fs_comparatives). Lines are entered (or
+// pre-filled from the ledger) as drafts and confirmed per group through fs_confirm_comparatives,
+// which re-runs the checks. Confirmed lines feed the prior-year column; the ledger is shown beside
+// each line as a check. Never printed.
+function ComparativesPanel({ company, priorYE, priorStart, rows, ledger, onSaved }) {
+  const live = Object.fromEntries((rows || []).filter(r => r.status !== 'superseded').map(r => [r.line_key, r]));
+  const [vals, setVals] = useState({});
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [checks, setChecks] = useState({}); // group -> checks array from the database
+  useEffect(() => {
+    setVals(Object.fromEntries(Object.values(live).map(r => [r.line_key, String(r.status === 'confirmed' ? r.confirmed_amount : r.amount)])));
+    setChecks({});
+  }, [rows]); // eslint-disable-line react-hooks/exhaustive-deps
+  const run = async fn => {
+    setBusy(true); setErr(null);
+    try { await fn(); } catch (e) { setErr(e.message || String(e)); }
+    setBusy(false);
+  };
+  const groupConfirmed = g => COMPARATIVE_LINES.some(l => l.group === g && live[l.key]?.status === 'confirmed');
+  const saveGroup = g => run(async () => {
+    for (const l of COMPARATIVE_LINES.filter(x => x.group === g)) {
+      const raw = (vals[l.key] ?? '').toString().trim();
+      const r = live[l.key];
+      if (r?.status === 'confirmed') continue;
+      if (raw === '') {
+        if (r) { const { error } = await supabase.from('fs_comparatives').delete().eq('id', r.id).eq('company_id', company.id); if (error) throw new Error(error.message); }
+        continue;
+      }
+      const amount = Math.round(Number(raw) * 100) / 100;
+      if (!Number.isFinite(amount)) throw new Error(`${l.label}: enter a number.`);
+      if (r) {
+        if (Number(r.amount) !== amount) { const { error } = await supabase.from('fs_comparatives').update({ amount }).eq('id', r.id).eq('company_id', company.id); if (error) throw new Error(error.message); }
+      } else {
+        const { error } = await supabase.from('fs_comparatives').insert({ company_id: company.id, prior_year_start: priorStart, prior_year_end: priorYE,
+          line_group: groupOf(l.key), line_key: l.key, source: 'manual', amount });
+        if (error) throw new Error(error.message);
+      }
+    }
+    await onSaved();
+  });
+  const prefill = g => setVals(p => {
+    const next = { ...p };
+    for (const l of COMPARATIVE_LINES.filter(x => x.group === g)) if ((next[l.key] ?? '') === '' && l.key in ledger) next[l.key] = String(ledger[l.key]);
+    return next;
+  });
+  const check = g => run(async () => {
+    const { data, error } = await supabase.rpc('fs_comparatives_checks', { p_company_id: company.id, p_prior_year_end: priorYE, p_group: g });
+    if (error) throw new Error(error.message);
+    setChecks(c => ({ ...c, [g]: data }));
+  });
+  const confirm = g => run(async () => {
+    const { data, error } = await supabase.rpc('fs_confirm_comparatives', { p_company_id: company.id, p_prior_year_end: priorYE, p_group: g });
+    if (error) throw new Error(error.message);
+    setChecks(c => ({ ...c, [g]: data.checks }));
+    if (!data.confirmed) throw new Error('Not confirmed: fix the errors below, save, and try again.');
+    await onSaved();
+  });
+  const reopen = g => run(async () => {
+    const { error } = await supabase.rpc('fs_reopen_comparatives', { p_company_id: company.id, p_prior_year_end: priorYE, p_group: g });
+    if (error) throw new Error(error.message);
+    await onSaved();
+  });
+  const fmtN = n => (n === undefined || n === null || n === '' ? '' : Number(n).toLocaleString('en-IE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+  const resultColour = r => (r === 'error' ? 'var(--red)' : r === 'rounding' ? 'var(--warn)' : 'var(--muted)');
+  const groupBlock = (g, title) => {
+    const confirmed = groupConfirmed(g);
+    const any = COMPARATIVE_LINES.some(l => l.group === g && live[l.key]);
+    const meta = COMPARATIVE_LINES.map(l => live[l.key]).find(r => r && groupOf(r.line_key) === g && r.status === 'confirmed');
+    return (
+      <div id={`fsc-${g}`} tabIndex={-1} style={{ marginBottom: 16 }}>
+        <div style={{ fontWeight: 600, marginBottom: 4 }}>{title}: {confirmed ? <span style={{ color: 'var(--accent)' }}>confirmed{meta?.confirmed_at ? ` ${fmtIE(meta.confirmed_at.slice(0, 10))}` : ''}</span> : any ? 'draft' : 'not entered'}</div>
+        <div style={{ overflowX: 'auto' }}>
+          <table style={{ borderCollapse: 'collapse', fontSize: 12, minWidth: 560 }}>
+            <thead><tr style={{ color: 'var(--muted)', textAlign: 'left' }}>
+              <th style={{ padding: '3px 8px 3px 0', fontWeight: 500 }}>Line</th>
+              <th style={{ padding: '3px 8px', fontWeight: 500, textAlign: 'right' }}>Ledger</th>
+              <th style={{ padding: '3px 8px', fontWeight: 500, textAlign: 'right' }}>Comparative</th>
+              <th style={{ padding: '3px 8px', fontWeight: 500, textAlign: 'right' }}>Difference</th>
+              <th style={{ padding: '3px 8px', fontWeight: 500 }}>Source</th>
+            </tr></thead>
+            <tbody>
+              {COMPARATIVE_LINES.filter(l => l.group === g).map(l => {
+                const r = live[l.key];
+                const v = vals[l.key] ?? '';
+                const diff = v !== '' && l.key in ledger ? Math.round((Number(v) - ledger[l.key]) * 100) / 100 : null;
+                return (
+                  <tr key={l.key} style={{ borderTop: '1px solid var(--border)' }}>
+                    <td style={{ padding: '3px 8px 3px 0', fontWeight: l.subtotal ? 600 : 400 }}>{l.label}{l.required ? '' : <span style={{ color: 'var(--dim)' }}> (optional)</span>}</td>
+                    <td style={{ padding: '3px 8px', textAlign: 'right', fontFamily: "'Source Code Pro',monospace" }}>{fmtN(ledger[l.key])}</td>
+                    <td style={{ padding: '3px 8px', textAlign: 'right' }}>
+                      <input className="f-input" aria-label={`Comparative: ${l.label}`} style={{ width: 120, textAlign: 'right', fontSize: 12, padding: '3px 6px' }} disabled={confirmed || busy}
+                        value={v} onChange={e => setVals(p => ({ ...p, [l.key]: e.target.value }))} placeholder={l.subtotal ? 'computed' : ''} />
+                    </td>
+                    <td style={{ padding: '3px 8px', textAlign: 'right', fontFamily: "'Source Code Pro',monospace", color: diff ? 'var(--warn)' : 'var(--dim)' }}>{diff ? fmtN(diff) : diff === 0 ? '—' : ''}</td>
+                    <td style={{ padding: '3px 8px', color: 'var(--dim)' }}>{r ? `${r.source}${r.source_file ? `, ${r.source_file}${r.source_page ? ` p.${r.source_page}` : ''}` : ''}` : ''}</td>
+                  </tr>
+                );
+              })}
+            </tbody>
+          </table>
+        </div>
+        {checks[g] && (
+          <ul style={{ margin: '6px 0 0 18px', padding: 0, fontSize: 12 }}>
+            {checks[g].map((c, i) => <li key={i} style={{ color: resultColour(c.result) }}>
+              {c.check}: {c.result}{c.missing ? ` (missing: ${c.missing.join(', ')})` : ''}{c.difference !== undefined ? ` (difference ${fmtN(c.difference)}, tolerance €${c.tolerance})` : ''}{c.reason ? ` (${c.reason})` : ''}
+            </li>)}
+          </ul>
+        )}
+        <div style={{ display: 'flex', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+          {!confirmed && <button className="btn btn-s btn-sm" disabled={busy} onClick={() => prefill(g)}>Pre-fill empty lines from the ledger</button>}
+          {!confirmed && <button className="btn btn-s btn-sm" disabled={busy} onClick={() => saveGroup(g)}>Save draft</button>}
+          {!confirmed && <button className="btn btn-s btn-sm" disabled={busy || !any} onClick={() => check(g)}>Run checks</button>}
+          {!confirmed && <button className="btn btn-p btn-sm" disabled={busy || !any} onClick={() => confirm(g)}>Confirm {title.toLowerCase()}</button>}
+          {confirmed && <button className="btn btn-s btn-sm" disabled={busy} onClick={() => reopen(g)}>Reopen for editing</button>}
+        </div>
+      </div>
+    );
+  };
+  return (
+    <div className="card no-print" style={{ marginBottom: 14 }}>
+      <div className="card-header"><span className="card-title">Comparatives: year ended {fmtIE(priorYE)}</span></div>
+      <div className="card-body" style={{ fontSize: 13 }}>
+        <div style={{ color: 'var(--muted)', marginBottom: 10, lineHeight: 1.6 }}>
+          Prior-year figures from the signed accounts ({fmtIE(priorStart)} to {fmtIE(priorYE)}). Save each statement as a draft, then confirm it: the checks re-run on confirmation, allowing €1 rounding per component. Only confirmed lines appear in the prior-year column; the ledger is shown beside each line as a check. Creditors, provisions, costs and dividends are entered as positive amounts.
+        </div>
+        {groupBlock('bs', 'Balance sheet')}
+        {groupBlock('pnl', 'Profit and loss account')}
+        {err && <div style={{ color: 'var(--red)', fontSize: 12 }}>{err}</div>}
+      </div>
+    </div>
+  );
+}
+
 function FinancialStatements({ company, companyName }) {
   const baseCurrency = company?.base_currency || company?.currency || "EUR";
   const fmt    = (n) => fmtCurrency(n, baseCurrency);
@@ -14925,7 +15060,7 @@ function FinancialStatements({ company, companyName }) {
   const [accountants, setAccountants] = useState("");
   const [bankCodes,   setBankCodes]   = useState([BANK_NOMINAL_CODE]);
   const [chart,       setChart]       = useState([]);
-  const EMPTY_INPUTS = { profile: null, directors: [], yearInputs: null, disclosures: [], lastYear: [] };
+  const EMPTY_INPUTS = { profile: null, directors: [], yearInputs: null, disclosures: [], lastYear: [], comparatives: [] };
   const [fsInputs,    setFsInputs]    = useState(EMPTY_INPUTS);
 
   const yeMonth = company?.year_end_month || 12;
@@ -14966,16 +15101,18 @@ function FinancialStatements({ company, companyName }) {
   const loadInputs = async () => {
     if (!company?.id || !yearEnd || !fyStart) return;
     const priorYE = addDaysStr(fyStart, -1);
-    const [p, d, y, cur, prev] = await Promise.all([
+    const [p, d, y, cur, prev, comp] = await Promise.all([
       supabase.from('company_statutory_profile').select('*').eq('company_id', company.id).maybeSingle(),
       supabase.from('company_directors').select('*').eq('company_id', company.id).order('appointed_on', { nullsFirst: true }).order('full_name'),
       supabase.from('fs_year_inputs').select('*').eq('company_id', company.id).eq('year_end_date', yearEnd).eq('regime', 'FRS105').maybeSingle(),
       supabase.from('fs_disclosures').select('*').eq('company_id', company.id).eq('year_end_date', yearEnd).eq('regime', 'FRS105'),
       supabase.from('fs_disclosures').select('*').eq('company_id', company.id).eq('year_end_date', priorYE).eq('regime', 'FRS105'),
+      // Stage 4a: comparatives for the prior year (accountant-only; live rows, not history)
+      supabase.from('fs_comparatives').select('*').eq('company_id', company.id).eq('prior_year_end', priorYE).eq('regime', 'FRS105').neq('status', 'superseded'),
     ]);
-    const firstErr = [p, d, y, cur, prev].find(r => r.error);
+    const firstErr = [p, d, y, cur, prev, comp].find(r => r.error);
     if (firstErr) console.warn('[FinancialStatements] inputs load failed:', firstErr.error.message);
-    setFsInputs({ profile: p.data || null, directors: d.data || [], yearInputs: y.data || null, disclosures: cur.data || [], lastYear: prev.data || [] });
+    setFsInputs({ profile: p.data || null, directors: d.data || [], yearInputs: y.data || null, disclosures: cur.data || [], lastYear: prev.data || [], comparatives: comp.data || [] });
   };
 
   const generate = async () => {
@@ -15008,7 +15145,21 @@ function FinancialStatements({ company, companyName }) {
   const inputsEvidence = generated && fyStart ? ledgerEvidence(journals, { fyStart, yearEnd }) : null;
   const assetClasses = generated && fyStart ? fixedAssetClasses(journals, { fyStart }) : [];
   const hasShareCapital = generated && (['LTD', 'DAC'].includes(fsInputs.profile?.legal_form) || s3bs.K1.amount !== 0);
-  const infoRequired = generated ? informationRequired({ company: company || {}, ...fsInputs, assetClasses, yearEnd, shareCapitalNeeded: hasShareCapital }) : [];
+  // Stage 4a comparatives: the prior year, its ledger figures (the check), and the confirmed lines
+  // (src/shared/statements/comparatives.js). Precedence: approved snapshot (Stage 5), then
+  // confirmed lines, then the ledger as a check only.
+  const priorYE = fyStart ? addDaysStr(fyStart, -1) : null;
+  const priorStart = priorYE ? fiscalYearContaining(priorYE, fiscalConfig(company, periodRows)).start : null;
+  const priorLedger = generated && priorYE
+    ? ledgerLines(computeFrs105(journals.filter(j => j.date <= priorYE), { yearEnd: priorYE, yeMonth, periodStart: priorStart, mode: 'schedule3b', chart }))
+    : {};
+  const prior = priorColumn(fsInputs.comparatives);
+  const showPrior = !!(prior.bs || prior.pnl);
+  const compDiffs = ledgerDifferences(prior, priorLedger);
+  const hadPriorYear = generated && !!fyStart && selectedPeriod?.kind !== 'first' && journals.some(j => j.date < fyStart);
+  const comparativesNeeded = { bs: hadPriorYear && !prior.bs, pnl: hadPriorYear && !prior.pnl };
+  const pv = (g, k, sign = 1) => (prior[g] && k in prior[g] ? sign * prior[g][k] : undefined);
+  const infoRequired = generated ? informationRequired({ company: company || {}, ...fsInputs, assetClasses, yearEnd, shareCapitalNeeded: hasShareCapital, comparativesNeeded }) : [];
   // Stage 3d: statutory wording (src/shared/statements/wording.js) from the inputs and figures.
   const approvalISO = fsInputs.yearInputs?.approval_date || null;
   const inOfficeAtApproval = approvalISO ? directorsInOffice(fsInputs.directors, approvalISO) : [];
@@ -15087,7 +15238,7 @@ function FinancialStatements({ company, companyName }) {
   };
 
   // Inline row renderer: label | col1 (sub-amounts) | col2 (totals/bold)
-  const fsRow = (label, { c1, c2, bold, indent = 0, top1, top2, dbl, note } = {}) => (
+  const fsRow = (label, { c1, c2, p1, p2, bold, indent = 0, top1, top2, dbl, note } = {}) => (
     <div style={{ display: "flex", padding: "4px 0", paddingLeft: indent * 22, fontSize: 13, fontWeight: bold ? 600 : 400 }}>
       <span style={{ flex: 1, color: "var(--text)" }}>
         {label}{note !== undefined && <sup style={{ fontSize: 9, color: "var(--muted)", marginLeft: 3 }}>{note}</sup>}
@@ -15098,6 +15249,14 @@ function FinancialStatements({ company, companyName }) {
       <span style={{ width: 90, textAlign: "right", fontFamily: "'Source Code Pro',monospace", fontSize: 12, fontWeight: top2 || dbl ? 700 : undefined, borderTop: dbl ? "2px solid var(--text)" : top2 ? "1px solid var(--border2)" : undefined, borderBottom: dbl ? "2px solid var(--text)" : undefined }}>
         {c2 !== undefined ? fa(c2) : ""}
       </span>
+      {showPrior && <>
+        <span style={{ width: 90, textAlign: "right", fontFamily: "'Source Code Pro',monospace", fontSize: 12, marginLeft: 22, marginRight: 14, color: "var(--muted)", borderTop: top1 ? "1px solid var(--border2)" : undefined }}>
+          {p1 !== undefined ? fa(p1) : ""}
+        </span>
+        <span style={{ width: 90, textAlign: "right", fontFamily: "'Source Code Pro',monospace", fontSize: 12, color: "var(--muted)", fontWeight: top2 || dbl ? 700 : undefined, borderTop: dbl ? "2px solid var(--muted)" : top2 ? "1px solid var(--border2)" : undefined, borderBottom: dbl ? "2px solid var(--muted)" : undefined }}>
+          {p2 !== undefined ? fa(p2) : ""}
+        </span>
+      </>}
     </div>
   );
   const fsHead = (text, sub) => (
@@ -15109,8 +15268,13 @@ function FinancialStatements({ company, companyName }) {
   const fsDivider = () => <div style={{ borderTop: "1px solid var(--border)", margin: "6px 0" }} />;
   const amtCols = () => (
     <div style={{ display: "flex", justifyContent: "flex-end", marginBottom: 4, fontSize: 10, fontFamily: "'Source Code Pro',monospace", color: "var(--dim)" }}>
-      <span style={{ width: 90, textAlign: "right", marginRight: 14 }}>€</span>
-      <span style={{ width: 90, textAlign: "right" }}>€</span>
+      {showPrior ? <>
+        <span style={{ width: 194, textAlign: "right" }}>{yeYear}<br />€</span>
+        <span style={{ width: 216, textAlign: "right" }}>{priorYE ? priorYE.slice(0, 4) : ''}<br />€</span>
+      </> : <>
+        <span style={{ width: 90, textAlign: "right", marginRight: 14 }}>€</span>
+        <span style={{ width: 90, textAlign: "right" }}>€</span>
+      </>}
     </div>
   );
 
@@ -15293,6 +15457,19 @@ function FinancialStatements({ company, companyName }) {
         <StatementInputsPanel key={`${company?.id}|${yearEnd}`} company={company} yearEnd={yearEnd} inputs={fsInputs}
           evidence={inputsEvidence} assetClasses={assetClasses} draftConditions={ledgerDraftConditions} onSaved={loadInputs} />
       )}
+      {generated && priorYE && hadPriorYear && (
+        <ComparativesPanel key={`${company?.id}|${priorYE}`} company={company} priorYE={priorYE} priorStart={priorStart}
+          rows={fsInputs.comparatives} ledger={priorLedger} onSaved={loadInputs} />
+      )}
+      {compDiffs.length > 0 && (
+        <div className="no-print" style={{ marginBottom: 14, padding: "12px 16px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border)", borderLeft: "4px solid var(--warn)", background: "var(--surface2)", fontSize: 13, lineHeight: 1.6 }}>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>Comparatives against the ledger</div>
+          The prior-year column shows the confirmed figures. The ledger at {fmtIE(priorYE)} differs on these lines:
+          <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>
+            {compDiffs.map(d => <li key={d.key}>{d.label}: confirmed {fmtEUR(d.confirmed)}, ledger {fmtEUR(d.ledger)} (difference {fmtEUR(d.difference)})</li>)}
+          </ul>
+        </div>
+      )}
 
       {/* Interim guard (STA-01): warnings only, does not block, never printed */}
       {guardWarn.length > 0 && (
@@ -15388,16 +15565,16 @@ function FinancialStatements({ company, companyName }) {
         </div>
         <div className="card-body">
           {amtCols()}
-          {fsRow("Turnover", { c2: s3pnl['1'].amount })}
-          {s3pnl['2'].amount !== 0 && fsRow("Other income", { c2: s3pnl['2'].amount })}
-          {s3pnl['3'].amount !== 0 && fsRow("Cost of raw materials and consumables", { c2: -s3pnl['3'].amount })}
-          {s3pnl['4'].amount !== 0 && fsRow("Staff costs", { c2: -s3pnl['4'].amount })}
-          {s3pnl['5'].amount !== 0 && fsRow("Value adjustments and other amounts written off assets", { c2: -s3pnl['5'].amount })}
-          {s3pnl['6'].amount !== 0 && fsRow("Other expenses", { c2: -s3pnl['6'].amount })}
+          {fsRow("Turnover", { c2: s3pnl['1'].amount, p2: pv('pnl', 'pnl.1') })}
+          {(s3pnl['2'].amount !== 0 || pv('pnl', 'pnl.2')) && fsRow("Other income", { c2: s3pnl['2'].amount, p2: pv('pnl', 'pnl.2') })}
+          {(s3pnl['3'].amount !== 0 || pv('pnl', 'pnl.3')) && fsRow("Cost of raw materials and consumables", { c2: -s3pnl['3'].amount, p2: pv('pnl', 'pnl.3', -1) })}
+          {(s3pnl['4'].amount !== 0 || pv('pnl', 'pnl.4')) && fsRow("Staff costs", { c2: -s3pnl['4'].amount, p2: pv('pnl', 'pnl.4', -1) })}
+          {(s3pnl['5'].amount !== 0 || pv('pnl', 'pnl.5')) && fsRow("Value adjustments and other amounts written off assets", { c2: -s3pnl['5'].amount, p2: pv('pnl', 'pnl.5', -1) })}
+          {(s3pnl['6'].amount !== 0 || pv('pnl', 'pnl.6')) && fsRow("Other expenses", { c2: -s3pnl['6'].amount, p2: pv('pnl', 'pnl.6', -1) })}
           {fsDivider()}
-          {fsRow("Tax", s3pnl['7'].amount !== 0 ? { c2: -s3pnl['7'].amount } : {})}
+          {fsRow("Tax", s3pnl['7'].amount !== 0 || pv('pnl', 'pnl.7') ? { c2: -s3pnl['7'].amount, p2: pv('pnl', 'pnl.7', -1) } : {})}
           {s3pnl['7'].amount === 0 && <div style={{ fontSize: 11, color: "var(--dim)", fontStyle: "italic", padding: "2px 0 6px 10px" }}>No corporation tax posted for this period</div>}
-          {fsRow("Profit or loss", { c2: pfYear, dbl: true, bold: true })}
+          {fsRow("Profit or loss", { c2: pfYear, p2: pv('pnl', 'pnl.8'), dbl: true, bold: true })}
         </div>
       </div>
 
@@ -15410,23 +15587,23 @@ function FinancialStatements({ company, companyName }) {
         </div>
         <div className="card-body">
           {amtCols()}
-          {s3bs.A.amount !== 0 && fsRow("Called up share capital not paid", { c2: s3bs.A.amount })}
-          {fsRow("Fixed assets", { c2: s3bs.B.amount })}
+          {(s3bs.A.amount !== 0 || pv('bs', 'bs.A')) && fsRow("Called up share capital not paid", { c2: s3bs.A.amount, p2: pv('bs', 'bs.A') })}
+          {fsRow("Fixed assets", { c2: s3bs.B.amount, p2: pv('bs', 'bs.B') })}
           {fsDivider()}
-          {fsRow("Current assets", { c1: s3bs.C.amount })}
-          {s3bs.D.amount !== 0 && fsRow("Prepayments and accrued income", { c1: s3bs.D.amount })}
-          {fsRow("Creditors: amounts falling due within one year", { c1: -s3bs.E.amount })}
-          {fsRow("Net current assets (liabilities)", { c2: s3bs.F.amount, top2: true, bold: true })}
+          {fsRow("Current assets", { c1: s3bs.C.amount, p1: pv('bs', 'bs.C') })}
+          {(s3bs.D.amount !== 0 || pv('bs', 'bs.D')) && fsRow("Prepayments and accrued income", { c1: s3bs.D.amount, p1: pv('bs', 'bs.D') })}
+          {fsRow("Creditors: amounts falling due within one year", { c1: -s3bs.E.amount, p1: pv('bs', 'bs.E', -1) })}
+          {fsRow("Net current assets (liabilities)", { c2: s3bs.F.amount, p2: pv('bs', 'bs.F'), top2: true, bold: true })}
           {fsDivider()}
-          {fsRow("Total assets less current liabilities", { c2: s3bs.G.amount, bold: true })}
-          {s3bs.H.amount !== 0 && fsRow("Creditors: amounts falling due after more than one year", { c2: -s3bs.H.amount })}
-          {s3bs.I.amount !== 0 && fsRow("Provisions for liabilities", { c2: -s3bs.I.amount })}
-          {fsRow("", { c2: frs105.netAssets, dbl: true, bold: true })}
+          {fsRow("Total assets less current liabilities", { c2: s3bs.G.amount, p2: pv('bs', 'bs.G'), bold: true })}
+          {(s3bs.H.amount !== 0 || pv('bs', 'bs.H')) && fsRow("Creditors: amounts falling due after more than one year", { c2: -s3bs.H.amount, p2: pv('bs', 'bs.H', -1) })}
+          {(s3bs.I.amount !== 0 || pv('bs', 'bs.I')) && fsRow("Provisions for liabilities", { c2: -s3bs.I.amount, p2: pv('bs', 'bs.I', -1) })}
+          {fsRow("", { c2: frs105.netAssets, p2: pv('bs', 'netAssets'), dbl: true, bold: true })}
           {fsDivider()}
           {fsHead("Capital and reserves")}
-          {fsRow("Called up share capital", { c1: s3bs.K1.amount })}
-          {fsRow("Profit and loss account", { c1: s3bs.K2.amount })}
-          {fsRow("", { c2: s3bs.K.amount, dbl: true, bold: true })}
+          {fsRow("Called up share capital", { c1: s3bs.K1.amount, p1: pv('bs', 'bs.K1') })}
+          {fsRow("Profit and loss account", { c1: s3bs.K2.amount, p1: pv('bs', 'bs.K2') })}
+          {fsRow("", { c2: s3bs.K.amount, p2: pv('bs', 'bs.K'), dbl: true, bold: true })}
           {Math.abs(s3Imbalance) >= 0.005 && (
             <div style={{ display: "flex", padding: "6px 0", fontSize: 13, fontWeight: 700, color: "var(--red)" }}>
               <span style={{ flex: 1 }}>Imbalance: balances with no statement line (see warnings)</span>
