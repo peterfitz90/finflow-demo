@@ -1870,8 +1870,9 @@ function CashFlow({ selPeriod, setSelPeriod, onNavigate, companyId, company }) {
     // before the selected month — same window-narrowing GLReport's ytdMode applies to journals.
     let dayBeforePeriodStart;
     if (ytdMode) {
-      const [ySy, ySm] = ytdStart.split('-').map(Number);
-      dayBeforePeriodStart = monthEnd(ySy, ySm - 1);
+      // The day before the financial year's start: not the previous month end, since a year can
+      // start mid-month (S&P: 9 October), and 1-8 October would otherwise drop out of the balance.
+      dayBeforePeriodStart = addDaysStr(ytdStart, -1);
     } else {
       const [oy, om] = selPeriod.split('-').map(Number);
       dayBeforePeriodStart = monthEnd(oy, om - 1);
