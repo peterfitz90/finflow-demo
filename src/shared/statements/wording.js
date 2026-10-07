@@ -225,17 +225,20 @@ export const ABRIDGED = {
 // Wording verification record (Stage 5b's gate reads it): every printed item, its status, who and
 // when. The abridged items were agreed by Peter on the sheet on 7 October 2026.
 const AGREED = { status: 'verified', by: 'Peter', on: '2026-10-07', source: 'Abridged wording sheet' };
-// Full-set items: approved on the Stage 3a sheet with Peter's per-item choices of 6 October 2026,
-// but not yet recorded as verified (his decision is open), so they block approval until he does.
-const FULL_PENDING = { status: 'unverified', by: null, on: null, source: 'Stage 3a wording sheet; choices of 6 October 2026' };
+// Full-set items: Peter reviewed the Stage 3a wording sheet, including its unverified items, with
+// his per-item choices of 6 October 2026, and confirmed it. Recorded as verified on the day the
+// record was made (7 October 2026, system clock).
+const CONFIRMED = { status: 'verified', by: 'Peter', on: '2026-10-07', source: 'Stage 3a wording sheet, reviewed and confirmed (choices of 6 October 2026)' };
 export const WORDING_STATUS = {
-  'full.3': { ...FULL_PENDING, item: 'Item 3: micro-regime statement (S&P wording)' },
-  'full.4': { ...FULL_PENDING, item: "Item 4: directors' statements (a)-(d), audit exemption" },
-  'full.5': { ...FULL_PENDING, item: 'Item 5: approval line and signatories' },
-  'full.8': { ...FULL_PENDING, item: 'Item 8: company information, with the currency sentence' },
-  'full.9': { ...FULL_PENDING, item: 'Item 9: statement of compliance' },
-  'full.10': { ...FULL_PENDING, item: 'Item 10: accounting policies' },
-  'full.notes': { ...FULL_PENDING, item: 'Notes: attested sentences (items 11-14), reserves and dividends, share capital, events after the balance sheet date' },
+  'full.3': { ...CONFIRMED, item: 'Item 3: micro-regime statement (S&P wording)' },
+  'full.4': { ...CONFIRMED, item: "Item 4: directors' statements (a)-(d), audit exemption" },
+  'full.5': { ...CONFIRMED, item: 'Item 5: approval line and signatories' },
+  'full.8': { ...CONFIRMED, item: 'Item 8: company information, with the currency sentence' },
+  'full.9': { ...CONFIRMED, item: 'Item 9: statement of compliance' },
+  'full.10': { ...CONFIRMED, item: 'Item 10: accounting policies' },
+  'full.notes': { ...CONFIRMED, item: 'Notes: attested sentences (items 11-14), reserves and dividends' },
+  'full.notes.share_capital': { ...CONFIRMED, item: 'Called up share capital note' },
+  'full.notes.post_bs_events': { ...CONFIRMED, item: 'Events after the balance sheet date note (printed only when attested)' },
   'abridged.A1': { ...AGREED, item: 'Certification page: section 347; two directors by default, or a director and the company secretary; named and dated' },
   'abridged.A2': { ...AGREED, item: 'Cover: "Abridged Unaudited Financial Statements"' },
   'abridged.A3': { ...AGREED, item: 'Contents page' },
@@ -282,7 +285,9 @@ export { DISCLOSURE_BY_KEY };
 // (the audit exemption statements when none is claimed; the abridged dividends note when the copy
 // has none) is not listed, so it cannot block.
 export function printedWordingKeys(A, { abridged = false } = {}) {
-  const keys = ['full.3', ...(A.bsStatements?.auditExemption ? ['full.4'] : []), 'full.5', 'full.8', 'full.9', 'full.10', 'full.notes'];
+  const has = title => (A.notes || []).some(n => n.title === title);
+  const keys = ['full.3', ...(A.bsStatements?.auditExemption ? ['full.4'] : []), 'full.5', 'full.8', 'full.9', 'full.10', 'full.notes',
+    ...(has('Called up share capital') ? ['full.notes.share_capital'] : []), ...(has('Events after the balance sheet date') ? ['full.notes.post_bs_events'] : [])];
   if (abridged) {
     keys.push('abridged.A1', 'abridged.A2', 'abridged.A3', 'abridged.A4', 'abridged.A5', 'abridged.A6', 'abridged.A7', 'abridged.A8', 'abridged.notes');
     if ((A.abridgedNotes || []).some(n => n.title === 'Dividends')) keys.push('abridged.dividends');

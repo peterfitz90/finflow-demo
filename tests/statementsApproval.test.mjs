@@ -45,10 +45,13 @@ test('the rule: every condition must hold; wording unverified blocks; changes ne
   const { A } = assembled();
   const ok = evaluateApproval({ A, yearEnd: '2026-12-31', signoffEvents: YEAR, wordingStatus: ALL_VERIFIED });
   assert.equal(ok.ok, true, JSON.stringify(ok.checks.filter(c => !c.ok)));
-  // the real status today: the full-set items are not yet recorded as verified
+  // the real status: every item verified (full set by Peter on 7 October 2026), so nothing blocks
   const real = evaluateApproval({ A, yearEnd: '2026-12-31', signoffEvents: YEAR });
-  assert.equal(real.ok, false);
-  assert.deepEqual(real.wording.blocking.map(i => i.key), ['full.3', 'full.4', 'full.5', 'full.8', 'full.9', 'full.10', 'full.notes']);
+  assert.equal(real.ok, true);
+  assert.deepEqual(real.wording.blocking, []);
+  // an unverified printed item blocks
+  const one = { ...ALL_VERIFIED, 'full.9': { ...ALL_VERIFIED['full.9'], status: 'unverified' } };
+  assert.deepEqual(evaluateApproval({ A, yearEnd: '2026-12-31', signoffEvents: YEAR, wordingStatus: one }).wording.blocking.map(i => i.key), ['full.9']);
   // no sign-off
   assert.equal(evaluateApproval({ A, yearEnd: '2026-12-31', signoffEvents: [], wordingStatus: ALL_VERIFIED }).checks.find(c => c.key === 'signoff').ok, false);
   // information required
@@ -69,11 +72,22 @@ test('the rule: every condition must hold; wording unverified blocks; changes ne
   assert.equal(evaluateApproval({ A, yearEnd: '2026-12-31', signoffEvents: resigned, wordingStatus: ALL_VERIFIED }).writes.length, 0);
 });
 
+test('wording record: every full-set item verified by Peter on 7 October 2026 (system clock)', () => {
+  const keys = Object.keys(WORDING_STATUS).filter(k => k.startsWith('full.'));
+  assert.deepEqual(keys, ['full.3', 'full.4', 'full.5', 'full.8', 'full.9', 'full.10', 'full.notes', 'full.notes.share_capital', 'full.notes.post_bs_events']);
+  for (const k of keys) assert.deepEqual([WORDING_STATUS[k].status, WORDING_STATUS[k].by, WORDING_STATUS[k].on], ['verified', 'Peter', '2026-10-07'], k);
+  assert.ok(Object.values(WORDING_STATUS).every(v => v.status === 'verified'), 'none open');
+});
+
 test('wording gate: only items that print can block', () => {
   const { A } = assembled({ abridged: false });
   assert.ok(!printedWordingKeys(A).some(k => k.startsWith('abridged.')));
   const noClaim = { ...A, bsStatements: { ...A.bsStatements, auditExemption: null } };
   assert.ok(!printedWordingKeys(noClaim).includes('full.4'));
+  // share capital note prints here (3000 has a balance); no post-balance-sheet note without an attestation
+  assert.ok(printedWordingKeys(A).includes('full.notes.share_capital'));
+  assert.ok(!printedWordingKeys(A).includes('full.notes.post_bs_events'));
+  assert.ok(printedWordingKeys({ ...A, notes: [...A.notes, { title: 'Events after the balance sheet date' }] }).includes('full.notes.post_bs_events'));
   const ab = assembled().A;
   assert.ok(printedWordingKeys(ab, { abridged: true }).includes('abridged.A1'));
   // the abridged copy always prints its Dividends note (the attested sentence even with none paid)
@@ -167,8 +181,8 @@ test('approve: rule not met -> 409, nothing stored', async () => {
   await assert.rejects(approve(f.deps, { companyId: CO, yearEnd: '2026-12-31', userId: 'u' }), e => e instanceof ApprovalError && e.status === 409 && e.rule.checks.some(c => c.key === 'signoff' && !c.ok));
   assert.equal(f.store.size, 0);
   assert.equal(f.rpcCalls.length, 0);
-  // and with the real wording status (full-set items unverified)
-  const g = fakes({ A, journals, inputs }); delete g.deps.wordingStatus;
+  // and with an unverified printed item
+  const g = fakes({ A, journals, inputs }); g.deps.wordingStatus = { ...ALL_VERIFIED, 'full.3': { ...ALL_VERIFIED['full.3'], status: 'unverified' } };
   await assert.rejects(approve(g.deps, { companyId: CO, yearEnd: '2026-12-31', userId: 'u' }), e => e.status === 409 && e.rule.checks.find(c => c.key === 'wording').ok === false);
   assert.equal(g.store.size, 0);
 });
