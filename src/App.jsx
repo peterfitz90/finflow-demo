@@ -26,6 +26,7 @@ import { BANK_NOMINAL_CODE, fetchNominalBalanceAsOf, fetchActiveBankNominals } f
 import { GL_ACCOUNTS, COA_SEED_SOLE_TRADER, COA_STATIC_FALLBACK, useChartOfAccounts } from './shared/chartOfAccounts.js';
 import { computeFrs105, frs105FiscalYear, fetchJournalsToDate, fetchChartForStatements, frs105Warnings } from './shared/statements/frs105.js';
 import { listPeriods, isYearEnd } from './shared/statements/periods.js';
+import { assembleStatements } from './shared/statements/assemble.js';
 import { bankMovements, withRunningBalance, netMovement } from './shared/bankMovements.js';
 import { COMPARATIVE_LINES, groupOf, ledgerLines, priorColumn, ledgerDifferences } from './shared/statements/comparatives.js';
 import { TRANSFER, TRANSFER_LABEL, isTransferHold, assertDistinctAccounts } from './shared/transferHold.js';
@@ -15105,6 +15106,34 @@ function FinancialStatements({ company, companyName }) {
   const [bankCodes,   setBankCodes]   = useState([BANK_NOMINAL_CODE]);
   const [chart,       setChart]       = useState([]);
   const EMPTY_INPUTS = { profile: null, directors: [], yearInputs: null, disclosures: [], lastYear: [], comparatives: [] };
+  // Stage 5a: draft PDF from the server (api/statements-pdf.js), built from the ledger with the
+  // caller's own token; nothing is stored.
+  const [pdfBusy, setPdfBusy] = useState(false);
+  const [pdfError, setPdfError] = useState(null);
+  const downloadDraftPdf = async () => {
+    if (!company?.id || !yearEnd) return;
+    setPdfBusy(true); setPdfError(null);
+    try {
+      const token = await window.Clerk?.session?.getToken();
+      const res = await fetch('/api/statements-pdf', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ company_id: company.id, year_end: yearEnd }),
+      });
+      if (!res.ok) throw new Error((await res.json().catch(() => ({}))).error || `HTTP ${res.status}`);
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = (res.headers.get('Content-Disposition') || '').match(/filename="([^"]+)"/)?.[1] || `FRS105-${yearEnd}-DRAFT.pdf`;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => URL.revokeObjectURL(url), 10000);
+    } catch (e) {
+      captureError(e, { company_id: company.id, operation: 'statements-draft-pdf' });
+      setPdfError(e.message || String(e));
+    }
+    setPdfBusy(false);
+  };
   const [fsInputs,    setFsInputs]    = useState(EMPTY_INPUTS);
 
   const yeMonth = company?.year_end_month || 12;
@@ -15180,69 +15209,17 @@ function FinancialStatements({ company, companyName }) {
   // FRS 105 figures in the Schedule 3B formats (src/shared/statements/schedule3b.js): every nominal
   // mapped to one line, reserves derived from the ledger, no balancing figure. frs105.legacy is the
   // old calculation, kept for the debug log below and the regression script only.
-  const frs105 = computeFrs105(journals, { yearEnd, yeMonth, periodStart: fyStart, mode: 'schedule3b', chart });
-  const { bs: s3bs, pnl: s3pnl, profit: pfYear, imbalance: s3Imbalance, unmapped: s3Unmapped } = frs105;
-  const { rawD, rawC, allCodes, acctBal, cashAtBank, debtors, fixedAssets, creditors, shareCapital, totAssetsLCL, turnover, opProfit } = frs105.legacy;
-  // Interim guard (STA-01): warnings only. Shown on screen, never printed.
-  const guardWarnings = generated ? frs105Warnings(journals, frs105, { bankCodes, yearEnd, ledgerCompleteFrom: company?.ledger_complete_from || null, isYearEnd: isCompanyYearEnd, openingJournals: openingJnls }) : [];
-  // Stage 3c: what the accountant still has to record, and the ledger evidence for suggestions.
-  const inputsEvidence = generated && fyStart ? ledgerEvidence(journals, { fyStart, yearEnd }) : null;
-  const assetClasses = generated && fyStart ? fixedAssetClasses(journals, { fyStart }) : [];
-  const hasShareCapital = generated && (['LTD', 'DAC'].includes(fsInputs.profile?.legal_form) || s3bs.K1.amount !== 0);
-  // Stage 4a comparatives: the prior year, its ledger figures (the check), and the confirmed lines
-  // (src/shared/statements/comparatives.js). Precedence: approved snapshot (Stage 5), then
-  // confirmed lines, then the ledger as a check only.
-  const priorYE = fyStart ? addDaysStr(fyStart, -1) : null;
-  const priorStart = priorYE ? fiscalYearContaining(priorYE, fiscalConfig(company, periodRows)).start : null;
-  const priorLedger = generated && priorYE
-    ? ledgerLines(computeFrs105(journals.filter(j => j.date <= priorYE), { yearEnd: priorYE, yeMonth, periodStart: priorStart, mode: 'schedule3b', chart }))
-    : {};
-  const prior = priorColumn(fsInputs.comparatives);
-  const showPrior = !!(prior.bs || prior.pnl);
-  const compDiffs = ledgerDifferences(prior, priorLedger);
-  const hadPriorYear = generated && !!fyStart && selectedPeriod?.kind !== 'first' && journals.some(j => j.date < fyStart);
-  const comparativesNeeded = { bs: hadPriorYear && !prior.bs, pnl: hadPriorYear && !prior.pnl };
-  const pv = (g, k, sign = 1) => (prior[g] && k in prior[g] ? sign * prior[g][k] : undefined);
-  const infoRequired = generated ? informationRequired({ company: company || {}, ...fsInputs, assetClasses, yearEnd, shareCapitalNeeded: hasShareCapital, comparativesNeeded }) : [];
-  // Stage 3d: statutory wording (src/shared/statements/wording.js) from the inputs and figures.
-  const approvalISO = fsInputs.yearInputs?.approval_date || null;
-  const inOfficeAtApproval = approvalISO ? directorsInOffice(fsInputs.directors, approvalISO) : [];
-  const nameOf = id => fsInputs.directors.find(d => d.id === id)?.full_name;
-  const bsStatements = balanceSheetStatements({
-    disclosures: fsInputs.disclosures, companyName,
-    approvalDate: approvalISO ? new Date(approvalISO + "T00:00:00").toLocaleDateString("en-IE", { day: "numeric", month: "long", year: "numeric" }) : null,
-    signatories: (fsInputs.yearInputs?.signatory_ids || []).map(nameOf).filter(Boolean),
-    soleDirector: inOfficeAtApproval.length === 1,
+  // Everything the statements show, from one shared function (src/shared/statements/assemble.js),
+  // which the server-side PDF (api/statements-pdf.js) also uses, so the PDF matches this screen.
+  const A = assembleStatements({
+    generated, company, companyName, journals, chart, bankCodes, periods: periodRows, openingJournals: openingJnls,
+    inputs: fsInputs, yearEnd, today: localToday(),
   });
-  const dividendsInYear = generated && fyStart ? Math.round(journals.filter(j => j.date >= fyStart)
-    .reduce((t, j) => t + (j.debit_account === '3400' ? Number(j.amount) : 0) - (j.credit_account === '3400' ? Number(j.amount) : 0), 0) * 100) / 100 : 0;
-  const notes = generated ? statementNotes({
-    companyName, legalForm: fsInputs.profile?.legal_form, country: fsInputs.profile?.country, croNumber: company?.cro_number,
-    registeredOffice: fsInputs.profile?.registered_office, disclosures: fsInputs.disclosures,
-    yearEndFmt: yearEnd ? new Date(yearEnd + "T00:00:00").toLocaleDateString("en-IE", { day: "numeric", month: "long", year: "numeric" }) : '',
-    depreciationRates: fsInputs.yearInputs?.policy_inputs?.depreciation || {}, assetClasses,
-    taxUsed: s3pnl['7'].amount !== 0 || [...s3bs.E.codes, ...s3bs.C.codes].some(c => c.code === '2210'),
-    reserves: { atStart: Math.round((s3bs.K2.amount - pfYear + dividendsInYear) * 100) / 100, result: pfYear, dividendsInYear, atEnd: s3bs.K2.amount },
-    shareCapital: hasShareCapital ? { amount: s3bs.K1.amount, number: fsInputs.yearInputs?.policy_inputs?.share_capital?.number, shareClass: fsInputs.yearInputs?.policy_inputs?.share_capital?.class } : null,
-  }) : [];
-  // Stage 3e: micro eligibility from the ledger plus inputs and attestations. Warn only.
-  const eligibility = generated ? microEligibility({
-    turnover: s3pnl['1'].amount,
-    periodMonths: selectedPeriod?.months ?? 12,
-    grossAssets: Math.round((s3bs.A.amount + s3bs.B.amount + s3bs.C.amount + s3bs.D.amount) * 100) / 100,
-    employees: fsInputs.yearInputs?.average_employees ?? null,
-    legalForm: fsInputs.profile?.legal_form || null,
-    disclosures: fsInputs.disclosures,
-  }) : null;
-  // Ledger-side DRAFT conditions (missing inputs excluded): these put a caution on suggestions.
-  const ledgerDraftConditions = generated ? [
-    guardWarnings.some(w => w.id === 'no_opening') ? 'no opening balances' : null,
-    s3Unmapped.length > 0 ? 'unmapped balances' : null,
-    Math.abs(s3Imbalance) >= 0.005 ? 'an imbalance' : null,
-  ].filter(Boolean) : [];
-  // DRAFT watermark (prints): unmapped balances, an imbalance, no opening position, or a required
-  // input missing.
-  const isDraft = generated && (s3Unmapped.length > 0 || Math.abs(s3Imbalance) >= 0.005 || guardWarnings.some(w => w.id === 'no_opening') || infoRequired.length > 0);
+  const { frs105, s3bs, s3pnl, pfYear, s3Imbalance, s3Unmapped, guardWarnings, inputsEvidence, assetClasses, hasShareCapital,
+    priorYE, priorStart, priorLedger, prior, showPrior, compDiffs, hadPriorYear, comparativesNeeded, infoRequired,
+    approvalISO, bsStatements, notes, eligibility, ledgerDraftConditions, isDraft } = A;
+  const { rawD, rawC, allCodes, acctBal, cashAtBank, debtors, fixedAssets, creditors, shareCapital, totAssetsLCL, turnover, opProfit } = frs105.legacy;
+  const pv = (g, k, sign = 1) => (prior[g] && k in prior[g] ? sign * prior[g][k] : undefined);
   const draftMark = isDraft ? (
     <div aria-hidden="true" style={{ position: "absolute", inset: 0, display: "flex", alignItems: "center", justifyContent: "center", pointerEvents: "none", overflow: "hidden", zIndex: 1 }}>
       <span style={{ transform: "rotate(-30deg)", fontSize: 96, fontWeight: 800, letterSpacing: "0.12em", color: "rgba(220,38,38,0.14)", fontFamily: "'Source Sans 3',system-ui,sans-serif", whiteSpace: "nowrap" }}>DRAFT</span>
@@ -15453,10 +15430,14 @@ function FinancialStatements({ company, companyName }) {
         </div>
         <div style={{ display: "flex", gap: 8 }}>
           <ExportDropdown onCSV={exportCSV} onPrint={() => window.print()} />
+          <button className="btn btn-s btn-sm" disabled={pdfBusy} onClick={downloadDraftPdf} title="The server builds the PDF from the ledger, as on this screen">
+            {pdfBusy ? 'Building PDF…' : 'Draft PDF ↓'}
+          </button>
           <button className="btn btn-s btn-sm" onClick={() => setGenerated(false)}>← Settings</button>
         </div>
       </div>
 
+      {pdfError && <div className="no-print" role="alert" style={{ marginBottom: 14, fontSize: 12, color: "var(--red)" }}>Draft PDF failed: {pdfError}</div>}
       {/* Information required (STA-01 Stage 3c): not printed */}
       {infoRequired.length > 0 && (
         <div className="no-print" role="status" style={{ marginBottom: 14, padding: "12px 16px", borderRadius: "var(--radius-sm)", border: "1px solid rgba(220,38,38,0.35)", borderLeft: "4px solid var(--red)", background: "rgba(220,38,38,0.04)", fontSize: 13, lineHeight: 1.6 }}>
