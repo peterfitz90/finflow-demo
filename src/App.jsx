@@ -26,6 +26,7 @@ import { BANK_NOMINAL_CODE, fetchNominalBalanceAsOf, fetchActiveBankNominals } f
 import { GL_ACCOUNTS, COA_SEED_SOLE_TRADER, COA_STATIC_FALLBACK, useChartOfAccounts } from './shared/chartOfAccounts.js';
 import { computeFrs105, frs105FiscalYear, fetchJournalsToDate, fetchChartForStatements, frs105Warnings } from './shared/statements/frs105.js';
 import { listPeriods, isYearEnd } from './shared/statements/periods.js';
+import { bankMovements, withRunningBalance, netMovement } from './shared/bankMovements.js';
 import { COMPARATIVE_LINES, groupOf, ledgerLines, priorColumn, ledgerDifferences } from './shared/statements/comparatives.js';
 import { TRANSFER, TRANSFER_LABEL, isTransferHold, assertDistinctAccounts } from './shared/transferHold.js';
 import { fiscalConfig, fiscalYearContaining, ytdStartForMonth, ct1Deadlines } from './shared/fiscalYear.js';
@@ -1796,6 +1797,10 @@ function CashFlow({ selPeriod, setSelPeriod, onNavigate, companyId, company }) {
   const [txns, setTxns]           = useState([]);
   const [allInvoices, setAllInvoices] = useState([]);
   const [openingBalance,   setOpeningBalance]   = useState(0);
+  // Ledger movements on the bank nominals in the period (src/shared/bankMovements.js): the same
+  // source as the opening balance, so the period-end balance equals the ledger's bank balance.
+  const [ledgerJnls,       setLedgerJnls]       = useState([]);
+  const [ledgerLoaded,     setLedgerLoaded]     = useState(false);
   const [openingBalLoaded, setOpeningBalLoaded] = useState(false);
   const activeBankNominals = useActiveBankNominals(companyId);
   // Part 2.3 — window-narrowing toggle, same YTD-start calc as GLReport's ytdMode. Defaults to
@@ -1889,6 +1894,30 @@ function CashFlow({ selPeriod, setSelPeriod, onNavigate, companyId, company }) {
     return () => { cancelled = true; };
   }, [companyId, selPeriod, activeBankNominals, ytdMode, ytdStart]);
 
+  // Journals touching the bank nominals in the selected window (paged past the 1,000-row cap).
+  useEffect(() => {
+    if (!companyId) { setLedgerLoaded(true); return; }
+    const [sy, sm] = selPeriod.split('-').map(Number);
+    const winStart = ytdMode ? ytdStart : `${selPeriod}-01`;
+    const winEnd = selPeriod === localToday().slice(0, 7) ? localToday() : monthEnd(sy, sm);
+    const codes = activeBankNominals.length ? activeBankNominals : [BANK_NOMINAL_CODE];
+    const inList = `(${codes.join(',')})`;
+    let cancelled = false;
+    setLedgerLoaded(false);
+    fetchAllRows(() => supabase.from('journals').select('id, date, description, reference, debit_account, credit_account, amount')
+      .eq('company_id', companyId).gte('date', winStart).lte('date', winEnd)
+      .or(`debit_account.in.${inList},credit_account.in.${inList}`)
+      .order('date').order('id'))
+      .then(({ data, error }) => {
+        if (cancelled) return;
+        if (error) console.warn('[CashFlow] ledger movements failed:', error.message);
+        setLedgerJnls(data || []);
+      })
+      .catch(() => { if (!cancelled) setLedgerJnls([]); })
+      .then(() => { if (!cancelled) setLedgerLoaded(true); });
+    return () => { cancelled = true; };
+  }, [companyId, selPeriod, activeBankNominals, ytdMode, ytdStart]); // eslint-disable-line react-hooks/exhaustive-deps
+
   // ── Empty state ──
   if (!loading && txns.length === 0) return (
     <div className="fade-up" style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", minHeight: 340, textAlign: "center", padding: 48 }}>
@@ -1925,21 +1954,21 @@ function CashFlow({ selPeriod, setSelPeriod, onNavigate, companyId, company }) {
   const txnsUpToEnd = txns.filter(t => t.date <= periodEndStr);
   const latestTxn   = txnsUpToEnd[txnsUpToEnd.length - 1]; // just for the "last transaction" date label below
 
+  // Statement lines in the period: the forecast's daily flow (and recurring detection below).
   const periodTxns  = txns.filter(t => t.date >= periodStart && t.date <= periodEndStr);
   const periodNet   = periodTxns.reduce((s, t) => s + Number(t.amount), 0);
   const avgDaily    = daysInPeriod > 0 ? periodNet / daysInPeriod : 0;
 
-  // Balance at period end = opening cash balance (fetched above, inception-unbounded as at the
-  // day before this period starts) + net movements in the period — not accumulated from zero.
-  const currentBal = openingBalance + periodNet;
+  // Balance at period end = the ledger's opening bank balance (the day before the period) + the
+  // ledger's movement on the bank nominals in the period: equal to the ledger's bank balance at
+  // the period end. Statement lines are no longer added to a ledger opening balance, which drifted
+  // whenever the two disagreed (Heros Gym: EUR 12,124.71 against a ledger balance of EUR 2,811.00).
+  const ledgerMoves = bankMovements(ledgerJnls.filter(j => j.date >= periodStart && j.date <= periodEndStr),
+    activeBankNominals.length ? activeBankNominals : [BANK_NOMINAL_CODE]);
+  const currentBal = Math.round((openingBalance + netMovement(ledgerMoves)) * 100) / 100;
 
-  // Running balance per transaction — walks opening → after txn 1 → after txn 2 → ... in
-  // chronological order (periodTxns is date-ascending, matching the bank_transactions query).
-  let _runningBal = openingBalance;
-  const periodTxnsWithBalance = periodTxns.map(t => {
-    _runningBal += Number(t.amount);
-    return { ...t, runningBalance: _runningBal };
-  });
+  // Running balance per ledger movement, opening -> period end, in date order.
+  const periodTxnsWithBalance = withRunningBalance(ledgerMoves, openingBalance);
 
   // When the selected period has no transactions, fall back to the most recent period that does
   const effectiveAvgDaily = (() => {
@@ -2005,7 +2034,7 @@ function CashFlow({ selPeriod, setSelPeriod, onNavigate, companyId, company }) {
   const ap30End = addDaysStr(periodEndStr, 30);
   const upcomingAP = allInvoices.filter(inv => inv.due_date > periodEndStr && inv.due_date <= ap30End);
 
-  const cfLoading = loading || !openingBalLoaded;
+  const cfLoading = loading || !openingBalLoaded || !ledgerLoaded;
 
   return (
     <div className="fade-up">
@@ -2150,7 +2179,7 @@ function CashFlow({ selPeriod, setSelPeriod, onNavigate, companyId, company }) {
               <span className="card-title">Transactions</span>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <span style={{ fontSize: 10, fontFamily: "Source Code Pro, monospace", color: "var(--dim)" }}>
-                  Last 10 in period · {periodTxns.length} total
+                  Last 10 in period · {periodTxnsWithBalance.length} total · from the ledger
                 </span>
                 {periodTxnsWithBalance.length > 0 && (
                   <ExportDropdown
