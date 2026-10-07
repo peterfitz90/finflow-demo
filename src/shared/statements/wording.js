@@ -225,7 +225,17 @@ export const ABRIDGED = {
 // Wording verification record (Stage 5b's gate reads it): every printed item, its status, who and
 // when. The abridged items were agreed by Peter on the sheet on 7 October 2026.
 const AGREED = { status: 'verified', by: 'Peter', on: '2026-10-07', source: 'Abridged wording sheet' };
+// Full-set items: approved on the Stage 3a sheet with Peter's per-item choices of 6 October 2026,
+// but not yet recorded as verified (his decision is open), so they block approval until he does.
+const FULL_PENDING = { status: 'unverified', by: null, on: null, source: 'Stage 3a wording sheet; choices of 6 October 2026' };
 export const WORDING_STATUS = {
+  'full.3': { ...FULL_PENDING, item: 'Item 3: micro-regime statement (S&P wording)' },
+  'full.4': { ...FULL_PENDING, item: "Item 4: directors' statements (a)-(d), audit exemption" },
+  'full.5': { ...FULL_PENDING, item: 'Item 5: approval line and signatories' },
+  'full.8': { ...FULL_PENDING, item: 'Item 8: company information, with the currency sentence' },
+  'full.9': { ...FULL_PENDING, item: 'Item 9: statement of compliance' },
+  'full.10': { ...FULL_PENDING, item: 'Item 10: accounting policies' },
+  'full.notes': { ...FULL_PENDING, item: 'Notes: attested sentences (items 11-14), reserves and dividends, share capital, events after the balance sheet date' },
   'abridged.A1': { ...AGREED, item: 'Certification page: section 347; two directors by default, or a director and the company secretary; named and dated' },
   'abridged.A2': { ...AGREED, item: 'Cover: "Abridged Unaudited Financial Statements"' },
   'abridged.A3': { ...AGREED, item: 'Contents page' },
@@ -266,3 +276,22 @@ export function certificationPage({ periodPhrase, directorNames = [], secretaryN
 
 export const LEGAL_FORM_LABELS = Object.fromEntries(LEGAL_FORMS.map(f => [f.value, f.label]));
 export { DISCLOSURE_BY_KEY };
+
+// The wording items that print in a copy, for the approval gate (STA-01 Stage 5b): the full set
+// always; the abridged copy's items when abridged filing is elected. An item that does not print
+// (the audit exemption statements when none is claimed; the abridged dividends note when the copy
+// has none) is not listed, so it cannot block.
+export function printedWordingKeys(A, { abridged = false } = {}) {
+  const keys = ['full.3', ...(A.bsStatements?.auditExemption ? ['full.4'] : []), 'full.5', 'full.8', 'full.9', 'full.10', 'full.notes'];
+  if (abridged) {
+    keys.push('abridged.A1', 'abridged.A2', 'abridged.A3', 'abridged.A4', 'abridged.A5', 'abridged.A6', 'abridged.A7', 'abridged.A8', 'abridged.notes');
+    if ((A.abridgedNotes || []).some(n => n.title === 'Dividends')) keys.push('abridged.dividends');
+  }
+  return keys;
+}
+
+// The gate: every printed item verified. Unknown keys count as unverified.
+export function wordingGate(keys, status = WORDING_STATUS) {
+  const items = keys.map(k => ({ key: k, ...(status[k] || { status: 'unverified', item: k }) }));
+  return { items, blocking: items.filter(i => i.status !== 'verified') };
+}

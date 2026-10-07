@@ -14,17 +14,18 @@
 //   - GraphQL: every collection returns no rows; an insert mutation is refused
 // Inserts target the Fitzsimons Test company only, so a regression can never write into a client.
 //
-// Storage fixture: journal-attachments/<Fitzsimons Test>/_anon-check/fixture.txt, a permanent,
-// labelled 246-byte text object (sha256 in tests/anon/catalog.json, storage.fixture), created once
-// with the service role. Anon delete (bulk and single), upsert, update and move attempts target it,
+// Storage fixtures (tests/anon/catalog.json, storage.fixtures, each with its sha256), created once
+// with the service role: journal-attachments/<Fitzsimons Test>/_anon-check/fixture.txt, a permanent,
+// labelled 246-byte text object, and statutory-documents/<Fitzsimons Test>/_anon-check/fixture.pdf,
+// a labelled 522-byte PDF in the archive bucket (STA-01 Stage 5c, which has no storage policy). Anon delete (bulk and single), upsert, update and move attempts target it,
 // so an open write policy would actually remove or change something. The fixture is verified
 // before and after those attempts by scripts/anon-check-fixture.local.mjs: a gitignored,
 // never-committed, read-only service-role lookup run as a SEPARATE process with
 // .env.service.local (SUPABASE_SERVICE_ROLE_KEY, gitignored), so this script never holds the
 // service key and every attack above stays anon-only. The check FAILS if the verifier or key is
 // missing, or if the fixture is missing, differs from the catalog sha256, or changes (sha256,
-// size, etag, last-modified) during the run. Do not delete or edit the fixture. To recreate it:
-//   node --env-file=.env --env-file=.env.service.local scripts/anon-check-fixture.local.mjs create
+// size, etag, last-modified) during the run. Do not delete or edit a fixture. To recreate one:
+//   node --env-file=.env --env-file=.env.service.local scripts/anon-check-fixture.local.mjs create <index>
 // Tables and functions come from tests/anon/catalog.json plus whatever the live OpenAPI spec
 // exposes to anon. Refresh the catalog with CATALOG_SQL below after adding a table or function.
 //
@@ -147,6 +148,9 @@ for (const b of cat.buckets) {
   const upPath = `${TEST_CO}/anon-check/upload-${Date.now()}.txt`;
   const up = await call(`/storage/v1/object/${encodeURIComponent(b)}/${upPath}`, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body: 'anon check probe', raw: true });
   record(up.status >= 400 ? 'PASS' : 'FAIL', 'storage upload', `${b}/${upPath}`, up.status >= 400 ? `refused ${short(up)}` : `UPLOADED (${up.status}), remove it`);
+  const pdfPath = `${TEST_CO}/anon-check/upload-${Date.now()}.pdf`;
+  const upPdf = await call(`/storage/v1/object/${encodeURIComponent(b)}/${pdfPath}`, { method: 'POST', headers: { 'Content-Type': 'application/pdf' }, body: '%PDF-1.4 anon check probe', raw: true });
+  record(upPdf.status >= 400 ? 'PASS' : 'FAIL', 'storage upload', `${b}/${pdfPath}`, upPdf.status >= 400 ? `refused ${short(upPdf)}` : `UPLOADED (${upPdf.status}), remove it`);
   const logo = await call(`/storage/v1/object/${encodeURIComponent(b)}/logos/${TEST_CO}.png`, { method: 'POST', headers: { 'Content-Type': 'image/png', 'x-upsert': 'true' }, body: 'x', raw: true });
   record(logo.status >= 400 ? 'PASS' : 'FAIL', 'storage upsert', `${b}/logos/<test>.png`, logo.status >= 400 ? `refused ${short(logo)}` : `UPLOADED (${logo.status}), remove it`);
 }
@@ -159,9 +163,9 @@ for (const b of cat.buckets) {
   const sign = await call(`/storage/v1/object/sign/${encodeURIComponent(bucket)}/${name}`, { method: 'POST', body: { expiresIn: 60 } });
   record(sign.json?.signedURL || sign.json?.signedUrl ? 'FAIL' : 'PASS', 'storage sign', `${bucket}/${name}`, sign.json?.signedURL || sign.json?.signedUrl ? 'SIGNED URL ISSUED' : `refused ${short(sign)}`);
 }
-{
-  // Fixture: snapshot (service role, separate process), anon write attempts, snapshot again.
-  const { bucket, name, sha256: expected } = cat.storage.fixture;
+// Fixtures: snapshot (service role, separate process), anon read and write attempts, snapshot again.
+for (const [index, fx] of cat.storage.fixtures.entries()) {
+  const { bucket, name, sha256: expected, contentType = 'text/plain' } = fx;
   const verifier = new URL('./anon-check-fixture.local.mjs', import.meta.url);
   const svcEnv = new URL('../.env.service.local', import.meta.url);
   const snapshot = () => {
@@ -169,7 +173,7 @@ for (const b of cat.buckets) {
     if (!existsSync(svcEnv)) return { error: '.env.service.local missing (needs SUPABASE_SERVICE_ROLE_KEY)' };
     try {
       // Only the verifier's JSON line is read; its env (with the service key) never reaches this process.
-      const out = execFileSync(process.execPath, ['--env-file=.env', '--env-file=.env.service.local', fileURLToPath(verifier), 'snapshot'],
+      const out = execFileSync(process.execPath, ['--env-file=.env', '--env-file=.env.service.local', fileURLToPath(verifier), 'snapshot', String(index)],
         { cwd: fileURLToPath(new URL('..', import.meta.url)), env: { PATH: process.env.PATH, SystemRoot: process.env.SystemRoot }, encoding: 'utf8', stdio: ['ignore', 'pipe', 'ignore'] });
       return JSON.parse(out.trim().split('\n').pop());
     } catch (e) { return { error: `verifier failed: ${(e.stdout || e.message || '').toString().slice(0, 120)}` }; }
@@ -177,20 +181,27 @@ for (const b of cat.buckets) {
   const target = `${bucket}/${name}`;
   const before = snapshot();
   if (before.error) record('FAIL', 'storage fixture', target, `cannot verify: ${before.error}`);
-  else if (!before.exists) record('FAIL', 'storage fixture', target, 'MISSING before the run (recreate: anon-check-fixture.local.mjs create)');
+  else if (!before.exists) record('FAIL', 'storage fixture', target, `MISSING before the run (recreate: anon-check-fixture.local.mjs create ${index})`);
   else if (before.sha256 !== expected) record('FAIL', 'storage fixture', target, `content differs from catalog sha256 before the run (${before.size} bytes)`);
   else record('PASS', 'storage fixture', target, `present before, sha256 matches (${before.size} bytes)`);
 
+  const get = await call(`/storage/v1/object/${encodeURIComponent(bucket)}/${name}`);
+  record(get.status >= 400 ? 'PASS' : 'FAIL', 'storage read', target, get.status >= 400 ? `refused ${short(get)}` : `DOWNLOADED ${get.text.length} bytes`);
+  const pub = await call(`/storage/v1/object/public/${encodeURIComponent(bucket)}/${name}`);
+  record(pub.status >= 400 ? 'PASS' : 'FAIL', 'storage read', `public/${target}`, pub.status >= 400 ? `refused ${short(pub)}` : 'DOWNLOADED via public URL');
+  const sign = await call(`/storage/v1/object/sign/${encodeURIComponent(bucket)}/${name}`, { method: 'POST', body: { expiresIn: 60 } });
+  record(sign.json?.signedURL || sign.json?.signedUrl ? 'FAIL' : 'PASS', 'storage sign', target, sign.json?.signedURL || sign.json?.signedUrl ? 'SIGNED URL ISSUED' : `refused ${short(sign)}`);
   const del = await call(`/storage/v1/object/${encodeURIComponent(bucket)}`, { method: 'DELETE', body: { prefixes: [name] } });
   const n = Array.isArray(del.json) ? del.json.length : null;
   record(n === 0 || (n === null && del.status >= 400) ? 'PASS' : 'FAIL', 'storage delete', `${target} (bulk)`, n === null ? `refused ${short(del)}` : n === 0 ? '0 removed' : `${n} REMOVED`);
   const del1 = await call(`/storage/v1/object/${encodeURIComponent(bucket)}/${name}`, { method: 'DELETE' });
   record(del1.status >= 400 ? 'PASS' : 'FAIL', 'storage delete', `${target} (single)`, del1.status >= 400 ? `refused ${short(del1)}` : `${del1.status} ${del1.text.slice(0, 80)}`);
-  const ups = await call(`/storage/v1/object/${encodeURIComponent(bucket)}/${name}`, { method: 'POST', headers: { 'Content-Type': 'text/plain', 'x-upsert': 'true' }, body: 'anon overwrite attempt', raw: true });
+  const ups = await call(`/storage/v1/object/${encodeURIComponent(bucket)}/${name}`, { method: 'POST', headers: { 'Content-Type': contentType, 'x-upsert': 'true' }, body: 'anon overwrite attempt', raw: true });
   record(ups.status >= 400 ? 'PASS' : 'FAIL', 'storage upsert', target, ups.status >= 400 ? `refused ${short(ups)}` : `OVERWRITTEN (${ups.status})`);
-  const put = await call(`/storage/v1/object/${encodeURIComponent(bucket)}/${name}`, { method: 'PUT', headers: { 'Content-Type': 'text/plain' }, body: 'anon update attempt', raw: true });
+  const put = await call(`/storage/v1/object/${encodeURIComponent(bucket)}/${name}`, { method: 'PUT', headers: { 'Content-Type': contentType }, body: 'anon update attempt', raw: true });
   record(put.status >= 400 ? 'PASS' : 'FAIL', 'storage update', target, put.status >= 400 ? `refused ${short(put)}` : `UPDATED (${put.status})`);
-  const mv = await call('/storage/v1/object/move', { method: 'POST', body: { bucketId: bucket, sourceKey: name, destinationKey: name.replace('fixture.txt', `moved-${Date.now()}.txt`) } });
+  const ext = name.slice(name.lastIndexOf('.'));
+  const mv = await call('/storage/v1/object/move', { method: 'POST', body: { bucketId: bucket, sourceKey: name, destinationKey: name.replace(`fixture${ext}`, `moved-${Date.now()}${ext}`) } });
   record(mv.status >= 400 ? 'PASS' : 'FAIL', 'storage move', target, mv.status >= 400 ? `refused ${short(mv)}` : `MOVED (${mv.status})`);
 
   const after = snapshot();

@@ -15134,6 +15134,234 @@ function ComparativesPanel({ company, priorYE, priorStart, rows, ledger, onSaved
   );
 }
 
+// ── STA-01 Stage 5d: approval, archive and signed copies ────────────────────────────────────────
+// Everything goes through /api/statements-approval: the server checks the rule, renders and stores
+// the PDFs and writes the snapshot. These screens only show its answers.
+async function callStatementsApproval(body) {
+  const token = await window.Clerk?.session?.getToken();
+  const res = await fetch('/api/statements-approval', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+    body: JSON.stringify(body),
+  });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw Object.assign(new Error(json.error || `HTTP ${res.status}`), { status: res.status, rule: json.rule, live: json.live });
+  return json;
+}
+
+const fileToBase64 = file => new Promise((resolve, reject) => {
+  const r = new FileReader();
+  r.onload = () => resolve(String(r.result).split(',')[1] || '');
+  r.onerror = () => reject(r.error);
+  r.readAsDataURL(file);
+});
+
+// Opens an archived PDF through a 60-second signed URL from the server.
+async function openArchivedPdf(companyId, path) {
+  const { url } = await callStatementsApproval({ action: 'url', company_id: companyId, path });
+  const a = document.createElement('a');
+  a.href = url; a.rel = 'noopener';
+  document.body.appendChild(a); a.click(); a.remove();
+}
+
+const panelStyle = { marginBottom: 14, padding: "14px 16px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border)", background: "var(--surface2)", fontSize: 13, lineHeight: 1.6 };
+const fmtStamp = s => (s ? new Date(s).toLocaleString('en-IE', { day: 'numeric', month: 'short', year: 'numeric', hour: '2-digit', minute: '2-digit' }) : '');
+
+// The approval checklist (accountant): the rule as the server evaluates it, the acknowledgement
+// when changes were logged after sign-off, and approve (or supersede) when every check passes.
+function StatementsApprovalPanel({ company, yearEnd, onApproved }) {
+  const [state, setState] = useState(null);   // check result
+  const [busy, setBusy] = useState(false);
+  const [err, setErr] = useState(null);
+  const [ackCount, setAckCount] = useState('');
+  const [ackReason, setAckReason] = useState('');
+  const [supersedeReason, setSupersedeReason] = useState('');
+  const [done, setDone] = useState(null);
+  const ack = { ack_count: ackCount === '' ? null : Number(ackCount), ack_reason: ackReason };
+  const check = async () => {
+    setBusy(true); setErr(null); setDone(null);
+    try { setState(await callStatementsApproval({ action: 'check', company_id: company.id, year_end: yearEnd, ...ack })); }
+    catch (e) { captureError(e, { company_id: company.id, operation: 'statements-approval-check' }); setErr(e.message); }
+    setBusy(false);
+  };
+  useEffect(() => { setState(null); setDone(null); setAckCount(''); setAckReason(''); setSupersedeReason(''); }, [company?.id, yearEnd]);
+  const doApprove = async () => {
+    setBusy(true); setErr(null);
+    try {
+      const r = await callStatementsApproval({ action: 'approve', company_id: company.id, year_end: yearEnd, ...ack,
+        approver_name: window.Clerk?.user?.fullName || window.Clerk?.user?.primaryEmailAddress?.emailAddress || null,
+        ...(state?.live ? { supersedes: state.live.id, supersede_reason: supersedeReason } : {}) });
+      setDone(r);
+      setState(await callStatementsApproval({ action: 'check', company_id: company.id, year_end: yearEnd }));
+      onApproved && onApproved();
+    } catch (e) {
+      captureError(e, { company_id: company.id, operation: 'statements-approve' });
+      setErr(e.message);
+      if (e.rule) setState(s => ({ ...(s || {}), rule: e.rule }));
+    }
+    setBusy(false);
+  };
+  const rule = state?.rule;
+  const writes = rule?.writes?.length || 0;
+  const changed = state?.changedSinceApproval;
+  const canApprove = rule?.ok && (!state?.live || supersedeReason.trim().length > 0);
+  return (
+    <div className="no-print" style={panelStyle}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 10, flexWrap: "wrap" }}>
+        <div style={{ fontWeight: 700 }}>Approval</div>
+        <button className="btn btn-s btn-sm" disabled={busy} onClick={check}>{busy && !state ? 'Checking…' : state ? 'Check again' : 'Check the approval rule'}</button>
+      </div>
+      {state?.live && (
+        <div style={{ marginTop: 8, padding: "8px 10px", borderRadius: 6, border: `1px solid ${changed?.any ? 'var(--warn)' : 'var(--border)'}`, background: "var(--surface)" }}>
+          Approved {fmtStamp(state.live.recorded_at)}{state.live.approved_by_name ? ` by ${state.live.approved_by_name}` : ''}; directors' approval date {fmtIE(state.live.directors_approval_date)}.
+          {changed?.any
+            ? <div style={{ color: "var(--warn)", fontWeight: 600 }}>Changed since approval: {[changed.ledger && `the ledger (${changed.journals_then} journals then, ${changed.journals_now} now)`, changed.inputs && 'the statement inputs'].filter(Boolean).join(' and ')}. The approved PDFs are unchanged; approve again (superseding this one) if the statements should change.</div>
+            : <div style={{ color: "var(--muted)" }}>Nothing has changed since approval.</div>}
+        </div>
+      )}
+      {rule && (
+        <ul style={{ listStyle: "none", margin: "10px 0 0", padding: 0 }}>
+          {rule.checks.map(c => (
+            <li key={c.key} style={{ display: "flex", gap: 8, padding: "3px 0" }}>
+              <span aria-hidden style={{ fontWeight: 700, color: c.ok ? "var(--green)" : "var(--red)", width: 14 }}>{c.ok ? '✓' : '✗'}</span>
+              <span><span style={{ fontWeight: 600 }}>{c.label}.</span> <span style={{ color: "var(--muted)" }}>{c.detail}</span></span>
+            </li>
+          ))}
+        </ul>
+      )}
+      {rule && writes > 0 && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ fontWeight: 600 }}>{writes} change{writes === 1 ? ' was' : 's were'} logged after sign-off</div>
+          <div style={{ color: "var(--muted)", fontSize: 12, marginBottom: 6 }}>To approve without signing off again, enter the exact number of changes and why they do not need a new sign-off. Both are stored with the approval.</div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <input className="f-input" style={{ width: 110 }} inputMode="numeric" placeholder="Count" value={ackCount} onChange={e => setAckCount(e.target.value.replace(/\D/g, ''))} aria-label="Number of changes since sign-off" />
+            <input className="f-input" style={{ flex: 1, minWidth: 220 }} placeholder="Reason" value={ackReason} onChange={e => setAckReason(e.target.value)} aria-label="Reason" />
+          </div>
+        </div>
+      )}
+      {rule?.ok && state?.live && (
+        <div style={{ marginTop: 10 }}>
+          <div style={{ fontWeight: 600 }}>This period is already approved</div>
+          <div style={{ color: "var(--muted)", fontSize: 12, marginBottom: 6 }}>Approving again supersedes the current approval. Its PDFs and signed copies stay in the archive.</div>
+          <input className="f-input" style={{ width: "100%" }} placeholder="Reason for superseding the approval" value={supersedeReason} onChange={e => setSupersedeReason(e.target.value)} aria-label="Reason for superseding" />
+        </div>
+      )}
+      {rule && (
+        <div style={{ marginTop: 12, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+          <button className="btn btn-p btn-sm" disabled={busy || !canApprove} onClick={doApprove}
+            title={rule.ok ? (rule.abridged ? 'Produces the full set and the abridged copy, archives both and records the approval' : 'Produces the full set, archives it and records the approval') : 'Every check must pass first'}>
+            {busy && state ? 'Working…' : state?.live ? 'Supersede and approve' : 'Approve and archive'}
+          </button>
+          {writes > 0 && <button className="btn btn-s btn-sm" disabled={busy} onClick={check}>Re-check with the acknowledgement</button>}
+          <span style={{ color: "var(--muted)", fontSize: 12 }}>{rule.abridged ? 'Two PDFs: the full set and the CRO abridged copy.' : 'One PDF: the full set (abridged filing not elected).'}</span>
+        </div>
+      )}
+      {done && <div style={{ marginTop: 8, color: "var(--green)" }}>Approved and archived{done.superseded ? ' (the previous approval is superseded)' : ''}. Full set SHA-256 {done.approval.full_pdf_sha256.slice(0, 12)}…{done.approval.abridged_pdf_sha256 ? `, abridged ${done.approval.abridged_pdf_sha256.slice(0, 12)}…` : ''}</div>}
+      {err && <div style={{ marginTop: 8, color: "var(--red)" }}>{err}</div>}
+    </div>
+  );
+}
+
+// The archive: approved statements with their PDFs and the directors' signed copies. The
+// accountant sees superseded approvals too and uploads signed copies; a business owner sees the
+// approved documents only (RLS) and has no upload.
+function StatementsArchivePanel({ company, isBusinessOwner = false, refreshKey = 0 }) {
+  const [data, setData] = useState(null);
+  const [err, setErr] = useState(null);
+  const [busy, setBusy] = useState(null);
+  const [kind, setKind] = useState({});
+  const load = useCallback(async () => {
+    if (!company?.id) return;
+    setErr(null);
+    try { setData(await callStatementsApproval({ action: 'list', company_id: company.id })); }
+    catch (e) { setErr(e.message); setData({ approvals: [], files: [] }); }
+  }, [company?.id]);
+  useEffect(() => { load(); }, [load, refreshKey]);
+  const open = async path => {
+    setBusy(path); setErr(null);
+    try { await openArchivedPdf(company.id, path); } catch (e) { setErr(e.message); }
+    setBusy(null);
+  };
+  const upload = async (approval, file) => {
+    if (!file) return;
+    const k = kind[approval.id] || 'full';
+    setBusy(`up-${approval.id}`); setErr(null);
+    try {
+      if (file.size > 10 * 1024 * 1024) throw new Error('The file is over 10 MB');
+      await callStatementsApproval({ action: 'upload_signed', company_id: company.id, approval_id: approval.id, kind: k,
+        pdf_base64: await fileToBase64(file), uploader_name: window.Clerk?.user?.fullName || null });
+      await load();
+    } catch (e) { captureError(e, { company_id: company.id, operation: 'statements-upload-signed' }); setErr(e.message); }
+    setBusy(null);
+  };
+  if (!data) return <div className="no-print" style={panelStyle}>Loading approved statements…</div>;
+  const approvals = data.approvals || [];
+  return (
+    <div className="no-print" style={panelStyle}>
+      <div style={{ fontWeight: 700, marginBottom: 6 }}>{isBusinessOwner ? 'Approved annual accounts' : 'Approved statements archive'}</div>
+      {approvals.length === 0 && <div style={{ color: "var(--muted)" }}>{isBusinessOwner ? 'Your accountant has not approved any annual accounts yet.' : 'Nothing approved yet.'}</div>}
+      {approvals.map(a => {
+        const signed = (data.files || []).filter(f => f.approval_id === a.id);
+        const superseded = a.status === 'superseded';
+        return (
+          <div key={a.id} style={{ padding: "10px 0", borderTop: "1px solid var(--border)", opacity: superseded ? 0.7 : 1 }}>
+            <div style={{ display: "flex", justifyContent: "space-between", gap: 10, flexWrap: "wrap" }}>
+              <div>
+                <span style={{ fontWeight: 600 }}>Year ended {fmtIE(a.period_end)}</span>
+                {superseded
+                  ? <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 700, color: "var(--warn)" }}>SUPERSEDED {fmtStamp(a.superseded_at)}: {a.supersede_reason}</span>
+                  : <span style={{ marginLeft: 8, fontSize: 11, fontWeight: 700, color: "var(--green)" }}>APPROVED</span>}
+                <div style={{ color: "var(--muted)", fontSize: 12 }}>
+                  Directors' approval {fmtIE(a.directors_approval_date)} · recorded {fmtStamp(a.recorded_at)}{a.approved_by_name ? ` by ${a.approved_by_name}` : ''}
+                  {!isBusinessOwner && a.writes_after_signoff > 0 && ` · ${a.writes_after_signoff} change${a.writes_after_signoff === 1 ? '' : 's'} after sign-off acknowledged: ${a.ack_reason}`}
+                </div>
+              </div>
+              <div style={{ display: "flex", gap: 6, flexWrap: "wrap", alignItems: "flex-start" }}>
+                <button className="btn btn-s btn-sm" disabled={!!busy} onClick={() => open(a.full_pdf_path)} title={`SHA-256 ${a.full_pdf_sha256}`}>{busy === a.full_pdf_path ? 'Opening…' : 'Full set ↓'}</button>
+                {a.abridged_pdf_path && <button className="btn btn-s btn-sm" disabled={!!busy} onClick={() => open(a.abridged_pdf_path)} title={`SHA-256 ${a.abridged_pdf_sha256}`}>{busy === a.abridged_pdf_path ? 'Opening…' : 'Abridged (CRO) ↓'}</button>}
+              </div>
+            </div>
+            {signed.length > 0 && (
+              <div style={{ marginTop: 6, fontSize: 12 }}>
+                Signed copies:{' '}
+                {signed.map(f => (
+                  <button key={f.id} className="btn btn-s btn-sm" style={{ marginRight: 6, marginTop: 4 }} disabled={!!busy} onClick={() => open(f.path)} title={`SHA-256 ${f.sha256} · uploaded ${fmtStamp(f.uploaded_at)}${f.uploaded_by_name ? ` by ${f.uploaded_by_name}` : ''}`}>
+                    {f.kind === 'signed_abridged' ? 'Abridged' : 'Full set'} signed{f.n > 1 ? ` (${f.n})` : ''} ↓
+                  </button>
+                ))}
+              </div>
+            )}
+            {!isBusinessOwner && !superseded && (
+              <div style={{ marginTop: 6, display: "flex", gap: 6, alignItems: "center", flexWrap: "wrap", fontSize: 12 }}>
+                <span style={{ color: "var(--muted)" }}>Upload the directors' signed copy:</span>
+                <select className="f-input" style={{ width: "auto", padding: "2px 6px" }} value={kind[a.id] || 'full'} onChange={e => setKind(k => ({ ...k, [a.id]: e.target.value }))} aria-label="Which copy">
+                  <option value="full">Full set</option>
+                  {a.abridged_pdf_path && <option value="abridged">Abridged (CRO)</option>}
+                </select>
+                <label className="btn btn-s btn-sm" style={{ cursor: busy ? 'default' : 'pointer' }}>
+                  {busy === `up-${a.id}` ? 'Uploading…' : 'Choose PDF…'}
+                  <input type="file" accept="application/pdf" hidden disabled={!!busy} onChange={e => { const f = e.target.files?.[0]; e.target.value = ''; upload(a, f); }} />
+                </label>
+                <span style={{ color: "var(--muted)" }}>Kept beside the approved PDF, never replacing it.</span>
+              </div>
+            )}
+          </div>
+        );
+      })}
+      {err && <div style={{ marginTop: 8, color: "var(--red)" }}>{err}</div>}
+    </div>
+  );
+}
+
+// Business owner's page: the approved annual accounts only (never drafts).
+function ApprovedAccounts({ company }) {
+  return (
+    <div style={{ maxWidth: 860 }}>
+      <StatementsArchivePanel company={company} isBusinessOwner />
+    </div>
+  );
+}
+
 function FinancialStatements({ company, companyName }) {
   const baseCurrency = company?.base_currency || company?.currency || "EUR";
   const fmt    = (n) => fmtCurrency(n, baseCurrency);
@@ -15176,6 +15404,7 @@ function FinancialStatements({ company, companyName }) {
     setPdfBusy(false);
   };
   const [fsInputs,    setFsInputs]    = useState(EMPTY_INPUTS);
+  const [archiveKey,  setArchiveKey]  = useState(0); // Stage 5d: reload the archive after an approval
 
   const yeMonth = company?.year_end_month || 12;
   const fyEndDay = company?.fy_end_day ?? null;
@@ -15529,6 +15758,13 @@ function FinancialStatements({ company, companyName }) {
       {generated && priorYE && hadPriorYear && (
         <ComparativesPanel key={`${company?.id}|${priorYE}`} company={company} priorYE={priorYE} priorStart={priorStart}
           rows={fsInputs.comparatives} ledger={priorLedger} onSaved={loadInputs} />
+      )}
+      {/* Stage 5b-5d: the approval rule, approve and archive, and the archive with signed copies */}
+      {generated && yearEnd && (
+        <>
+          <StatementsApprovalPanel company={company} yearEnd={yearEnd} onApproved={() => setArchiveKey(k => k + 1)} />
+          <StatementsArchivePanel company={company} refreshKey={archiveKey} />
+        </>
       )}
       {compDiffs.length > 0 && (
         <div className="no-print" style={{ marginBottom: 14, padding: "12px 16px", borderRadius: "var(--radius-sm)", border: "1px solid var(--border)", borderLeft: "4px solid var(--warn)", background: "var(--surface2)", fontSize: 13, lineHeight: 1.6 }}>
@@ -21429,6 +21665,8 @@ const NAV = [
   { section: "REPORTS", items: [
     { id: "gl",             icon: "⊞", label: "GL Reports" },
     { id: "fin-statements", icon: "§",  label: "Fin. Statements", feature: "fin_statements", accountantOnly: true },
+    // Stage 5d: the business owner's view of the approved annual accounts (never drafts).
+    { id: "accounts",       icon: "§",  label: "Annual Accounts", feature: "fin_statements", businessOwnerOnly: true },
     // Sole Trader only -- hidden entirely for every other company_type (all real companies
     // today), rather than shown-then-"not applicable" the way fin-statements handles Limited
     // Company mismatch. Condition must match Form11's own internal gate exactly (company_type
@@ -21521,7 +21759,7 @@ function GlobalSearchPalette({ open, onClose, companyId, company, isBusinessOwne
     if (isBusinessOwner && group.items.every(item => item.accountantOnly)) return false;
     return true;
   }).flatMap(group => group.items)
-    .filter(item => !(isBusinessOwner && item.accountantOnly) && !item.action
+    .filter(item => !(isBusinessOwner && item.accountantOnly) && !(!isBusinessOwner && item.businessOwnerOnly) && !item.action
       && (!item.companyTypeOnly || company?.company_type === item.companyTypeOnly));
 
   const q = query.trim().toLowerCase();
@@ -22090,6 +22328,7 @@ export default function App() {
     compliance:        ["Compliance",            "ROS · CRO · Revenue deadlines"],
     "vat-returns":     ["VAT Returns",           "VAT3 draft · T1/T2 computation · filing"],
     "fin-statements":  ["Financial Statements",  "FRS 105 · Micro-entity accounts · CRO filing"],
+    "accounts":        ["Annual Accounts",       "Approved financial statements"],
     form11:            ["Form 11",               "Sole trader working paper · extracts · capital allowances"],
     settings:          ["Settings",              "Company settings · tax · compliance"],
     "fixed-assets":    ["Fixed Assets",          "Asset register · depreciation · wear & tear"],
@@ -22202,7 +22441,7 @@ export default function App() {
                       <span className="nav-chevron">{isOpen ? "▾" : "▸"}</span>
                     </button>
                     <div className="nav-section-items" style={{ maxHeight: isOpen ? "400px" : "0" }}>
-                      {group.items.filter(item => !(isBusinessOwner && item.accountantOnly)
+                      {group.items.filter(item => !(isBusinessOwner && item.accountantOnly) && !(!isBusinessOwner && item.businessOwnerOnly)
                         && (!item.companyTypeOnly || company?.company_type === item.companyTypeOnly)).map(item => {
                         const locked = !!(item.feature && !can(company, item.feature));
                         const isActive = !locked && (item.action === 'practice'
@@ -22345,6 +22584,7 @@ export default function App() {
                   {page === "compliance"      && <Compliance company={company} onNavigate={setPage} />}
                   {page === "vat-returns"    && <VATReturns company={company} onNavigate={setPage} isBusinessOwner={isBusinessOwner} />}
                   {page === "fin-statements" && <FinancialStatements company={company} companyName={companyName} />}
+                  {page === "accounts"       && <ApprovedAccounts company={company} />}
                   {page === "form11"        && <Form11 company={company} companyName={companyName} />}
                   {page === "payroll-import"    && <BrightPayImporter companyId={company?.id} />}
                   {page === "opening-balances" && <OpeningBalances companyId={company?.id} />}

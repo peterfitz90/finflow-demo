@@ -8,6 +8,7 @@
     "api/send-invoice.js":    { "maxDuration": 60 },
     "api/invoice-pdf.js":     { "maxDuration": 60 },
     "api/statements-pdf.js":  { "maxDuration": 60, "includeFiles": "api/_fonts/**" },
+    "api/statements-approval.js": { "maxDuration": 60, "includeFiles": "api/_fonts/**" },
     "api/refresh-stats.js":   { "maxDuration": 30 }
   },
   "crons": [

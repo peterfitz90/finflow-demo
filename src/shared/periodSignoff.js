@@ -20,25 +20,10 @@ export function rangeLabel(start, end) {
   return `${f(s)} – ${f(e)}`;
 }
 
-// One entry per range that has ever been signed off: its latest signed_off / withdrawn event
-// decides the status; changes = write_after_signoff rows logged since the latest sign-off.
-export function summariseSignoffs(events) {
-  const by = new Map();
-  for (const ev of [...(events || [])].sort((a, b) => (a.occurred_at < b.occurred_at ? -1 : 1))) {
-    const key = `${ev.period_start}|${ev.period_end}`;
-    if (!by.has(key)) by.set(key, { key, start: ev.period_start, end: ev.period_end, status: null, signed: null, withdrawn: null, changes: [], history: [] });
-    const r = by.get(key);
-    r.history.push(ev);
-    if (ev.action === 'signed_off') { r.status = 'signed_off'; r.signed = ev; r.withdrawn = null; r.changes = []; }
-    else if (ev.action === 'withdrawn') { r.status = 'withdrawn'; r.withdrawn = ev; }
-    else if (ev.action === 'write_after_signoff' && r.status === 'signed_off') r.changes.push(ev);
-  }
-  return [...by.values()].filter(r => r.status);
-}
-
-// Currently signed-off ranges that overlap [from, to].
-export const activeOverlapping = (summaries, from, to) =>
-  (summaries || []).filter(r => r.status === 'signed_off' && r.start <= to && r.end >= from);
+// The pure summary (no React or Supabase) lives in signoffSummary.js, so the server's approval rule
+// uses the same code.
+export { summariseSignoffs, activeOverlapping } from './signoffSummary.js';
+import { summariseSignoffs } from './signoffSummary.js';
 
 export function usePeriodSignoffs(companyId) {
   const [events, setEvents] = useState(null);

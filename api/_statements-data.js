@@ -37,5 +37,7 @@ export async function loadStatements(db, companyId, yearEnd, today, preloaded = 
     inputs: { profile, directors: directors || [], yearInputs, disclosures: disclosures || [], comparatives: comparatives || [] },
     yearEnd, today,
   });
-  return { company, assembled, journalCount: (journals || []).length };
+  // journals and inputs too: the approval endpoint fingerprints the ledger and snapshots the inputs.
+  return { company, assembled, journalCount: (journals || []).length, journals: journals || [],
+    inputs: { profile, directors: directors || [], yearInputs, disclosures: disclosures || [], comparatives: comparatives || [] } };
 }
