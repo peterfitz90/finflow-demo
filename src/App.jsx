@@ -4059,11 +4059,9 @@ function VATReturns({ company, onNavigate, isBusinessOwner = false }) {
       setMarkError(error.message);
     } else {
       setFiledMap(prev => ({ ...prev, [selVal]: payload }));
-      // Best-effort audit log: only writes a 'refiled' row if this period was previously
-      // unfiled (superseded_at set) — a normal first-time filing logs nothing. Never blocks
-      // or fails the filing itself if the log call errors.
-      supabase.rpc('log_vat_refile', { p_company_id: company.id, p_period_val: selVal })
-        .then(({ error: logErr }) => { if (logErr) console.warn('[vat] log_vat_refile failed:', logErr.message); });
+      // The 'refiled' audit event (for a period previously unfiled) is written by a trigger on
+      // vat_returns in the same transaction as this save (supabase/vat_refile_trigger.sql), so it
+      // can't be lost separately; the old best-effort log_vat_refile call is no longer needed.
       // Best-effort: flip a matching pending filing request to 'filed'. No-op if none exists
       // (e.g. the accountant filed without a prior Request Filing step) — never blocks filing.
       supabase.rpc('resolve_vat_filing_request', { p_company_id: company.id, p_period_val: selVal })
