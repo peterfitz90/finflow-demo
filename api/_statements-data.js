@@ -31,7 +31,8 @@ export async function loadStatements(db, companyId, yearEnd, today, preloaded = 
   ]);
   const bankCodes = [...new Set((banks || []).map(b => b.nominal_code).filter(Boolean))];
   const assembled = assembleStatements({
-    generated: true, company, companyName: company.name, journals: journals || [], chart: chart || [],
+    // preloaded.extraJournals: local review only, a test case's journals added in memory (never written)
+    generated: true, company, companyName: company.name, journals: [...(journals || []), ...(preloaded?.extraJournals || [])], chart: chart || [],
     bankCodes: bankCodes.length ? bankCodes : ['1000'], periods, openingJournals: opening || [],
     inputs: { profile, directors: directors || [], yearInputs, disclosures: disclosures || [], comparatives: comparatives || [] },
     yearEnd, today,

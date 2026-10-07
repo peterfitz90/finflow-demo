@@ -88,6 +88,15 @@ const NONE_TEXT = {
   post_bs_events: 'There have been no significant events affecting the company since the financial year-end.',
 };
 
+// The dividends sentence, shared by the full set's reserves note and the abridged copy's dividends
+// note. paid: Dividends Paid (3400) moved in the year. An attestation of "none" that the ledger
+// contradicts is not printed.
+function dividendsSentence(row, paid) {
+  if (paid && row?.disclosure_key === 'dividends' && row.has_items === false)
+    return PLACEHOLDER('dividends: the attestation says none were paid, but Dividends Paid (3400) has postings in the year');
+  return disclosureSentence(row, 'dividends') || PLACEHOLDER('dividends paid or proposed');
+}
+
 // The guard: null when there is no attestation (never a default claim).
 export function disclosureSentence(row, key, vars = {}) {
   if (!row || row.disclosure_key !== key) return null;
@@ -121,7 +130,8 @@ export function balanceSheetStatements({ disclosures = [], companyName, approval
 
 // Notes as [{ title, paragraphs: string[], table?: [label, amount][] }], numbered by the caller.
 // abridged: the CRO abridged copy's notes (agreed by Peter, 7 October 2026): the full set's notes
-// without the reserves movement note (no creditors analysis note exists to leave out).
+// without the reserves movement note (no creditors analysis note exists to leave out). The dividend
+// sentence stays, in a stand-alone dividends note where the reserves note would be.
 export function statementNotes({ companyName, legalForm, country, croNumber, registeredOffice, disclosures = [], yearEndFmt,
   depreciationRates = {}, assetClasses = [], taxUsed = false, reserves = null, shareCapital = null, abridged = false }) {
   const by = Object.fromEntries(disclosures.map(d => [d.disclosure_key, d]));
@@ -159,7 +169,18 @@ export function statementNotes({ companyName, legalForm, country, croNumber, reg
       title: 'Reserves and dividends',
       table: [['Profit and loss account at the start of the year', reserves.atStart], ['Profit or loss for the year', reserves.result],
         ...(reserves.dividendsInYear ? [['Dividends paid', -reserves.dividendsInYear]] : []), ['Profit and loss account at the end of the year', reserves.atEnd]],
-      paragraphs: [disclosureSentence(by.dividends, 'dividends') || ph('dividends paid or proposed')],
+      paragraphs: [dividendsSentence(by.dividends, !!reserves.dividendsInYear)],
+    });
+  }
+  // Abridged copy: dividends without the reserves movement (which would show the profit). The
+  // amount prints when 3400 moved in the year; the sentence follows the full set's rule, so with
+  // no dividends it is the attested "none" sentence or the placeholder, never a default claim.
+  if (reserves && abridged) {
+    const paid = reserves.dividendsInYear || 0;
+    notes.push({
+      title: 'Dividends',
+      ...(paid ? { table: [['Dividends paid in the year', paid]] } : {}),
+      paragraphs: [dividendsSentence(by.dividends, !!paid)],
     });
   }
   // Called-up share capital (Peter): the amount from 3000, the number and class from the year inputs.
@@ -214,6 +235,8 @@ export const WORDING_STATUS = {
   'abridged.A7': { ...AGREED, item: 'Statement (e): micro wording, ss.352–353' },
   'abridged.A8': { ...AGREED, item: 'Approval line and signatories with typed names, as the full set' },
   'abridged.notes': { ...AGREED, item: "Notes as the full set, without the creditors analysis and the reserves movement notes" },
+  // Proposed 7 October 2026, awaiting Peter's agreement.
+  'abridged.dividends': { status: 'unverified', by: null, on: null, source: 'Proposal, 7 October 2026', item: 'Dividends note: stand-alone, where the reserves note would be; the amount when 3400 moved in the year, and the dividends attestation sentence as the full set' },
 };
 
 // The balance sheet statements for the abridged copy: the full set's items 3–5 with (e) added at

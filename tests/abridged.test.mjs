@@ -10,7 +10,7 @@ const row = (k, has_items, extra = {}) => ({ disclosure_key: k, has_items, ...ex
 const claimed = [row('audit_exemption', true, { details: { section: '359' } }), row('no_s334_notice', false)];
 
 test('every abridged item is recorded as agreed by Peter on 7 October 2026', () => {
-  const keys = Object.keys(WORDING_STATUS).filter(k => k.startsWith('abridged.'));
+  const keys = Object.keys(WORDING_STATUS).filter(k => k.startsWith('abridged.') && k !== 'abridged.dividends');
   assert.deepEqual(keys, ['abridged.A1', 'abridged.A2', 'abridged.A3', 'abridged.A4', 'abridged.A5', 'abridged.A6', 'abridged.A7', 'abridged.A8', 'abridged.notes']);
   for (const k of keys) assert.deepEqual([WORDING_STATUS[k].status, WORDING_STATUS[k].by, WORDING_STATUS[k].on], ['verified', 'Peter', '2026-10-07'], k);
 });
@@ -43,8 +43,30 @@ test('abridged notes: the full set without the reserves movement note', () => {
   const full = statementNotes(args).map(n => n.title);
   const ab = statementNotes({ ...args, abridged: true }).map(n => n.title);
   assert.ok(full.includes('Reserves and dividends'));
-  assert.deepEqual(ab, full.filter(t => t !== 'Reserves and dividends'));
+  assert.deepEqual(ab, full.map(t => (t === 'Reserves and dividends' ? 'Dividends' : t)));
   for (const t of ['Called up share capital', 'Events after the balance sheet date', 'Advances, credits and guarantees to directors', 'Financial commitments, guarantees and contingencies', 'Own shares']) assert.ok(ab.includes(t), t);
+});
+
+test('abridged dividends note: the amount and sentence when 3400 moved; the attested sentence otherwise', () => {
+  const R = paid => ({ atStart: 1000, result: 748, dividendsInYear: paid, atEnd: 1748 - paid });
+  const div = (paid, disclosures) => statementNotes({ companyName: 'X Ltd', reserves: R(paid), disclosures, abridged: true }).find(n => n.title === 'Dividends');
+  const said = row('dividends', true, { narrative: 'An interim dividend of €500 was paid on 30 June 2026.' });
+  // paid and attested: the amount and the accountant's sentence; no profit figure
+  const p = div(500, [said]);
+  assert.deepEqual(p.table, [['Dividends paid in the year', 500]]);
+  assert.deepEqual(p.paragraphs, ['An interim dividend of €500 was paid on 30 June 2026.']);
+  assert.ok(!JSON.stringify(p).includes('748'));
+  // paid, not attested: the amount and the placeholder
+  assert.deepEqual(div(500, []).paragraphs, [PLACEHOLDER('dividends paid or proposed')]);
+  // paid, but attested as none: the contradiction is not printed (full set too)
+  assert.match(div(500, [row('dividends', false)]).paragraphs[0], /attestation says none were paid/);
+  const fullNote = statementNotes({ companyName: 'X Ltd', reserves: R(500), disclosures: [row('dividends', false)] }).find(n => n.title === 'Reserves and dividends');
+  assert.match(fullNote.paragraphs[0], /attestation says none were paid/);
+  // none paid: no amount; the attested sentence as the full set, or the placeholder
+  assert.equal(div(0, [row('dividends', false)]).table, undefined);
+  assert.deepEqual(div(0, [row('dividends', false)]).paragraphs, ['No dividends were paid during the year or proposed after the year end.']);
+  assert.deepEqual(div(0, []).paragraphs, [PLACEHOLDER('dividends paid or proposed')]);
+  assert.equal(WORDING_STATUS['abridged.dividends'].status, 'unverified');
 });
 
 test('information required: certification signatories and date only when abridged filing is elected', () => {
