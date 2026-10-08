@@ -24,5 +24,5 @@ export function readCapStatus(reads, limits = null) {
   const n = used.length, usd = Math.round(used.reduce((t, r) => t + Number(r.cost_usd || 0), 0) * 10000) / 10000;
   const reached = n >= lim.max_reads_per_day || usd >= Number(lim.max_usd_per_day);
   return { reached, reads_today: n, usd_today: usd, max_reads_per_day: lim.max_reads_per_day, max_usd_per_day: Number(lim.max_usd_per_day),
-    message: reached ? `Today's limit for reading PDF statements for this company has been reached (${lim.max_reads_per_day} reads or US$${Number(lim.max_usd_per_day).toFixed(2)} a day; used: ${n} reads, US$${usd.toFixed(2)}). It resets at midnight. Contact support if you need it raised.` : null };
+    message: reached ? `Today's limit for reading PDF statements for this company has been reached (${lim.max_reads_per_day} read${lim.max_reads_per_day === 1 ? '' : 's'} or US$${Number(lim.max_usd_per_day).toFixed(2)} a day; used: ${n} read${n === 1 ? '' : 's'}, US$${usd.toFixed(2)}). It resets at midnight. Contact support if you need it raised.` : null };
 }

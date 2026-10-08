@@ -117,7 +117,10 @@ export async function finishUpload(deps, { companyId, userId, userName, uploadId
     destination = { bucket: ARCHIVE_BUCKET, path, record: 'fs_approval_files', id: ins.data.id, n };
   } else {
     const same = must(await deps.serviceDb.from('source_documents').select('id, filename, uploaded_at').eq('company_id', companyId).eq('sha256', hash), 'source documents');
-    if (same?.length) throw await reject(deps, row, `This exact file was already uploaded (${same[0].filename}, ${String(same[0].uploaded_at).slice(0, 10)})`, userId);
+    if (same?.length) {
+      const e = await reject(deps, row, `This exact file was already uploaded (${same[0].filename}, ${String(same[0].uploaded_at).slice(0, 10)})`, userId);
+      throw Object.assign(e, { duplicate_of: same[0].id }); // the screen offers to reopen it instead
+    }
     const ext = row.declared_type === 'text/csv' ? 'csv' : 'pdf';
     const path = `${companyId}/${row.purpose}/${row.id}.${ext}`;
     must(await deps.serviceDb.storage.from(SOURCE_BUCKET).upload(path, buf, { contentType: row.declared_type, upsert: false }), `store ${path}`);

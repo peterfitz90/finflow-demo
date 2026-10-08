@@ -164,7 +164,7 @@ test('an expired link is rejected; the same file twice is rejected as a duplicat
   await finishUpload(f.deps, { ...who, uploadId: a.upload_id });
   const b = await startUpload(f.deps, { ...who, purpose: 'bank_statement', filename: 'again.pdf', size: 3000, type: 'application/pdf' });
   f.browserUpload(b.path, buf);
-  await assert.rejects(finishUpload(f.deps, { ...who, uploadId: b.upload_id }), /already uploaded \(one\.pdf/);
+  await assert.rejects(finishUpload(f.deps, { ...who, uploadId: b.upload_id }), e => /already uploaded \(one\.pdf/.test(e.message) && e.duplicate_of === f.t.source_documents.rows[0].id);
   const c = await startUpload(f.deps, { ...who, purpose: 'bank_statement', filename: 'late.pdf', size: 3000, type: 'application/pdf' });
   f.browserUpload(c.path, pdfOf(3000).fill(0x42, 20));
   f.deps.now = () => '2026-10-09T13:00:00.000Z'; // three hours later: the 2-hour link has expired

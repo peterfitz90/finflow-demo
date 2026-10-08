@@ -11178,7 +11178,7 @@ async function callStatementRead(body) {
   const token = await window.Clerk?.session?.getToken();
   const res = await fetch('/api/statement-read', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
   const json = await res.json().catch(() => ({}));
-  if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+  if (!res.ok) throw Object.assign(new Error(json.error || `HTTP ${res.status}`), { status: res.status, body: json });
   return json;
 }
 
@@ -11188,9 +11188,14 @@ const statementHasIssues = c => !!c && (!!c.imageRead || c.errors.length > 0 || 
 
 // Local OCR (BNK-14 step 3b), in the browser: the page images never leave the accountant's machine.
 // Returns the text of each page that has rows. onProgress(done, total).
+// The engine is the pinned tesseract.js browser build (the bundled npm copy never started its worker
+// in production); each step has a time limit, so a failure says so instead of hanging.
+const TESSERACT_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.esm.min.js';
+const withTimeout = (p, ms, what) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`${what} took longer than ${Math.round(ms / 1000)} s`)), ms))]);
 async function ocrPages(pdf, pages, onProgress) {
-  const { createWorker } = await import('tesseract.js');
-  const worker = await createWorker('eng');
+  const mod = await withTimeout(import(/* @vite-ignore */ TESSERACT_URL), 30000, 'loading the OCR engine');
+  const T = mod.default || mod;
+  const worker = await withTimeout(T.createWorker('eng'), 60000, 'starting the OCR engine');
   const out = {};
   try {
     let done = 0;
@@ -11200,7 +11205,7 @@ async function ocrPages(pdf, pages, onProgress) {
       const c = document.createElement('canvas');
       c.width = v.width; c.height = v.height;
       await page.render({ canvasContext: c.getContext('2d'), viewport: v }).promise;
-      out[n] = (await worker.recognize(c)).data.text;
+      out[n] = (await withTimeout(worker.recognize(c), 60000, `reading page ${n}`)).data.text;
       onProgress(++done, pages.length);
     }
   } finally { await worker.terminate(); }
@@ -11277,9 +11282,10 @@ function PdfStatementReview({ company, read, doc, bankAccounts, onUse, onClose }
           <div>
             <div style={{ fontWeight: 700 }}>{doc.filename}</div>
             <div style={{ fontSize: 11, color: "var(--muted)" }}>
-              {read.pages} page{read.pages === 1 ? '' : 's'} read from the PDF's text · {sections.length} section{sections.length === 1 ? '' : 's'}
+              {read.pages} page{read.pages === 1 ? '' : 's'} read from {read.mode === 'image' ? 'the page images' : "the PDF's text"} · {sections.length} section{sections.length === 1 ? '' : 's'}
               {read.period?.start || read.period?.end ? ` · ${read.period.start ? fmtIE(read.period.start) : '?'} to ${read.period.end ? fmtIE(read.period.end) : '?'}` : ''}
               {` · read cost US$${Number(read.cost_usd || 0).toFixed(3)}`}{read.ms ? ` · ${Math.round(read.ms / 1000)} s` : ''}
+              {read.reopened ? ` · reopened (read ${fmtIE(String(read.read_at).slice(0, 10))}, no new read)` : ''}
             </div>
           </div>
           <button className="btn btn-s btn-sm" onClick={onClose}>Close</button>
@@ -11738,6 +11744,12 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
   const [pdfRead, setPdfRead] = useState(null);       // { read, doc: { id, filename } }
   const [pdfContext, setPdfContext] = useState(null); // { read_id, section_key }
   const pdfRef = useRef(null);
+  const [recentDocs, setRecentDocs] = useState(null);
+  const loadRecent = useCallback(async () => {
+    if (!company?.id || isBusinessOwner) return;
+    try { setRecentDocs((await callStatementRead({ action: 'recent', company_id: company.id })).documents || []); }
+    catch (e) { setRecentDocs([]); }
+  }, [company?.id, isBusinessOwner]);
   const [catProgress, setCatProgress] = useState(null); // null | { done, total, msg }
   const cancelCatRef = useRef(false);
   const [history, setHistory] = useState([]);
@@ -11755,6 +11767,8 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
 
   // Needs Review tab
   const [activeTab, setActiveTab]         = useState('import');
+  // the recent PDF statements (declared after activeTab, which it reads)
+  useEffect(() => { if (isActive && activeTab === 'import' && !rows.length && !pdfRead) loadRecent(); }, [isActive, activeTab, rows.length, pdfRead, loadRecent]);
   const [reviewRows, setReviewRows]       = useState([]);
   const [reviewLoading, setReviewLoading] = useState(false);
   const [reviewChanges, setReviewChanges] = useState({});
@@ -12477,9 +12491,26 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
     if (!file) return;
     setPdfErr(null); setAlert(null);
     if (!/\.pdf$/i.test(file.name)) { setPdfErr('Choose a PDF statement.'); return; }
+    let up;
     try {
       setPdfStage(`Uploading ${file.name}…`);
-      const up = await uploadDocument(company.id, 'bank_statement', file);
+      up = await uploadDocument(company.id, 'bank_statement', file);
+    } catch (e) {
+      setPdfStage(null);
+      // the same file again: offer the earlier read instead (no new model call)
+      if (e.duplicate_of) { setPdfErr({ message: e.message, reopenId: e.duplicate_of, filename: file.name }); return; }
+      captureError(e, { company_id: company?.id, operation: 'bank-import-pdf-upload' });
+      setPdfErr(e.message); return;
+    }
+    await readDoc(up.destination.id, file.name);
+  };
+
+  // Read a stored statement with the model (counted against the daily cap).
+  const readDoc = async (docId, filename) => {
+    const file = { name: filename };
+    const up = { destination: { id: docId } };
+    setPdfErr(null);
+    try {
       setPdfStage(`Reading ${file.name}: this takes about 10 to 60 seconds…`);
       // progress: the server records the read as it goes (statement_reads.chunks_done)
       let polling = true;
@@ -12501,8 +12532,22 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
       if (read.refused) setPdfErr(read.refused);
       else setPdfRead({ read, doc: { id: up.destination.id, filename: file.name } });
     } catch (e) {
-      captureError(e, { company_id: company?.id, operation: 'bank-import-pdf' });
+      if (e.status !== 429) captureError(e, { company_id: company?.id, operation: 'bank-import-pdf' });
       setPdfErr(e.message);
+    }
+    setPdfStage(null);
+    loadRecent();
+  };
+
+  // Reopen a past read: the stored, structured read, with no model call.
+  const reopenDoc = async (docId, filename) => {
+    setPdfErr(null); setPdfStage(`Opening the earlier read of ${filename}…`);
+    try {
+      const read = await callStatementRead({ action: 'reopen', company_id: company.id, source_document_id: docId });
+      setPdfRead({ read, doc: { id: docId, filename } });
+    } catch (e) {
+      if (e.status === 404 && e.body?.can_read) setPdfErr({ message: `${filename} has no completed read yet.`, readId: docId, filename });
+      else setPdfErr(e.message);
     }
     setPdfStage(null);
   };
@@ -12724,7 +12769,12 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
         }
       }
       if (pdfContext && insertedBts.length) {
-        callStatementRead({ action: 'link_batch', company_id: cid, read_id: pdfContext.read_id, section_key: pdfContext.section_key, import_batch_id: batchId })
+        const flaggedLines = (stmtCheck?.flagged || []);
+        callStatementRead({ action: 'link_batch', company_id: cid, read_id: pdfContext.read_id, section_key: pdfContext.section_key, import_batch_id: batchId,
+          reader_name: window.Clerk?.user?.fullName || null,
+          ack: { ticked: !!stmtAck, image_read: !!stmtCheck?.imageRead, ocr_ran: !!stmtCheck?.ocrRan, flagged_lines: flaggedLines.length,
+            ocr_unconfirmed_lines: flaggedLines.filter(f => f.flags.includes('not confirmed by local OCR')).length,
+            unreadable_lines: (stmtCheck?.errors || []).length, failed_checks: (stmtCheck?.failed || []).length } })
           .then(() => setPdfRead(pr => pr && { ...pr, read: { ...pr.read, imports: [...(pr.read.imports || []), { section_key: pdfContext.section_key, import_batch_id: batchId }] } }))
           .catch(e => captureError(e, { company_id: cid, operation: 'bank-import-pdf-link-batch' }));
       }
@@ -13218,7 +13268,37 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
             onChange={e => { const f = e.target.files[0]; e.target.value = ""; if (f) loadPdf(f); }} />
         </div>
       )}
-      {activeTab === 'import' && !rows.length && pdfErr && <div className="bi-alert bi-alert-err">{pdfErr}</div>}
+      {activeTab === 'import' && !rows.length && pdfErr && (
+        <div className="bi-alert bi-alert-err">
+          {typeof pdfErr === 'string' ? pdfErr : pdfErr.message}
+          {pdfErr?.reopenId && <> <button className="btn btn-s btn-sm" disabled={!!pdfStage} onClick={() => reopenDoc(pdfErr.reopenId, pdfErr.filename)}>Reopen the earlier read</button></>}
+          {pdfErr?.readId && <> <button className="btn btn-s btn-sm" disabled={!!pdfStage} onClick={() => readDoc(pdfErr.readId, pdfErr.filename)}>Read it now</button></>}
+        </div>
+      )}
+      {activeTab === 'import' && !rows.length && !pdfRead && !isBusinessOwner && recentDocs?.length > 0 && (
+        <div style={{ marginBottom: 14, fontSize: 12 }}>
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>Recent PDF statements</div>
+          <table className="bi-tbl">
+            <tbody>
+              {recentDocs.map(d => (
+                <tr key={d.id}>
+                  <td>{d.filename}</td>
+                  <td style={{ whiteSpace: "nowrap" }}>{fmtIE(String(d.uploaded_at).slice(0, 10))}</td>
+                  <td style={{ color: "var(--muted)" }}>
+                    {!d.read ? 'not read' : d.read.status === 'read' ? `read${d.read.mode === 'image' ? ' from page images' : ''}${d.read.imports ? ` · ${d.read.imports} section${d.read.imports === 1 ? '' : 's'} imported` : ''}`
+                      : d.read.status === 'reading' ? 'reading…' : d.read.status === 'refused' ? `refused: ${d.read.refused_reason}` : 'read failed'}
+                  </td>
+                  <td style={{ textAlign: "right" }}>
+                    {d.can_reopen
+                      ? <button className="btn btn-s btn-sm" disabled={!!pdfStage} onClick={() => reopenDoc(d.id, d.filename)} title="Opens the stored read: no new model read">Reopen</button>
+                      : d.read?.status !== 'reading' && <button className="btn btn-s btn-sm" disabled={!!pdfStage} onClick={() => readDoc(d.id, d.filename)} title="Reads it with the model (counts towards today's limit)">Read it now</button>}
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+      )}
 
       {activeTab === 'import' && alert && <div className={`bi-alert ${alert.type === "ok" ? "bi-alert-ok" : "bi-alert-err"}`}>{alert.msg}</div>}
       {activeTab === 'import' && stmtCheck && (
@@ -15452,7 +15532,7 @@ async function uploadDocument(companyId, purpose, file, purposeFields = {}) {
   const call = async body => {
     const res = await fetch('/api/uploads', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
     const json = await res.json().catch(() => ({}));
-    if (!res.ok) throw Object.assign(new Error(json.error || `HTTP ${res.status}`), { status: res.status });
+    if (!res.ok) throw Object.assign(new Error(json.error || `HTTP ${res.status}`), { status: res.status, duplicate_of: json.duplicate_of || null });
     return json;
   };
   const type = file.type === 'application/pdf' || /\.pdf$/i.test(file.name) ? 'application/pdf' : 'text/csv';

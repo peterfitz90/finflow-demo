@@ -41,7 +41,7 @@ export default withSentry(async function handler(req, res) {
     if (!UUID.test(b.upload_id || '')) return res.status(400).json({ error: 'upload_id required' });
     return res.status(200).json(await finishUpload(deps, { companyId: b.company_id, userId, userName: b.uploader_name, uploadId: b.upload_id }));
   } catch (e) {
-    if (e instanceof UploadError) return res.status(e.status).json({ error: e.message, ...(e.upload_id ? { upload_id: e.upload_id } : {}) });
+    if (e instanceof UploadError) return res.status(e.status).json({ error: e.message, ...(e.upload_id ? { upload_id: e.upload_id } : {}), ...(e.duplicate_of ? { duplicate_of: e.duplicate_of } : {}) });
     throw e;
   }
 });
