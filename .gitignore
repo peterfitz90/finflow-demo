@@ -20,3 +20,6 @@ scripts/*.local.mjs
 
 # Local regression golden files (client figures)
 tests/statements/*.local.json
+
+# OCR engine files, copied from node_modules at build time (scripts/copy-ocr-assets.mjs)
+public/ocr/

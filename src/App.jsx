@@ -11188,23 +11188,26 @@ const statementHasIssues = c => !!c && (!!c.imageRead || c.errors.length > 0 || 
 
 // Local OCR (BNK-14 step 3b), in the browser: the page images never leave the accountant's machine.
 // Returns the text of each page that has rows. onProgress(done, total).
-// The engine is the pinned tesseract.js browser build (the bundled npm copy never started its worker
-// in production); each step has a time limit, so a failure says so instead of hanging.
-const TESSERACT_URL = 'https://cdn.jsdelivr.net/npm/tesseract.js@5.1.1/dist/tesseract.esm.min.js';
+// The OCR engine is served by the app itself (public/ocr, copied from the pinned npm packages at
+// build time by scripts/copy-ocr-assets.mjs): no third-party script runs on a page showing client
+// data. Pages are rendered for OCR with the print intent, which does not wait for animation frames
+// (a tab in the background pauses those, and the OCR would never finish). Every step has a time
+// limit, so a failure reads "Local OCR did not run" instead of hanging.
+const OCR_PATHS = { workerPath: '/ocr/worker.min.js', corePath: '/ocr/core', langPath: '/ocr/lang', workerBlobURL: false, gzip: true };
 const withTimeout = (p, ms, what) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`${what} took longer than ${Math.round(ms / 1000)} s`)), ms))]);
 async function ocrPages(pdf, pages, onProgress) {
-  const mod = await withTimeout(import(/* @vite-ignore */ TESSERACT_URL), 30000, 'loading the OCR engine');
-  const T = mod.default || mod;
-  const worker = await withTimeout(T.createWorker('eng'), 60000, 'starting the OCR engine');
+  const mod = await withTimeout(import('tesseract.js'), 30000, 'loading the OCR engine');
+  const T = mod.createWorker ? mod : (mod.default || mod);
+  const worker = await withTimeout(T.createWorker('eng', 1, OCR_PATHS), 60000, 'starting the OCR engine');
   const out = {};
   try {
     let done = 0;
     for (const n of pages) {
-      const page = await pdf.getPage(n);
+      const page = await withTimeout(pdf.getPage(n), 30000, `opening page ${n}`);
       const v = page.getViewport({ scale: 2 });
       const c = document.createElement('canvas');
       c.width = v.width; c.height = v.height;
-      await page.render({ canvasContext: c.getContext('2d'), viewport: v }).promise;
+      await withTimeout(page.render({ canvasContext: c.getContext('2d'), viewport: v, intent: 'print' }).promise, 60000, `drawing page ${n}`);
       out[n] = (await withTimeout(worker.recognize(c), 60000, `reading page ${n}`)).data.text;
       onProgress(++done, pages.length);
     }
@@ -12038,7 +12041,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
       if (sorted.some(g => /^pdf/.test(g.bank_format || ''))) {
         const { data: reads } = await db.from('statement_reads').select('mode, cost_usd, imports').eq('company_id', cid).not('imports', 'eq', '[]');
         const byBatch = {};
-        for (const r of reads || []) for (const i of r.imports || []) byBatch[i.import_batch_id] = { mode: r.mode, cost_usd: Number(r.cost_usd) };
+        for (const r of reads || []) for (const i of r.imports || []) byBatch[i.import_batch_id] = { mode: r.mode, cost_usd: Number(r.cost_usd), sections: (r.imports || []).length };
         sorted.forEach(g => { if (byBatch[g.import_batch_id]) g.read = byBatch[g.import_batch_id]; });
       }
       setHistory(sorted);
@@ -12770,7 +12773,8 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
       }
       if (pdfContext && insertedBts.length) {
         const flaggedLines = (stmtCheck?.flagged || []);
-        callStatementRead({ action: 'link_batch', company_id: cid, read_id: pdfContext.read_id, section_key: pdfContext.section_key, import_batch_id: batchId,
+        // awaited, so the import history below already shows this batch's read and cost
+        await callStatementRead({ action: 'link_batch', company_id: cid, read_id: pdfContext.read_id, section_key: pdfContext.section_key, import_batch_id: batchId,
           reader_name: window.Clerk?.user?.fullName || null,
           ack: { ticked: !!stmtAck, image_read: !!stmtCheck?.imageRead, ocr_ran: !!stmtCheck?.ocrRan, flagged_lines: flaggedLines.length,
             ocr_unconfirmed_lines: flaggedLines.filter(f => f.flags.includes('not confirmed by local OCR')).length,
@@ -13381,7 +13385,9 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
                           }}>
                             {FORMAT_LABEL[batch.bank_format] || batch.bank_format}
                           </span>
-                          {batch.read && <span style={{ marginLeft: 6, fontSize: 10, color: "var(--muted)" }}>read cost US${batch.read.cost_usd.toFixed(2)}</span>}
+                          {batch.read && <span style={{ marginLeft: 6, fontSize: 10, color: "var(--muted)" }} title={batch.read.sections > 1 ? 'One read of the statement, shared by the sections imported from it' : undefined}>
+                            read cost US${batch.read.cost_usd.toFixed(2)}{batch.read.sections > 1 ? ` (one read, ${batch.read.sections} sections)` : ''}
+                          </span>}
                         </>) : <span style={{ color: "var(--dim)", fontSize: 11 }}>—</span>}
                       </td>
                       <td className="r mono" style={{ color: batch.journalOnly ? "var(--dim)" : undefined, fontSize: batch.journalOnly ? 11 : undefined }}>
