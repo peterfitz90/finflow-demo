@@ -11732,7 +11732,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
   // right one; defaults to the first active account (today, every company has exactly one).
   useEffect(() => {
     if (!companyId) { setBankAccounts([]); setSelectedBankAccountId(null); return; }
-    supabase.from('bank_accounts').select('id, display_name, nominal_code')
+    supabase.from('bank_accounts').select('id, display_name, nominal_code, currency')
       .eq('company_id', companyId).eq('is_active', true).order('created_at')
       .then(({ data }) => {
         const accts = data || [];

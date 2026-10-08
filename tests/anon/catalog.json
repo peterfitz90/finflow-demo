@@ -15,6 +15,7 @@
     "checklists",
     "companies",
     "company_directors",
+    "company_read_limits",
     "company_statutory_profile",
     "contracts",
     "customers",

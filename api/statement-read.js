@@ -9,7 +9,8 @@
 // Reads use the caller's token (RLS); the service role only downloads the stored PDF, writes the
 // read record and fills in the document's period, after the role check.
 import { createClient } from '@supabase/supabase-js';
-import { withSentry } from './_sentry.js';
+import { withSentry, captureError, flushSentry } from './_sentry.js';
+import { readCapStatus, irishDayStart } from './_read-cap.js';
 import { requireAccountant, AuthError } from './_auth.js';
 import { AI_MODEL, callClaude } from './_anthropic.js';
 import { readStatementPdf } from './_statement-pdf-read.js';
@@ -65,6 +66,15 @@ export default withSentry(async function handler(req, res) {
   }
 
   if (doc.mime !== 'application/pdf') return res.status(400).json({ error: 'This document is not a PDF' });
+  // the per-company daily cap on model reads (statement_reads drives it)
+  const today = must(await serviceDb.from('statement_reads').select('status, tokens_in, cost_usd').eq('company_id', b.company_id).gte('created_at', irishDayStart()), 'reads today') || [];
+  const override = must(await serviceDb.from('company_read_limits').select('max_reads_per_day, max_usd_per_day').eq('company_id', b.company_id).maybeSingle(), 'read limits');
+  const cap = readCapStatus(today, override);
+  if (cap.reached) {
+    captureError(new Error('Statement read cap reached'), { company_id: b.company_id, operation: 'statement-read-cap', reads_today: cap.reads_today, usd_today: cap.usd_today });
+    await flushSentry();
+    return res.status(429).json({ error: cap.message, cap });
+  }
   const dl = await serviceDb.storage.from('source-documents').download(doc.path);
   if (dl.error || !dl.data) return res.status(404).json({ error: 'The stored statement could not be read' });
   const buf = Buffer.from(await dl.data.arrayBuffer());
