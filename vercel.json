@@ -11,7 +11,8 @@
     "api/statements-approval.js": { "maxDuration": 60, "includeFiles": "api/_fonts/**" },
     "api/refresh-stats.js":   { "maxDuration": 30 },
     "api/uploads.js":         { "maxDuration": 60 },
-    "api/uploads-cleanup.js": { "maxDuration": 60 }
+    "api/uploads-cleanup.js": { "maxDuration": 60 },
+    "api/statement-read.js":  { "maxDuration": 300, "includeFiles": "node_modules/pdfjs-dist/legacy/build/**" }
   },
   "crons": [
     { "path": "/api/refresh-stats", "schedule": "0 * * * *" },

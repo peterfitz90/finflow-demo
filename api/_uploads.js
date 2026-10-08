@@ -59,7 +59,10 @@ export async function startUpload(deps, { companyId, userId, userName, purpose, 
   const p = PURPOSES[purpose];
   if (!p) throw await refuse(`Unknown purpose "${String(purpose).slice(0, 40)}"`);
   if (!(Number(size) > 0)) throw await refuse('The file is empty');
-  if (Number(size) > p.maxBytes) throw await refuse(`The file is ${fmtMB(Number(size))}; the limit is ${fmtMB(p.maxBytes)}`);
+  if (Number(size) > p.maxBytes) throw await refuse(purpose === 'bank_statement'
+    // a statement this large is almost always photographed pages (Peter, 10 Oct 2026)
+    ? `This file is ${fmtMB(Number(size))}, over the ${fmtMB(p.maxBytes)} size limit, and Ledgrly cannot read photographed statements yet. Ask for the PDF downloaded from online banking.`
+    : `The file is ${fmtMB(Number(size))}; the limit is ${fmtMB(p.maxBytes)}`);
   if (!p.types.includes(base.declared_type)) throw await refuse(`${p.types.includes('text/csv') ? 'Only PDF or CSV' : 'Only PDF'} files are accepted here`);
   if (purpose === 'signed_copy') {
     if (!['full', 'abridged'].includes(kind)) throw await refuse('Choose the full set or the abridged copy');

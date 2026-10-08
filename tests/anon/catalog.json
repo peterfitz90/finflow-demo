@@ -46,6 +46,7 @@
     "revenue_review_items",
     "settlement_allocations",
     "source_documents",
+    "statement_reads",
     "suggested_journals",
     "transaction_rules",
     "uploads",

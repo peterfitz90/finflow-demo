@@ -15,7 +15,7 @@
 //     balance (number, or null where the statement prints none), type,
 //     nominal_hint? (a fixed coding, e.g. '6500' for a Revolut fee), fee_of? (the paired row id) }
 
-export const FORMAT_LABEL = { aib: 'AIB', revolut: 'Revolut', wise: 'Wise', boi: 'Bank of Ireland' };
+export const FORMAT_LABEL = { aib: 'AIB', revolut: 'Revolut', wise: 'Wise', boi: 'Bank of Ireland', pdf: 'PDF statement', 'pdf-image': 'PDF (image read)' };
 export const BANK_CHARGES_NOMINAL = '6500';
 
 // ── CSV ───────────────────────────────────────────────────────────────────────────────────────
@@ -281,6 +281,18 @@ export function checkBalances(rows) {
   return breaks.length < row.breaks.length ? { mode: 'day', checked, breaks } : { mode: 'row', ...row };
 }
 
+// ── Date check ────────────────────────────────────────────────────────────────────────────────
+// rows: oldest first. Every row's date must not be earlier than the row before it, and must fall
+// inside the statement period when one is known. Rows that break either are listed for review.
+export function checkDates(rows, { start = null, end = null } = {}) {
+  const outOfSequence = [], outside = [];
+  rows.forEach((r, i) => {
+    if (i > 0 && r.date < rows[i - 1].date) outOfSequence.push({ id: r.revolut_id, date: r.date, after: rows[i - 1].date });
+    if ((start && r.date < start) || (end && r.date > end)) outside.push({ id: r.revolut_id, date: r.date });
+  });
+  return { checked: rows.length, outOfSequence, outside };
+}
+
 // ── Entry point ───────────────────────────────────────────────────────────────────────────────
 // -> { format, label, rows, errors, balance } or { format: null, refused: message }.
 export function parseStatement(text) {
@@ -292,5 +304,5 @@ export function parseStatement(text) {
   const hIdx = header.map(H);
   const idx = name => hIdx.indexOf(H(name));
   const parsed = { aib: parseAIB, revolut: parseRevolut, wise: parseWise, boi: parseBOI }[format](records, idx);
-  return { format, label: FORMAT_LABEL[format], rows: parsed.rows, errors: parsed.errors, balance: checkBalances(parsed.rows) };
+  return { format, label: FORMAT_LABEL[format], rows: parsed.rows, errors: parsed.errors, balance: checkBalances(parsed.rows), dates: checkDates(parsed.rows) };
 }

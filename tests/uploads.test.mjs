@@ -113,7 +113,7 @@ test('a 6 MB statement goes straight to storage, is checked by the server, and i
 test('refusals at start are recorded with who and why', async () => {
   const f = fakes({ approvals: [{ id: 'old', company_id: CO, status: 'superseded' }] });
   const tries = [
-    [{ purpose: 'bank_statement', filename: 'big.pdf', size: 33 * MB, type: 'application/pdf' }, /33\.0 MB; the limit is 32\.0 MB/],
+    [{ purpose: 'bank_statement', filename: 'big.pdf', size: 76 * MB, type: 'application/pdf' }, /76\.0 MB, over the 32\.0 MB size limit, and Ledgrly cannot read photographed statements yet\. Ask for the PDF downloaded from online banking/],
     [{ purpose: 'signed_copy', filename: 's.pdf', size: 11 * MB, type: 'application/pdf', approvalId: 'old', kind: 'full' }, /limit is 10\.0 MB/],
     [{ purpose: 'prior_accounts', filename: 'a.xlsx', size: 1000, type: 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet' }, /Only PDF/],
     [{ purpose: 'bank_statement', filename: 'e.csv', size: 0, type: 'text/csv' }, /empty/],

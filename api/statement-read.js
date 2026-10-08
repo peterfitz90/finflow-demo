@@ -1,0 +1,97 @@
+// POST /api/statement-read (BNK-14 step 3a). Accountant only (requireAccountant on company_id).
+//   read        { company_id, source_document_id }  -> the statement read and verified: sections,
+//               rows, checks, cost. Recorded in statement_reads; the document's period and its
+//               retention date (six years after the financial year ends) are filled in.
+//   pdf_url     { company_id, source_document_id } -> a short-lived signed URL, so the review screen
+//               can show the page beside the rows
+//   link_batch  { company_id, read_id, section_key, import_batch_id } -> records which import batch
+//               came from which section of the read
+// Reads use the caller's token (RLS); the service role only downloads the stored PDF, writes the
+// read record and fills in the document's period, after the role check.
+import { createClient } from '@supabase/supabase-js';
+import { withSentry } from './_sentry.js';
+import { requireAccountant, AuthError } from './_auth.js';
+import { AI_MODEL, callClaude } from './_anthropic.js';
+import { readStatementPdf } from './_statement-pdf-read.js';
+import { fiscalYearContaining, fiscalConfig } from '../src/shared/fiscalYear.js';
+
+export const config = { api: { bodyParser: { sizeLimit: '16kb' } } };
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const must = (r, what) => { if (r.error) throw new Error(`${what}: ${r.error.message}`); return r.data; };
+const addYears = (iso, n) => `${Number(iso.slice(0, 4)) + n}${iso.slice(4)}`;
+
+// What the screen needs from a read: sections with their rows, checks and row errors (no raw chunks).
+function forScreen(out) {
+  return {
+    period: out.result.period, summary: out.result.summary,
+    sections: out.result.sections.map(s => ({ key: s.key, label: s.label, currency: s.currency, ok: s.ok, verifiable: s.verifiable,
+      checks: s.checks.map(({ breaks, ...c }) => ({ ...c, breaks: (breaks || []).map(b => ({ date: b.date, expected: b.expected, printed: b.printed })) })),
+      errors: s.errors, rows: s.rows.map(r => ({ revolut_id: r.revolut_id, date: r.date, description: r.description, amount: r.amount, balance: r.balance, currency: r.currency, page: r.page, flags: r.flags || null, status: r.status })) })),
+  };
+}
+
+export default withSentry(async function handler(req, res) {
+  if (req.method !== 'POST') return res.status(405).end();
+  const b = req.body ?? {};
+  if (!['read', 'pdf_url', 'link_batch'].includes(b.action)) return res.status(400).json({ error: 'Unknown action' });
+  if (!UUID.test(b.company_id || '')) return res.status(400).json({ error: 'company_id required' });
+  let userId;
+  try { userId = await requireAccountant(req, b.company_id); }
+  catch (e) { if (e instanceof AuthError) return res.status(e.status).json({ error: e.message }); throw e; }
+
+  const url = process.env.SUPABASE_URL?.trim(), anonKey = process.env.SUPABASE_ANON_KEY?.trim(), serviceKey = process.env.SUPABASE_SERVICE_ROLE_KEY?.trim();
+  if (!url || !anonKey || !serviceKey) return res.status(500).json({ error: 'Server not configured' });
+  const token = (req.headers.authorization || '').replace(/^Bearer\s+/i, '');
+  const userDb = createClient(url, anonKey, { accessToken: async () => token, auth: { persistSession: false } });
+  const serviceDb = createClient(url, serviceKey, { auth: { persistSession: false } });
+  res.setHeader('Cache-Control', 'no-store');
+
+  if (b.action === 'link_batch') {
+    if (!UUID.test(b.read_id || '') || !UUID.test(b.import_batch_id || '')) return res.status(400).json({ error: 'read_id and import_batch_id required' });
+    const read = must(await userDb.from('statement_reads').select('id, imports').eq('id', b.read_id).eq('company_id', b.company_id).maybeSingle(), 'read');
+    if (!read) return res.status(404).json({ error: 'Read not found' });
+    const imports = [...(read.imports || []), { section_key: String(b.section_key || '').slice(0, 80), import_batch_id: b.import_batch_id, at: new Date().toISOString(), by: userId }];
+    must(await serviceDb.from('statement_reads').update({ imports }).eq('id', read.id), 'link batch');
+    return res.status(200).json({ ok: true });
+  }
+
+  if (!UUID.test(b.source_document_id || '')) return res.status(400).json({ error: 'source_document_id required' });
+  const doc = must(await userDb.from('source_documents').select('id, company_id, purpose, path, mime, filename, period_end, retain_until').eq('id', b.source_document_id).eq('company_id', b.company_id).maybeSingle(), 'document');
+  if (!doc || doc.purpose !== 'bank_statement') return res.status(404).json({ error: 'Statement not found' });
+
+  if (b.action === 'pdf_url') {
+    const s = must(await serviceDb.storage.from('source-documents').createSignedUrl(doc.path, 300), 'signed url');
+    return res.status(200).json({ url: s.signedUrl, expires_in: 300 });
+  }
+
+  if (doc.mime !== 'application/pdf') return res.status(400).json({ error: 'This document is not a PDF' });
+  const dl = await serviceDb.storage.from('source-documents').download(doc.path);
+  if (dl.error || !dl.data) return res.status(404).json({ error: 'The stored statement could not be read' });
+  const buf = Buffer.from(await dl.data.arrayBuffer());
+  const model = AI_MODEL.readStatement;
+  const base = { company_id: b.company_id, source_document_id: doc.id, mode: 'text', model, created_by: userId, created_by_name: (b.reader_name || '').slice(0, 120) || null };
+  let out;
+  try {
+    out = await readStatementPdf({ callClaude }, { buf, model, companyId: b.company_id });
+  } catch (e) {
+    must(await serviceDb.from('statement_reads').insert({ ...base, status: 'failed', refused_reason: e.message.slice(0, 500) }), 'record the read');
+    return res.status(502).json({ error: `The statement could not be read: ${e.message}` });
+  }
+  const cost = { tokens_in: out.tokens?.input || 0, tokens_out: out.tokens?.output || 0, cost_usd: Number((out.cost?.usd || 0).toFixed(4)), ms: out.ms || null, pages: out.pages, chunks: out.chunks?.length || 0 };
+  if (out.refused) {
+    const rec = must(await serviceDb.from('statement_reads').insert({ ...base, ...cost, status: 'refused', refused_reason: out.refused }).select('id').single(), 'record the read');
+    return res.status(200).json({ read_id: rec.id, refused: out.refused, kind: out.kind, pages: out.pages, cost_usd: cost.cost_usd });
+  }
+  const screen = forScreen(out);
+  const rec = must(await serviceDb.from('statement_reads').insert({ ...base, ...cost, status: 'read', period_start: screen.period.start, period_end: screen.period.end,
+    summary: screen.summary, result: screen }).select('id').single(), 'record the read');
+  // the document's period and retention date: six years after the financial year that contains the
+  // statement's last day ends (Peter, 8 Oct 2026). Filled in once, never moved.
+  if (screen.period.end && !doc.period_end) {
+    const company = must(await userDb.from('companies').select('year_end_month, fy_end_day').eq('id', b.company_id).maybeSingle(), 'company');
+    const periods = must(await userDb.from('financial_periods').select('period_start, period_end').eq('company_id', b.company_id), 'periods') || [];
+    const fy = fiscalYearContaining(screen.period.end, fiscalConfig(company, periods));
+    must(await serviceDb.from('source_documents').update({ period_start: screen.period.start, period_end: screen.period.end, retain_until: addYears(fy.end, 6) }).eq('id', doc.id), 'retention');
+  }
+  return res.status(200).json({ read_id: rec.id, kind: 'text', pages: out.pages, chunks: out.chunks.length, cost_usd: cost.cost_usd, ms: cost.ms, ...screen });
+});

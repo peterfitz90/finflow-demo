@@ -116,3 +116,11 @@ test('regression: the 383-row Revolut export balances only with the fees as thei
   assert.deepEqual(new Set(breaks.map(b => b.date)), new Set(fees.map(f => f.date)));
   assert.equal(breaks.length, 18);
 });
+
+test('dates: a row out of sequence is listed for review (every layout)', () => {
+  const p = parseStatement(['Date,Details,Debit,Credit,Balance', '05/01/2026,A,,10.00,110.00', '07/01/2026,B,1.00,,109.00', '06/01/2026,C,1.00,,108.00', '08/01/2026,D,1.00,,107.00'].join('\n'));
+  assert.equal(p.dates.outOfSequence.length, 1);
+  assert.equal(p.dates.outOfSequence[0].date, '2026-01-06');
+  const ok = parseStatement(['Date,Details,Debit,Credit,Balance', '05/01/2026,A,,10.00,110.00', '06/01/2026,B,1.00,,109.00'].join('\n'));
+  assert.equal(ok.dates.outOfSequence.length, 0);
+});

@@ -113,8 +113,11 @@ test('end to end on a generated PDF: text extraction, page chunks, fake model, v
   assert.equal((await chunkPdf(buf, 2)).length, 2);
   const calls = [];
   const callClaude = async ({ messages }) => {
-    const n = await PDFDocument.load(Buffer.from(messages[0].content[0].source.data, 'base64')).then(d => d.getPageCount());
-    const first = calls.reduce((t, c) => t + c, 0) + 1; calls.push(n);
+    const chunkBuf = Buffer.from(messages[0].content[0].source.data, 'base64');
+    const n = await PDFDocument.load(chunkBuf).then(d => d.getPageCount());
+    // which pages this chunk holds, from its own text (chunks are read in parallel, in any order)
+    const t1 = (await pageTexts(chunkBuf))[0];
+    const first = /TEST BANK Statement/.test(t1) ? 1 : Number(t1.match(/Page (\d+)/)[1]); calls.push([first, n]);
     const pages = Array.from({ length: n }, (_, k) => first + k);
     const toText = s => s && s.replace('€', 'EUR ');
     const rows = LINES.filter(l => pages.includes(l.page)).map(l => ({ ...row(l, l.page - first + 1), money_in_text: toText(row(l).money_in_text), money_out_text: toText(row(l).money_out_text), balance_text: toText(row(l).balance_text) }));
@@ -122,7 +125,7 @@ test('end to end on a generated PDF: text extraction, page chunks, fake model, v
     return { ok: true, status: 200, text: JSON.stringify(result), data: { usage: { input_tokens: 1000 * n, output_tokens: 300 }, stop_reason: 'end_turn' } };
   };
   const out = await readStatementPdf({ callClaude }, { buf, model: 'claude-sonnet-5-5', chunkPages: 2 });
-  assert.deepEqual(calls, [2, 1]);
+  assert.deepEqual(calls.sort((x, y) => x[0] - y[0]), [[1, 2], [3, 1]]);
   assert.equal(out.result.summary.ok, true, JSON.stringify(out.result.sections[0]?.checks));
   assert.equal(out.result.summary.rows, 5);
   assert.deepEqual(out.tokens, { input: 3000, output: 600 });
@@ -134,7 +137,7 @@ test('a scanned file is refused before any model call', async () => {
   let called = 0;
   const out = await readStatementPdf({ callClaude: async () => { called++; return {}; } }, { buf: Buffer.from(await doc.save()), model: 'claude-sonnet-5-5' });
   assert.deepEqual([out.kind, called], ['scanned', 0]);
-  assert.match(out.refused, /Scanned or photographed/);
+  assert.match(out.refused, /cannot read photographed or scanned statements yet\. Ask for the PDF downloaded from online banking/);
 });
 
 test('a statement of fees (or any other document) is refused with its reason after one read', async () => {
@@ -160,4 +163,14 @@ test('amounts: an overdrawn balance with a trailing minus (PTSB) is negative', (
   assert.equal(readPrintedAmount('1,234.50-').value, -1234.5);
   assert.equal(readPrintedAmount('-').value, null);
   assert.equal(readPrintedAmount('12.30').value, 12.3);
+});
+
+test('dates: a row out of sequence fails the check and is flagged for review', () => {
+  const rows = LINES.map(l => row(l));
+  rows[3] = { ...rows[3], date_text: '02 Jul 2026' };               // printed after 10 Jul
+  const texts = [...TEXTS]; texts[1] = texts[1].replace('15 Jul 2026', '02 Jul 2026');
+  const v = verifyStatement({ chunks: oneChunk(rows), pageTexts: texts });
+  assert.ok(v.sections[0].checks.some(c => c.check === 'dates in sequence' && !c.ok));
+  assert.deepEqual(v.sections[0].rows.filter(r => r.flags).map(r => [r.date, r.flags]), [['2026-07-02', ['date out of sequence']]]);
+  assert.equal(v.summary.ok, false);
 });

@@ -11170,13 +11170,160 @@ function Journals({ period, selPeriod, companyName, companyId: propCompanyId, re
   );
 }
 
+// BNK-14 step 3a: the reviewed PDF statement, before any of it enters the import. One section per
+// account, currency or pocket; the accountant matches each to a bank account. The checks, row errors
+// and flagged rows are shown with the page beside the rows; a section then goes through the same
+// preview as a CSV (coding, duplicate check, transfers, VAT pre-check, balance tick).
+async function callStatementRead(body) {
+  const token = await window.Clerk?.session?.getToken();
+  const res = await fetch('/api/statement-read', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
+  const json = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(json.error || `HTTP ${res.status}`);
+  return json;
+}
+
+// Whether a statement's own checks found anything the accountant must look at before posting.
+const statementHasIssues = c => !!c && (c.errors.length > 0 || c.balance.breaks.length > 0 || (c.failed || []).length > 0
+  || (c.flagged || []).length > 0 || (c.dates?.outOfSequence || []).length > 0);
+
+function PdfStatementReview({ company, read, doc, bankAccounts, onUse, onClose }) {
+  const sections = read.sections || [];
+  const [secKey, setSecKey] = useState(sections[0]?.key);
+  const [acct, setAcct] = useState(() => (bankAccounts.length === 1 ? Object.fromEntries(sections.map(s => [s.key, bankAccounts[0].id])) : {}));
+  const sec = sections.find(s => s.key === secKey) || sections[0];
+  const [page, setPage] = useState(sec?.rows?.[0]?.page || 1);
+  const [pdf, setPdf] = useState(null);
+  const [pdfErr, setPdfErr] = useState(null);
+  const canvasRef = useRef(null);
+  useEffect(() => {
+    let off = false;
+    (async () => {
+      try {
+        const { url } = await callStatementRead({ action: 'pdf_url', company_id: company.id, source_document_id: doc.id });
+        const pdfjs = await import('pdfjs-dist');
+        const { default: workerUrl } = await import('pdfjs-dist/build/pdf.worker.min.mjs?url');
+        pdfjs.GlobalWorkerOptions.workerSrc = workerUrl;
+        const d = await pdfjs.getDocument({ url }).promise;
+        if (!off) setPdf(d);
+      } catch (e) { if (!off) setPdfErr(e.message); }
+    })();
+    return () => { off = true; };
+  }, [company.id, doc.id]);
+  useEffect(() => {
+    if (!pdf || !canvasRef.current) return;
+    let task = null, off = false;
+    (async () => {
+      const p = await pdf.getPage(Math.min(Math.max(page, 1), pdf.numPages));
+      if (off || !canvasRef.current) return;
+      const width = canvasRef.current.parentElement?.clientWidth || 600;
+      const v = p.getViewport({ scale: width / p.getViewport({ scale: 1 }).width });
+      const c = canvasRef.current;
+      c.width = v.width; c.height = v.height;
+      task = p.render({ canvasContext: c.getContext('2d'), viewport: v });
+      await task.promise.catch(() => {});
+    })();
+    return () => { off = true; task?.cancel?.(); };
+  }, [pdf, page]);
+  if (!sec) return null;
+  const account = bankAccounts.find(a => a.id === acct[sec.key]);
+  const currencyMismatch = account && sec.currency && account.currency && account.currency !== sec.currency;
+  const fmt = v => (v == null ? '' : Math.abs(v).toLocaleString('en-IE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
+  const imported = new Set((read.imports || []).map(i => i.section_key));
+  return (
+    <div style={{ display: "grid", gridTemplateColumns: "minmax(0, 1.15fr) minmax(0, 1fr)", gap: 14, alignItems: "start" }}>
+      <div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline", gap: 10, flexWrap: "wrap", marginBottom: 8 }}>
+          <div>
+            <div style={{ fontWeight: 700 }}>{doc.filename}</div>
+            <div style={{ fontSize: 11, color: "var(--muted)" }}>
+              {read.pages} page{read.pages === 1 ? '' : 's'} read from the PDF's text · {sections.length} section{sections.length === 1 ? '' : 's'}
+              {read.period?.start || read.period?.end ? ` · ${read.period.start ? fmtIE(read.period.start) : '?'} to ${read.period.end ? fmtIE(read.period.end) : '?'}` : ''}
+              {` · read cost US$${Number(read.cost_usd || 0).toFixed(3)}`}{read.ms ? ` · ${Math.round(read.ms / 1000)} s` : ''}
+            </div>
+          </div>
+          <button className="btn btn-s btn-sm" onClick={onClose}>Close</button>
+        </div>
+        {sections.length > 1 && (
+          <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8 }}>
+            {sections.map(s => (
+              <button key={s.key} className="btn btn-s btn-sm" onClick={() => { setSecKey(s.key); setPage(s.rows[0]?.page || 1); }}
+                style={{ fontWeight: s.key === sec.key ? 700 : 400, borderColor: s.key === sec.key ? 'var(--teal)' : undefined }}>
+                {s.label}{s.currency ? ` (${s.currency})` : ''} · {s.rows.length}{imported.has(s.key) ? ' · imported' : ''}
+              </button>
+            ))}
+          </div>
+        )}
+        <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap", marginBottom: 8 }}>
+          <label htmlFor="pdf-acct" style={{ fontSize: 12, fontWeight: 600 }}>Import into</label>
+          <select id="pdf-acct" className="f-input" style={{ width: "auto" }} value={acct[sec.key] || ''} onChange={e => setAcct(a => ({ ...a, [sec.key]: e.target.value }))}>
+            <option value="">Choose the bank account…</option>
+            {bankAccounts.map(a => <option key={a.id} value={a.id}>{a.display_name}{a.currency ? ` (${a.currency})` : ''}</option>)}
+          </select>
+          {currencyMismatch && <span style={{ color: "var(--red)", fontSize: 12 }}>This section is in {sec.currency}; that account is {account.currency}.</span>}
+          {!bankAccounts.length && <span style={{ color: "var(--red)", fontSize: 12 }}>Add a bank account first (Accounts/Balances).</span>}
+        </div>
+        <ul style={{ listStyle: "none", margin: "0 0 8px", padding: 0, fontSize: 12 }}>
+          {sec.checks.map(c => (
+            <li key={c.check} style={{ display: "flex", gap: 6 }}>
+              <span aria-hidden style={{ fontWeight: 700, width: 12, color: c.ok ? "var(--green)" : "var(--red)" }}>{c.ok ? '✓' : '✗'}</span>
+              <span>{c.check}{c.ok ? '' : `: ${c.detail}`}</span>
+            </li>
+          ))}
+          {!sec.verifiable && <li style={{ color: "var(--red)" }}>No balances printed for this section, so its figures cannot be checked against the statement.</li>}
+        </ul>
+        {sec.errors.length > 0 && (
+          <div className="bi-alert bi-alert-err" style={{ fontSize: 12 }}>
+            {sec.errors.length} line{sec.errors.length === 1 ? '' : 's'} could not be read and will not be imported:
+            <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>{sec.errors.slice(0, 20).map((e, i) => <li key={i}><button className="btn btn-s btn-sm" style={{ padding: "0 6px" }} onClick={() => setPage(e.page)}>page {e.page}</button> {e.message}</li>)}</ul>
+          </div>
+        )}
+        <div style={{ maxHeight: 420, overflow: "auto", border: "1px solid var(--border)", borderRadius: 6 }}>
+          <table className="bi-tbl">
+            <thead><tr><th>Date</th><th>Description</th><th className="r">In</th><th className="r">Out</th><th className="r">Balance</th><th>Page</th></tr></thead>
+            <tbody>
+              {sec.rows.map(r => (
+                <tr key={r.revolut_id} onClick={() => setPage(r.page)} style={r.flags ? { background: "rgba(220,38,38,0.08)" } : undefined} title={r.flags ? r.flags.join('; ') : undefined}>
+                  <td style={{ whiteSpace: "nowrap" }}>{fmtIE(r.date)}{r.flags ? ' ⚑' : ''}</td>
+                  <td>{r.description}</td>
+                  <td className="r" style={{ textAlign: "right" }}>{r.amount > 0 ? fmt(r.amount) : ''}</td>
+                  <td className="r" style={{ textAlign: "right" }}>{r.amount < 0 ? fmt(r.amount) : ''}</td>
+                  <td className="r" style={{ textAlign: "right" }}>{r.balance == null ? '—' : `${r.balance < 0 ? '-' : ''}${fmt(r.balance)}`}</td>
+                  <td>{r.page}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
+          <button className="btn btn-p btn-sm" disabled={!account || currencyMismatch || !sec.rows.length} onClick={() => onUse(sec, account.id)}>
+            Preview the import of {sec.rows.length} line{sec.rows.length === 1 ? '' : 's'}
+          </button>
+          <span style={{ fontSize: 11, color: "var(--muted)" }}>Next: coding, the duplicate check and the statement checks, as for a CSV. Nothing is posted until you post it.</span>
+        </div>
+      </div>
+      <div style={{ position: "sticky", top: "calc(env(safe-area-inset-top, 0px) + 8px)" }}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6, fontSize: 12 }}>
+          <button className="btn btn-s btn-sm" disabled={!pdf || page <= 1} onClick={() => setPage(p => p - 1)}>‹ Previous</button>
+          <span>Page {page}{pdf ? ` of ${pdf.numPages}` : ''}</span>
+          <button className="btn btn-s btn-sm" disabled={!pdf || page >= pdf.numPages} onClick={() => setPage(p => p + 1)}>Next ›</button>
+        </div>
+        <div style={{ border: "1px solid var(--border)", borderRadius: 6, background: "#fff", minHeight: 200 }}>
+          {pdfErr ? <div style={{ padding: 12, color: "var(--red)", fontSize: 12 }}>The page could not be shown: {pdfErr}</div>
+            : <canvas ref={canvasRef} style={{ width: "100%", display: "block" }} aria-label={`Statement page ${page}`} />}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ─── BANK IMPORT HELPERS ──────────────────────────────────────────────────────
 // BNK-14: what the statement's own checks found. Rows that could not be read are never posted;
 // balance breaks mean a parsed amount does not match the statement. Either needs the accountant's
 // acknowledgement before anything posts.
 function StatementCheckPanel({ check, ack, onAck }) {
   const { errors, balance, label } = check;
-  const issues = errors.length > 0 || balance.breaks.length > 0;
+  const failed = check.failed || [], flagged = check.flagged || [], outOfSeq = check.dates?.outOfSequence || [];
+  const issues = statementHasIssues(check);
   if (!issues) {
     return balance.mode === 'none'
       ? <div className="bi-alert" style={{ fontSize: 12 }}>This {label} file prints no running balance, so its amounts could not be checked against it.</div>
@@ -11189,7 +11336,7 @@ function StatementCheckPanel({ check, ack, onAck }) {
           <div style={{ fontWeight: 700 }}>{errors.length} row{errors.length === 1 ? '' : 's'} could not be read and will not be imported</div>
           <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>
             {errors.slice(0, 20).map(e => (
-              <li key={e.line}>Line {e.line}: {e.message}{e.raw?.date || e.raw?.description ? ` (${[e.raw.date, e.raw.description].filter(Boolean).join(', ')})` : ''}</li>
+              <li key={`${e.line}-${e.message}`}>{typeof e.line === 'number' ? `Line ${e.line}` : e.line}: {e.message}{e.raw?.date || e.raw?.description ? ` (${[e.raw.date, e.raw.description].filter(Boolean).join(', ')})` : ''}</li>
             ))}
             {errors.length > 20 && <li>and {errors.length - 20} more</li>}
           </ul>
@@ -11203,6 +11350,21 @@ function StatementCheckPanel({ check, ack, onAck }) {
               <li key={`${b.date}-${i}`}>{fmtIE(b.date)}: the amounts give {fmtEUR(b.expected)}, the statement prints {fmtEUR(b.printed)} (difference {fmtEUR(Math.round((b.printed - b.expected) * 100) / 100)})</li>
             ))}
             {balance.breaks.length > 20 && <li>and {balance.breaks.length - 20} more</li>}
+          </ul>
+        </div>
+      )}
+      {failed.length > 0 && (
+        <div style={{ marginBottom: 8 }}>
+          <div style={{ fontWeight: 700 }}>Statement checks that failed</div>
+          <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>{failed.map(f => <li key={f}>{f}</li>)}</ul>
+        </div>
+      )}
+      {(flagged.length > 0 || outOfSeq.length > 0) && (
+        <div style={{ marginBottom: 8 }}>
+          <div style={{ fontWeight: 700 }}>{flagged.length + outOfSeq.length} line{flagged.length + outOfSeq.length === 1 ? '' : 's'} flagged for review</div>
+          <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>
+            {flagged.slice(0, 20).map((f, i) => <li key={`f${i}`}>{fmtIE(f.date)} {f.description}: {f.flags.join('; ')}</li>)}
+            {outOfSeq.slice(0, 20).map((o, i) => <li key={`o${i}`}>{fmtIE(o.date)}: date out of sequence (after {fmtIE(o.after)})</li>)}
           </ul>
         </div>
       )}
@@ -11487,7 +11649,7 @@ class BankImportErrorBoundary extends React.Component {
   }
 }
 
-const BankImport = React.memo(function BankImport({ companyId, isActive, company }) {
+const BankImport = React.memo(function BankImport({ companyId, isActive, company, isBusinessOwner = false }) {
   const { user } = useUser();
   const { accounts: coaAccounts, refetch: coaRefetch } = useChartOfAccounts(companyId);
   const { rules: txRules, refetch: txRulesRefetch } = useTransactionRules(companyId);
@@ -11510,7 +11672,14 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
   const [stmtCheck, setStmtCheck] = useState(null);
   const [stmtAck, setStmtAck] = useState(false);
   const [lockPrompt, setLockPrompt] = useState(null);
-  const stmtIssues = !!stmtCheck && (stmtCheck.errors.length > 0 || stmtCheck.balance.breaks.length > 0);
+  const stmtIssues = statementHasIssues(stmtCheck);
+  // BNK-14 step 3a: the PDF statement being imported (upload, read, review), and the read and
+  // section the current preview came from (linked to the import batch after posting).
+  const [pdfStage, setPdfStage] = useState(null);
+  const [pdfErr, setPdfErr] = useState(null);
+  const [pdfRead, setPdfRead] = useState(null);       // { read, doc: { id, filename } }
+  const [pdfContext, setPdfContext] = useState(null); // { read_id, section_key }
+  const pdfRef = useRef(null);
   const [catProgress, setCatProgress] = useState(null); // null | { done, total, msg }
   const cancelCatRef = useRef(false);
   const [history, setHistory] = useState([]);
@@ -11914,7 +12083,8 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
     const fmt = statement.format;
     setBankFormat(fmt);
     const parsed = statement.rows;
-    setStmtCheck({ errors: statement.errors, balance: statement.balance, label: statement.label });
+    setStmtCheck({ errors: statement.errors, balance: statement.balance, dates: statement.dates, label: statement.label });
+    setPdfContext(null);
     if (!parsed.length) {
       setAlert({ type: "err", msg: statement.errors.length
         ? `None of the rows in this ${statement.label} file could be read: see the list below.`
@@ -11922,6 +12092,15 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
       return;
     }
 
+    await runPreview(parsed, fmt, file.name);
+    } finally {
+      loadingRef.current = false;
+    }
+  };
+
+  // The preview after parsing, shared by the CSV and PDF imports (BNK-14): the duplicate check,
+  // learned payees, rules and AI coding. The caller holds loadingRef.
+  const runPreview = async (parsed, fmt, displayName) => {
     // STEP 1: Render the table immediately — don't wait for Supabase
     const quickNom = {}, quickConf = {};
     parsed.forEach(r => { quickNom[r.revolut_id] = r.nominal_hint || suggestNominalFallback(r.description, r.amount); quickConf[r.revolut_id] = r.nominal_hint ? "high" : "low"; });
@@ -12080,7 +12259,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
       sessionStorage.setItem('ledgrly_import_session', JSON.stringify({
         version: 2,
         rows: withStatus,
-        fileName: file.name,
+        fileName: displayName,
         bankFormat: fmt,
       }));
     } catch {}
@@ -12227,9 +12406,49 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
       }
     }
     setCatProgress(null);
-    } finally {
-      loadingRef.current = false;
+  };
+
+  const loadPdf = async (file) => {
+    if (!file) return;
+    setPdfErr(null); setAlert(null);
+    if (!/\.pdf$/i.test(file.name)) { setPdfErr('Choose a PDF statement.'); return; }
+    try {
+      setPdfStage(`Uploading ${file.name}…`);
+      const up = await uploadDocument(company.id, 'bank_statement', file);
+      setPdfStage(`Reading ${file.name}: this takes about 10 to 30 seconds…`);
+      const read = await callStatementRead({ action: 'read', company_id: company.id, source_document_id: up.destination.id,
+        reader_name: window.Clerk?.user?.fullName || null });
+      if (read.refused) setPdfErr(read.refused);
+      else setPdfRead({ read, doc: { id: up.destination.id, filename: file.name } });
+    } catch (e) {
+      captureError(e, { company_id: company?.id, operation: 'bank-import-pdf' });
+      setPdfErr(e.message);
     }
+    setPdfStage(null);
+  };
+
+  // A reviewed section enters the same preview as a CSV.
+  const usePdfSection = async (sec, accountId) => {
+    if (loadingRef.current) return;
+    const runCheck = sec.checks.find(c => /running balance/.test(c.check));
+    setSelectedBankAccountId(accountId);
+    setPdfContext({ read_id: pdfRead.read.read_id, section_key: sec.key });
+    setFileName(`${pdfRead.doc.filename} · ${sec.label}`);
+    setBankFormat('pdf');
+    setStmtCheck({
+      label: 'PDF statement',
+      errors: sec.errors.map(e => ({ line: `page ${e.page}`, message: e.message })),
+      balance: runCheck ? { mode: /per day/.test(runCheck.check) ? 'day' : 'row', checked: Number((runCheck.detail.match(/(\d+) checked/) || [])[1]) || 0, breaks: runCheck.breaks || [] }
+        : { mode: 'none', checked: 0, breaks: [] },
+      failed: sec.checks.filter(c => !c.ok && !/running balance/.test(c.check)).map(c => `${c.check}: ${c.detail}`),
+      flagged: sec.rows.filter(r => r.flags).map(r => ({ date: r.date, description: r.description, flags: r.flags })),
+    });
+    setStmtAck(false); setLockPrompt(null); setAlert(null);
+    loadingRef.current = true;
+    try {
+      await runPreview(sec.rows.map(r => ({ revolut_id: r.revolut_id, date: r.date, description: r.description, amount: r.amount,
+        currency: r.currency || 'EUR', balance: r.balance, type: '' })), 'pdf', `${pdfRead.doc.filename} · ${sec.label}`);
+    } finally { loadingRef.current = false; }
   };
 
   const handleNominalChange = useCallback((revolut_id, code) => {
@@ -12419,6 +12638,11 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
           const { error: mErr } = await db.from('bank_matches').insert(matchRows);
           if (mErr) console.warn('[post] bank_matches insert skipped (migration may not have run):', mErr.message);
         }
+      }
+      if (pdfContext && insertedBts.length) {
+        callStatementRead({ action: 'link_batch', company_id: cid, read_id: pdfContext.read_id, section_key: pdfContext.section_key, import_batch_id: batchId })
+          .then(() => setPdfRead(pr => pr && { ...pr, read: { ...pr.read, imports: [...(pr.read.imports || []), { section_key: pdfContext.section_key, import_batch_id: batchId }] } }))
+          .catch(e => captureError(e, { company_id: cid, operation: 'bank-import-pdf-link-batch' }));
       }
       setRows(prev => prev.map(r => postedIds.has(r.revolut_id) ? { ...r, imported: true } : r));
       setSelected(new Set());
@@ -12878,7 +13102,11 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
         </div>
       )}
 
-      {activeTab === 'import' && !rows.length && (
+      {activeTab === 'import' && !rows.length && pdfRead && (
+        <PdfStatementReview company={company} read={pdfRead.read} doc={pdfRead.doc} bankAccounts={bankAccounts}
+          onUse={usePdfSection} onClose={() => { setPdfRead(null); setPdfContext(null); }} />
+      )}
+      {activeTab === 'import' && !rows.length && !pdfRead && (
         <div
           className={`bi-drop${over ? " over" : ""}`}
           onDragOver={e => { e.preventDefault(); setOver(true); }}
@@ -12895,6 +13123,18 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
             onChange={e => { if (e.target.files[0]) loadFile(e.target.files[0]); e.target.value = ""; }} />
         </div>
       )}  {/* end activeTab === 'import' drop zone */}
+      {activeTab === 'import' && !rows.length && !pdfRead && !isBusinessOwner && (
+        <div className="bi-drop" style={{ padding: "18px 24px" }} onClick={() => !pdfStage && pdfRef.current?.click()}
+          onDragOver={e => e.preventDefault()} onDrop={e => { e.preventDefault(); if (!pdfStage) loadPdf(e.dataTransfer.files[0]); }}>
+          <div className="bi-drop-label" style={{ fontSize: 13 }}>Or a PDF statement downloaded from online banking</div>
+          <div className="bi-drop-sub">Read from the PDF's own text, checked against its balances and totals, and shown beside the page before anything is imported</div>
+          {pdfStage ? <div style={{ marginTop: 10, fontSize: 12, color: "var(--teal)" }}>{pdfStage}</div> : <div className="bi-drop-btn">Choose PDF</div>}
+          <input ref={pdfRef} type="file" accept="application/pdf,.pdf" style={{ display: "none" }}
+            onClick={e => e.stopPropagation()}
+            onChange={e => { const f = e.target.files[0]; e.target.value = ""; if (f) loadPdf(f); }} />
+        </div>
+      )}
+      {activeTab === 'import' && !rows.length && pdfErr && <div className="bi-alert bi-alert-err">{pdfErr}</div>}
 
       {activeTab === 'import' && alert && <div className={`bi-alert ${alert.type === "ok" ? "bi-alert-ok" : "bi-alert-err"}`}>{alert.msg}</div>}
       {activeTab === 'import' && stmtCheck && (
@@ -13060,7 +13300,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
               )}>
                 ⬇ CSV
               </button>
-              <button className="btn btn-s btn-sm" onClick={() => { setRows([]); setFileName(""); setAlert(null); setSelected(new Set()); setCatProgress(null); setBankFormat(null); setStmtCheck(null); setStmtAck(false); setLockPrompt(null); sessionStorage.removeItem('ledgrly_import_session'); sessionStorage.removeItem('ledgrly_import_nominals'); }}>
+              <button className="btn btn-s btn-sm" onClick={() => { setRows([]); setFileName(""); setAlert(null); setSelected(new Set()); setCatProgress(null); setBankFormat(null); setStmtCheck(null); setStmtAck(false); setLockPrompt(null); setPdfContext(null); sessionStorage.removeItem('ledgrly_import_session'); sessionStorage.removeItem('ledgrly_import_nominals'); }}>
                 Clear
               </button>
               {bankAccounts.length > 1 && (
@@ -21550,7 +21790,7 @@ function BankHub({ companyId, company, isBusinessOwner = false, onDrillToGL, tab
         <YapilyBankFeeds companyId={companyId} company={company} isActive={tab === 'feeds'} isBusinessOwner={isBusinessOwner} />
       </div>
       <div style={{ display: tab === 'csv' ? 'block' : 'none' }}>
-        <BankImportErrorBoundary><BankImport companyId={companyId} isActive={tab === 'csv'} company={company} /></BankImportErrorBoundary>
+        <BankImportErrorBoundary><BankImport companyId={companyId} isActive={tab === 'csv'} company={company} isBusinessOwner={isBusinessOwner} /></BankImportErrorBoundary>
       </div>
       {tab === 'balances' && <BankBalances companyId={companyId} onDrillToGL={onDrillToGL} />}
     </div>

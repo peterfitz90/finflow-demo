@@ -7,6 +7,7 @@ import { PDFDocument } from 'pdf-lib';
 import { classifyPage, verifyStatement } from '../src/shared/statementPdfVerify.js';
 
 export const CHUNK_PAGES = 10;
+export const CONCURRENCY = 3;
 // Published rates, USD per million tokens (platform.claude.com pricing, checked 9 Oct 2026).
 export const PRICE_PER_MTOK = { 'claude-sonnet-5-5': { input: 2, output: 10 }, 'claude-haiku-4-5-20251001': { input: 1, output: 5 } };
 
@@ -77,10 +78,15 @@ function parseJson(text) {
 export async function readStatementPdf(deps, { buf, model, chunkPages = CHUNK_PAGES, companyId = null }) {
   const texts = await pageTexts(buf);
   const cls = classifyFile(texts);
-  if (cls.kind !== 'text') return { kind: cls.kind, pages: texts.length, refused: cls.kind === 'scanned' ? 'Scanned or photographed statements are not read yet' : 'This PDF has a text layer that cannot be read (its characters are not decodable)' };
+  if (cls.kind !== 'text') return { kind: cls.kind, pages: texts.length, refused: cls.kind === 'scanned'
+    ? 'Ledgrly cannot read photographed or scanned statements yet. Ask for the PDF downloaded from online banking.'
+    : "This PDF's text cannot be read (its characters are encoded so they can't be decoded). Reading such statements from the page images is coming; for now ask for the bank's CSV export or another download." };
   const parts = await chunkPdf(buf, chunkPages);
-  const chunks = [];
-  for (const part of parts) {
+  // chunks are read in parallel (CONCURRENCY at a time) and kept in page order; the balance is
+  // carried across each boundary by the verification, which sees them joined
+  const chunks = new Array(parts.length);
+  let done = 0;
+  const readPart = async (part, i) => {
     const t0 = Date.now();
     const r = await deps.callClaude({
       model, max_tokens: 32000, operation: 'read-statement-pdf', company_id: companyId,
@@ -90,8 +96,16 @@ export async function readStatementPdf(deps, { buf, model, chunkPages = CHUNK_PA
       ] }],
     });
     if (!r.ok) throw new Error(`model call failed for pages ${part.firstPage}-${part.lastPage}: ${r.data?.error?.message || r.status}`);
-    chunks.push({ firstPage: part.firstPage, lastPage: part.lastPage, ms: Date.now() - t0, usage: r.data?.usage || {}, stop_reason: r.data?.stop_reason, result: parseJson(r.text) });
-  }
+    // a reply cut off at the token limit would silently drop lines: refuse it
+    if (r.data?.stop_reason === 'max_tokens') throw new Error(`the read of pages ${part.firstPage}-${part.lastPage} was cut off before the end; read it in smaller parts`);
+    chunks[i] = { firstPage: part.firstPage, lastPage: part.lastPage, ms: Date.now() - t0, usage: r.data?.usage || {}, stop_reason: r.data?.stop_reason, result: parseJson(r.text) };
+    done++;
+    deps.onProgress?.({ done, total: parts.length, pages: `${part.firstPage}-${part.lastPage}` });
+  };
+  const queue = parts.map((p, i) => [p, i]);
+  await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
+    while (queue.length) { const [p, i] = queue.shift(); await readPart(p, i); }
+  }));
   // A statement of fees, or any other document, is not a statement of transactions: refused with
   // its reason, not imported.
   const docType = chunks[0]?.result?.statement?.document_type;

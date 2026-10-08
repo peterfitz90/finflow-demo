@@ -9,7 +9,7 @@
 //                  total_in_text, total_out_text, count_text,
 //                  rows: [{ page, date_text, description, money_in_text, money_out_text, amount_text,
 //                           balance_text, status_text }] }] }
-import { checkBalances, hash32 } from './bankStatementParse.js';
+import { checkBalances, checkDates, hash32 } from './bankStatementParse.js';
 
 const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, sept: 9, oct: 10, nov: 11, dec: 12 };
 const pad = n => String(n).padStart(2, '0');
@@ -163,11 +163,15 @@ export function verifyStatement({ chunks, pageTexts }) {
       if (a.page !== b.page && a.date === b.date && a.amount === b.amount && a.balance === b.balance && a.description === b.description) dupes.push({ page: b.page, date: b.date });
     }
     checks.push({ check: 'no line repeated across a page break', ok: dupes.length === 0, detail: `${dupes.length} repeated` });
-    // dates within the statement period
-    if (period.start || period.end) {
-      const outside = rows.filter(r => (period.start && r.date < period.start) || (period.end && r.date > period.end)).length;
-      checks.push({ check: 'dates within the statement period', ok: outside === 0, detail: `${outside} outside` });
-    }
+    // dates in sequence (as printed, oldest first after orientation) and within the statement period;
+    // the rows that break either are flagged for review
+    const dc = checkDates(ordered.map(r => ({ revolut_id: `row-${r.index}`, date: r.date })), { start: period.start, end: period.end });
+    const flagged = new Map();
+    for (const x of dc.outOfSequence) flagged.set(x.id, [...(flagged.get(x.id) || []), 'date out of sequence']);
+    for (const x of dc.outside) flagged.set(x.id, [...(flagged.get(x.id) || []), 'date outside the statement period']);
+    for (const r of ordered) { const f = flagged.get(`row-${r.index}`); if (f) r.flags = f; }
+    checks.push({ check: 'dates in sequence', ok: dc.outOfSequence.length === 0, detail: `${dc.outOfSequence.length} out of sequence` });
+    if (period.start || period.end) checks.push({ check: 'dates within the statement period', ok: dc.outside.length === 0, detail: `${dc.outside.length} outside` });
     const verifiable = checks.some(c => /running balance|opening \+ movements/.test(c.check));
     sections.push({
       key: sec.key, label: sec.label, currency: sec.currency,
