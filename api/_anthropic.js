@@ -25,6 +25,7 @@ export const AI_MODEL = {
   chat:            STRONG,
   categorise:      STRONG,
   extractReceipt:  STRONG,
+  readStatement:   STRONG,   // BNK-14 step 3: text-PDF bank statements
   inboundEmail:    STRONG,
   suggestJournals: FAST,
 };
