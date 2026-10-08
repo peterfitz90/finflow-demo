@@ -11940,7 +11940,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
 
       // Step 2: fetch all bank_transactions — paged via fetchAllRows. (The .range(0, 9999) this
       // replaced did NOT override the 1,000-row cap; the server clamps it, silently.)
-      const selectCols = `import_batch_id, bank_format, amount, ${tsCol}`;
+      const selectCols = `import_batch_id, bank_format, amount, currency, ${tsCol}`;
       const { data, error } = await fetchAllRows(() => db.from("bank_transactions")
         .select(selectCols)
         .eq("company_id", cid)
@@ -11995,11 +11995,13 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
             legacy: !r.import_batch_id,
             count: 0,
             total: 0,
+            currencies: new Set(),
           });
         }
         const g = groups.get(key);
         g.count++;
         g.total += Number(r.amount);
+        g.currencies.add(r.currency || 'EUR');
         if (ts < g.min_ts) g.min_ts = ts;
         if (ts > g.max_ts) g.max_ts = ts;
         if (ts < g.imported_at) g.imported_at = ts;
@@ -13394,7 +13396,8 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
                         {batch.journalOnly ? "journals only" : batch.count}
                       </td>
                       <td className="r mono" style={{ color: batch.total >= 0 ? "var(--green)" : "var(--red)", fontWeight: 600 }}>
-                        {batch.journalOnly ? "—" : `${batch.total >= 0 ? "+" : ""}${fmtEUR(batch.total)}`}
+                        {batch.journalOnly ? "—" : batch.currencies?.size > 1 ? "mixed currencies"
+                          : `${batch.total >= 0 ? "+" : ""}${fmtCurrencyFull(batch.total, [...(batch.currencies || [])][0] || "EUR")}`}
                       </td>
                       <td className="r">
                         <button
@@ -18526,10 +18529,14 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
 
       const unreconciled = unreconciledTxns || [];
       const lastImport   = lastImportRows?.[0]?.created_at ?? null;
-      const balance      = unreconciled.reduce((s, t) => s + Math.abs(Number(t.amount)), 0);
+      // The ledger is EUR-only (multi-currency is GEO-02): a foreign-currency line is not added
+      // to the euro figure; it is counted separately.
+      const isEurLine    = t => (t.currency || 'EUR') === 'EUR';
+      const balance      = unreconciled.filter(isEurLine).reduce((s, t) => s + Math.abs(Number(t.amount)), 0);
+      const foreignLines = unreconciled.filter(t => !isEurLine(t)).length;
       const autoRate     = (totalConfCount || 0) > 0 ? Math.round((autoConfCount || 0) / (totalConfCount || 1) * 100) : 0;
       const trueUnreconciledCount = unreconciledCount ?? unreconciled.length;
-      setStats({ unreconciled: trueUnreconciledCount, balance, autoMatchRate: autoRate, lastImport });
+      setStats({ unreconciled: trueUnreconciledCount, balance, foreignLines, autoMatchRate: autoRate, lastImport });
       setUnreconciledCapHit(trueUnreconciledCount > unreconciled.length);
       setReconciledCount(rcCount || 0);
 
@@ -18656,7 +18663,7 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
         const totalAlloc = settleAllocs.reduce((s, a) => s + a.allocated_amount + (a.difference_amount || 0), 0);
         const bankAbs    = Math.abs(Number(bt.amount));
         if (Math.abs(totalAlloc - bankAbs) > 0.005)
-          throw new Error(`Allocated ${fmtEUR(totalAlloc)} but bank line is ${fmtEUR(bankAbs)} — adjust amounts or use tolerance`);
+          throw new Error(`Allocated ${fmtEUR(totalAlloc)} but bank line is ${fmtLine(bt, bankAbs)} — adjust amounts or use tolerance`);
       }
 
       const payload = settleMode === 'on_account'
@@ -18818,13 +18825,16 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
   // transaction that will actually post against a different real account.
   const settleBankNominal = bankAccounts.find(a => a.id === settleFor?.bank_account_id)?.nominal_code || '1000';
 
+  // A bank line's amount in its own currency (a GBP line shows £, not €).
+  const fmtLine = (bt, n = bt.amount) => fmtCurrencyFull(n, bt.currency || 'EUR');
+
   // ── Row sub-components (used in all three tabs) ──
   const BtCell = ({ bt }) => (
     <div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 2 }}>
         <span style={{ fontSize: 11, color: 'var(--text-faint)', fontVariantNumeric: 'tabular-nums' }}>{bt.date}</span>
         <span style={{ fontSize: 12, fontWeight: 600, color: Number(bt.amount) >= 0 ? 'var(--accent)' : 'var(--danger)', marginLeft: 'auto', fontVariantNumeric: 'tabular-nums' }}>
-          {Number(bt.amount) >= 0 ? '+' : ''}{fmtEUR(bt.amount)}
+          {Number(bt.amount) >= 0 ? '+' : ''}{fmtLine(bt)}
         </span>
       </div>
       <div style={{ fontSize: 12, color: 'var(--text)', whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{bt.description}</div>
@@ -18849,7 +18859,7 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
       <div className="kpi-grid">
         {[
           { lbl: 'UNRECONCILED',         val: loading ? '…' : stats.unreconciled,             sub: 'transactions',   c: stats.unreconciled > 0 ? 'var(--warn)' : 'var(--accent)' },
-          { lbl: 'UNRECONCILED BALANCE', val: loading ? '…' : fmtEUR(stats.balance),          sub: 'awaiting match', c: 'var(--text)' },
+          { lbl: 'UNRECONCILED BALANCE', val: loading ? '…' : fmtEUR(stats.balance),          sub: stats.foreignLines ? `awaiting match · excludes ${stats.foreignLines} non-EUR line${stats.foreignLines === 1 ? '' : 's'}` : 'awaiting match', c: 'var(--text)' },
           { lbl: 'AUTO-MATCH RATE',      val: loading ? '…' : `${stats.autoMatchRate}%`,      sub: 'this month',     c: stats.autoMatchRate >= 50 ? 'var(--accent)' : 'var(--text-muted)' },
           { lbl: 'LAST IMPORT',          val: loading ? '…' : fmtLastImport(stats.lastImport), sub: 'bank data',     c: 'var(--text-muted)' },
         ].map((k, i) => (
@@ -19150,7 +19160,7 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
                 <div style={{ display: 'flex', alignItems: 'center', gap: 10 }}>
                   <span style={{ fontSize: 11, color: 'var(--text-faint)', fontVariantNumeric: 'tabular-nums' }}>{settleFor.date}</span>
                   <span style={{ fontSize: 14, fontWeight: 700, color: Number(settleFor.amount) >= 0 ? 'var(--accent)' : 'var(--danger)', fontVariantNumeric: 'tabular-nums' }}>
-                    {Number(settleFor.amount) >= 0 ? '+' : ''}{fmtEUR(settleFor.amount)}
+                    {Number(settleFor.amount) >= 0 ? '+' : ''}{fmtLine(settleFor)}
                   </span>
                   <span style={{ fontSize: 11, color: 'var(--text-muted)', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap', maxWidth: 260 }}>{settleFor.description}</span>
                 </div>
@@ -19268,7 +19278,7 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
                         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 5 }}>
                           <span style={{ fontSize: 11, color: 'var(--text-muted)' }}>Allocated</span>
                           <span style={{ fontSize: 12, fontWeight: 600, color: matched ? 'var(--accent)' : 'var(--text)', fontVariantNumeric: 'tabular-nums' }}>
-                            {fmtEUR(withDiff)} / {fmtEUR(bankAbs)} {matched && '✓'}
+                            {fmtEUR(withDiff)} / {fmtLine(settleFor, bankAbs)} {matched && '✓'}
                           </span>
                         </div>
                         <div style={{ height: 4, background: 'var(--surface-2)', borderRadius: 2, overflow: 'hidden', marginBottom: canTolerate ? 10 : 0 }}>
