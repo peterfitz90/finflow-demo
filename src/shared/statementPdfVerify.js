@@ -26,6 +26,9 @@ export function readPrintedAmount(raw) {
   if (/^\(.*\)$/.test(s)) { neg = true; s = s.slice(1, -1).trim(); }
   const flag = s.match(/\s*(CR|DR|Cr|Dr|cr|dr)\.?$/);
   if (flag) { s = s.slice(0, flag.index).trim(); if (/dr/i.test(flag[1])) neg = !neg; }
+  // a trailing minus marks an overdrawn balance on some statements (PTSB: "123.45 -")
+  const trail = s.match(/\s*[-−–]$/);
+  if (trail && /\d/.test(s.slice(0, trail.index))) { s = s.slice(0, trail.index).trim(); neg = !neg; }
   s = s.replace(/(EUR|GBP|USD|PLN|CHF)/g, '').replace(/[€£$\s ]/g, '');
   if (/^[-−–]/.test(s)) { neg = !neg; s = s.slice(1); }
   if (/^\+/.test(s)) s = s.slice(1);
@@ -46,6 +49,8 @@ export function readPrintedDate(raw, { periodStart = null, periodEnd = null } = 
   if ((m2 = s.match(/^(\d{4})-(\d{2})-(\d{2})$/))) [y, m, d] = [+m2[1], +m2[2], +m2[3]];
   else if ((m2 = s.match(/^(\d{1,2})[/.-](\d{1,2})[/.-](\d{2}|\d{4})$/))) [d, m, y] = [+m2[1], +m2[2], +m2[3] < 100 ? 2000 + +m2[3] : +m2[3]];
   else if ((m2 = s.match(/^(\d{1,2})(?:st|nd|rd|th)? ([A-Za-z]{3,9})\.?(?: (\d{4}))?$/)) && monthOf(m2[2])) [d, m, y] = [+m2[1], monthOf(m2[2]), m2[3] ? +m2[3] : null];
+  // DDMONYY or DDMONYYYY run together, as PTSB prints them ("01DEC24")
+  else if ((m2 = s.match(/^(\d{2})([A-Za-z]{3})(\d{2}|\d{4})$/)) && monthOf(m2[2])) [d, m, y] = [+m2[1], monthOf(m2[2]), m2[3].length === 2 ? 2000 + +m2[3] : +m2[3]];
   else if ((m2 = s.match(/^([A-Za-z]{3,9})\.? (\d{1,2})(?: (\d{4}))?$/)) && monthOf(m2[1])) [d, m, y] = [+m2[2], monthOf(m2[1]), m2[3] ? +m2[3] : null];
   else return { error: `unreadable date "${raw}"` };
   if (y == null) {

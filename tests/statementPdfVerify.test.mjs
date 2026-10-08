@@ -3,7 +3,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { PDFDocument, StandardFonts } from 'pdf-lib';
-import { verifyStatement, classifyPage, readPrintedAmount } from '../src/shared/statementPdfVerify.js';
+import { verifyStatement, classifyPage, readPrintedAmount, readPrintedDate } from '../src/shared/statementPdfVerify.js';
 import { readStatementPdf, classifyFile, pageTexts, chunkPdf } from '../api/_statement-pdf-read.js';
 
 // A synthetic 3-page statement: opening 100.00, five lines over three pages, closing 125.00.
@@ -145,4 +145,19 @@ test('a statement of fees (or any other document) is refused with its reason aft
   assert.match(out.refused, /statement of fees/);
   assert.equal(out.result, undefined);
   assert.deepEqual(out.tokens, { input: 900, output: 40 });
+});
+
+test('dates as banks print them, including the run-together DDMONYY form PTSB uses', () => {
+  assert.equal(readPrintedDate('01DEC24').value, '2024-12-01');
+  assert.equal(readPrintedDate('15Jan2025').value, '2025-01-15');
+  assert.equal(readPrintedDate('31FEB25').error != null, true);
+  assert.equal(readPrintedDate('1 Jul 2026').value, '2026-07-01');
+  assert.equal(readPrintedDate('Jul 1, 2026').value, '2026-07-01');
+});
+
+test('amounts: an overdrawn balance with a trailing minus (PTSB) is negative', () => {
+  assert.equal(readPrintedAmount('123.45 -').value, -123.45);
+  assert.equal(readPrintedAmount('1,234.50-').value, -1234.5);
+  assert.equal(readPrintedAmount('-').value, null);
+  assert.equal(readPrintedAmount('12.30').value, 12.3);
 });
