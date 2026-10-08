@@ -1,29 +1,28 @@
-// POST /api/statements-approval (STA-01 Stages 5b and 5c). One endpoint, five actions:
+// POST /api/statements-approval (STA-01 Stages 5b and 5c). One endpoint, four actions:
 //   check          { company_id, year_end, ack_count?, ack_reason? }  accountant
 //                  -> the approval rule, the live approval, "changed since approval"
 //   approve        { ..., approver_name?, supersedes?, supersede_reason? }  accountant
 //                  -> both PDFs without the watermark, archived, and the snapshot with their hashes
 //   list           { company_id }  accountant or business owner (RLS: a business owner sees approved rows only)
 //   url            { company_id, path }  accountant or business owner -> a 60-second signed URL
-//   upload_signed  { company_id, approval_id, kind: full|abridged, pdf_base64, uploader_name? }  accountant
+// Signed copies are uploaded through /api/uploads (signed upload URLs, BNK-14 step 2).
 // Reads use the caller's own token, so RLS applies as on screen. The service role is used only for
-// the archive uploads, the approval and signed-copy rows (fs_record_approval, fs_approval_files),
-// and signing URLs, and only after the caller's role on company_id is verified.
+// the archive uploads, the approval row (fs_record_approval) and signing URLs, and only after the
+// caller's role on company_id is verified.
 import { randomUUID } from 'node:crypto';
 import { createClient } from '@supabase/supabase-js';
 import { withSentry } from './_sentry.js';
 import { requireAccountant, requireCompanyMember, AuthError } from './_auth.js';
 import { loadStatements } from './_statements-data.js';
 import { renderStatementsPdf } from './_statements-pdf-doc.js';
-import { checkApproval, approve, listArchive, signedUrl, uploadSigned, ApprovalError } from './_statements-approval.js';
+import { checkApproval, approve, listArchive, signedUrl, ApprovalError } from './_statements-approval.js';
 import { todayStr } from '../src/shared/dates.js';
 
-// a 10 MB PDF is about 13.4 MB as base64
-export const config = { api: { bodyParser: { sizeLimit: '15mb' } } };
+export const config = { api: { bodyParser: { sizeLimit: '16kb' } } };
 
 const ISO = /^\d{4}-\d{2}-\d{2}$/;
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
-const ACCOUNTANT_ACTIONS = new Set(['check', 'approve', 'upload_signed']);
+const ACCOUNTANT_ACTIONS = new Set(['check', 'approve']);
 const MEMBER_ACTIONS = new Set(['list', 'url']);
 
 export default withSentry(async function handler(req, res) {
@@ -64,11 +63,6 @@ export default withSentry(async function handler(req, res) {
     }
     if (action === 'list') return res.status(200).json(await listArchive(deps, { companyId: b.company_id }));
     if (action === 'url') return res.status(200).json(await signedUrl(deps, { companyId: b.company_id, path: b.path }));
-    if (action === 'upload_signed') {
-      if (!UUID.test(b.approval_id || '')) return res.status(400).json({ error: 'approval_id required' });
-      const pdf = typeof b.pdf_base64 === 'string' ? Buffer.from(b.pdf_base64, 'base64') : null;
-      return res.status(200).json(await uploadSigned(deps, { companyId: b.company_id, approvalId: b.approval_id, kind: b.kind, pdf, userId, userName: b.uploader_name }));
-    }
   } catch (e) {
     if (e instanceof ApprovalError) return res.status(e.status).json({ error: e.message, ...(e.rule ? { rule: e.rule } : {}), ...(e.live ? { live: e.live } : {}) });
     if (e.status === 404) return res.status(404).json({ error: e.message });

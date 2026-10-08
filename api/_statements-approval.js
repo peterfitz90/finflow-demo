@@ -3,9 +3,9 @@
 // fakes (tests/statementsApproval.test.mjs):
 //   deps.userDb      supabase client carrying the caller's own token: every read (RLS decides, as
 //                    on screen): the statements, the sign-offs, the approvals and files lists
-//   deps.serviceDb   service-role client: ONLY the three writes (archive upload, fs_record_approval,
-//                    the fs_approval_files insert), the signed URLs, and removing this request's own
-//                    uploads when a later step fails. Used only after the caller's role is checked.
+//   deps.serviceDb   service-role client: ONLY the archive upload, fs_record_approval, the signed
+//                    URLs, and removing this request's own uploads when a later step fails. Used only
+//                    after the caller's role is checked.
 //   deps.load        loadStatements(db, companyId, yearEnd, today)
 //   deps.render      renderStatementsPdf(m)
 //   deps.today, deps.newId, deps.build { commit, deployment }; deps.wordingStatus: tests only
@@ -13,7 +13,6 @@ import { createHash } from 'node:crypto';
 import { evaluateApproval, ledgerFingerprintParts, wordingCanonical, buildSnapshot } from '../src/shared/statements/approvalRule.js';
 
 export const BUCKET = 'statutory-documents';
-export const MAX_PDF_BYTES = 10 * 1024 * 1024;
 const sha256 = b => createHash('sha256').update(b).digest('hex');
 const must = (r, what) => { if (r.error) throw new Error(`${what}: ${r.error.message}`); return r.data; };
 export class ApprovalError extends Error { constructor(message, status, extra = {}) { super(message); this.status = status; Object.assign(this, extra); } }
@@ -122,34 +121,4 @@ export async function signedUrl(deps, { companyId, path }) {
   return { url: r.signedUrl, expires_in: 60 };
 }
 
-// 'upload_signed': the directors' signed copy (full set or abridged), stored beside the approved
-// PDF and never replacing it; a corrected copy is the next n.
-export async function uploadSigned(deps, { companyId, approvalId, kind, pdf, userId, userName }) {
-  if (!['full', 'abridged'].includes(kind)) throw new ApprovalError('kind must be full or abridged', 400);
-  if (!Buffer.isBuffer(pdf) || pdf.length === 0) throw new ApprovalError('No file', 400);
-  if (pdf.length > MAX_PDF_BYTES) throw new ApprovalError('The file is over 10 MB', 413);
-  if (pdf.subarray(0, 5).toString('latin1') !== '%PDF-') throw new ApprovalError('The file is not a PDF', 415);
-  const a = must(await deps.userDb.from('fs_approvals').select('id, company_id, status, period_end, abridged_pdf_path').eq('id', approvalId).eq('company_id', companyId).maybeSingle(), 'approval');
-  if (!a) throw new ApprovalError('Approval not found', 404);
-  if (a.status !== 'approved') throw new ApprovalError('That approval has been superseded: upload against the current one', 409);
-  if (kind === 'abridged' && !a.abridged_pdf_path) throw new ApprovalError('This approval has no abridged copy', 400);
-  const fileKind = `signed_${kind}`;
-  for (let attempt = 0; attempt < 2; attempt++) {
-    const prev = must(await deps.serviceDb.from('fs_approval_files').select('n').eq('approval_id', approvalId).eq('kind', fileKind).order('n', { ascending: false }).limit(1), 'signed copies');
-    const n = ((prev && prev[0]?.n) || 0) + 1;
-    const path = `${companyId}/${a.period_end}/${approvalId}/signed-${kind}-${n}.pdf`;
-    const up = await deps.serviceDb.storage.from(BUCKET).upload(path, pdf, { contentType: 'application/pdf', upsert: false });
-    if (up.error) { if (attempt === 0 && /exists|duplicate/i.test(up.error.message)) continue; throw new Error(`archive ${path}: ${up.error.message}`); }
-    const ins = await deps.serviceDb.from('fs_approval_files').insert({
-      approval_id: approvalId, company_id: companyId, kind: fileKind, n, path, sha256: sha256(pdf), size_bytes: pdf.length,
-      uploaded_by: userId, uploaded_by_name: (userName || '').slice(0, 120) || null,
-    }).select('id, n, path, sha256, size_bytes, uploaded_at').single();
-    if (ins.error) {
-      await deps.serviceDb.storage.from(BUCKET).remove([path]).catch(() => {});
-      if (attempt === 0 && ins.error.code === '23505') continue;
-      throw new Error(`signed copy: ${ins.error.message}`);
-    }
-    return ins.data;
-  }
-  throw new ApprovalError('Another upload took that number: try again', 409);
-}
+// Signed copies are uploaded through api/uploads.js (signed upload URLs, BNK-14 step 2).

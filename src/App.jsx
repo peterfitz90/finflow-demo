@@ -15118,12 +15118,25 @@ async function callStatementsApproval(body) {
   return json;
 }
 
-const fileToBase64 = file => new Promise((resolve, reject) => {
-  const r = new FileReader();
-  r.onload = () => resolve(String(r.result).split(',')[1] || '');
-  r.onerror = () => reject(r.error);
-  r.readAsDataURL(file);
-});
+// BNK-14 step 2: every document upload (signed copies, prior-year accounts, bank statements). The
+// server records the attempt and returns a signed upload URL; the browser sends the file straight
+// to private storage (no file passes through a function); the server then reads the stored file,
+// checks it and archives it. purposeFields: { approval_id, kind } for a signed copy.
+async function uploadDocument(companyId, purpose, file, purposeFields = {}) {
+  const token = await window.Clerk?.session?.getToken();
+  const call = async body => {
+    const res = await fetch('/api/uploads', { method: 'POST', headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` }, body: JSON.stringify(body) });
+    const json = await res.json().catch(() => ({}));
+    if (!res.ok) throw Object.assign(new Error(json.error || `HTTP ${res.status}`), { status: res.status });
+    return json;
+  };
+  const type = file.type === 'application/pdf' || /\.pdf$/i.test(file.name) ? 'application/pdf' : 'text/csv';
+  const uploaderName = window.Clerk?.user?.fullName || null;
+  const start = await call({ action: 'start', company_id: companyId, purpose, filename: file.name, size: file.size, type, uploader_name: uploaderName, ...purposeFields });
+  const { error } = await supabase.storage.from(start.bucket).uploadToSignedUrl(start.path, start.token, file, { contentType: type });
+  if (error) throw new Error(`The file did not upload: ${error.message}`);
+  return call({ action: 'finish', company_id: companyId, upload_id: start.upload_id, uploader_name: uploaderName });
+}
 
 // Opens an archived PDF through a 60-second signed URL from the server.
 async function openArchivedPdf(companyId, path) {
@@ -15257,8 +15270,7 @@ function StatementsArchivePanel({ company, isBusinessOwner = false, refreshKey =
     setBusy(`up-${approval.id}`); setErr(null);
     try {
       if (file.size > 10 * 1024 * 1024) throw new Error('The file is over 10 MB');
-      await callStatementsApproval({ action: 'upload_signed', company_id: company.id, approval_id: approval.id, kind: k,
-        pdf_base64: await fileToBase64(file), uploader_name: window.Clerk?.user?.fullName || null });
+      await uploadDocument(company.id, 'signed_copy', file, { approval_id: approval.id, kind: k });
       await load();
     } catch (e) { captureError(e, { company_id: company.id, operation: 'statements-upload-signed' }); setErr(e.message); }
     setBusy(null);

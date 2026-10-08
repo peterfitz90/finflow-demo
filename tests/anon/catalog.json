@@ -45,8 +45,10 @@
     "revenue_events",
     "revenue_review_items",
     "settlement_allocations",
+    "source_documents",
     "suggested_journals",
     "transaction_rules",
+    "uploads",
     "user_company_access",
     "user_dashboard_layouts",
     "user_report_views",
@@ -369,12 +371,14 @@
   "_anon_readable_comment": "Tables anon may read on purpose, as { table: column }: only rows where that column is null are allowed (shared reference data, no company); any other row is a FAIL. Empty since 2026-10-06, when the shared transaction_rules rows became signed-in only. Adding an entry needs Peter's approval.",
   "anon_readable": {},
   "buckets": [
-    "journal-attachments",
     "Ledgrly",
-    "statutory-documents"
+    "journal-attachments",
+    "source-documents",
+    "statutory-documents",
+    "uploads-staging"
   ],
   "storage": {
-    "_comment": "read_object: a real client file (read and sign only, never deleted or written). fixtures: permanent, labelled objects in the Fitzsimons Test folder (a 246-byte text file in journal-attachments; a 522-byte PDF in statutory-documents, added 9 Oct 2026), created once with the service role (scripts/anon-check-fixture.local.mjs create). Anon read, sign, delete, upsert, update and move attempts target each; the check verifies it before and after (exists, sha256 below, etag, last-modified) and fails if it is missing, changed or deleted. Do not delete or edit it.",
+    "_comment": "read_object: a real client file (read and sign only, never deleted or written). fixtures: permanent, labelled objects in the Fitzsimons Test folder (a 246-byte text file in journal-attachments; labelled PDFs in statutory-documents, uploads-staging and source-documents, added 9 Oct 2026; the staging fixture is outside staging/, so the upload clean-up never sees it), created once with the service role (scripts/anon-check-fixture.local.mjs create). Anon read, sign, delete, upsert, update and move attempts target each; the check verifies it before and after (exists, sha256 below, etag, last-modified) and fails if it is missing, changed or deleted. Do not delete or edit it.",
     "read_object": {
       "bucket": "journal-attachments",
       "name": "ap/59fc55e0-10ac-471b-a3e4-283ae510f1db/93aab01a-04e6-461b-8ba2-9fb0643c25e5.pdf"
@@ -390,6 +394,18 @@
         "bucket": "statutory-documents",
         "name": "5f4e4585-8937-4624-b0fc-079a8379a160/_anon-check/fixture.pdf",
         "sha256": "e55399600b60a87fb6f1eeb66e4c68655b842f25b7ee42f94db41effdf23202e",
+        "contentType": "application/pdf"
+      },
+      {
+        "bucket": "uploads-staging",
+        "name": "5f4e4585-8937-4624-b0fc-079a8379a160/_anon-check/fixture.pdf",
+        "sha256": "1a4e60168a44f610406ea940ca7bee1f9d410597b39b3f976ec724044d2d75fb",
+        "contentType": "application/pdf"
+      },
+      {
+        "bucket": "source-documents",
+        "name": "5f4e4585-8937-4624-b0fc-079a8379a160/_anon-check/fixture.pdf",
+        "sha256": "6e662d79ed657ca21e1951cafb52fa0a0ca23b48f0e552119d54f5ea74417174",
         "contentType": "application/pdf"
       }
     ]

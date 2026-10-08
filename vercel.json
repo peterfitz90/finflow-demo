@@ -9,10 +9,13 @@
     "api/invoice-pdf.js":     { "maxDuration": 60 },
     "api/statements-pdf.js":  { "maxDuration": 60, "includeFiles": "api/_fonts/**" },
     "api/statements-approval.js": { "maxDuration": 60, "includeFiles": "api/_fonts/**" },
-    "api/refresh-stats.js":   { "maxDuration": 30 }
+    "api/refresh-stats.js":   { "maxDuration": 30 },
+    "api/uploads.js":         { "maxDuration": 60 },
+    "api/uploads-cleanup.js": { "maxDuration": 60 }
   },
   "crons": [
-    { "path": "/api/refresh-stats", "schedule": "0 * * * *" }
+    { "path": "/api/refresh-stats", "schedule": "0 * * * *" },
+    { "path": "/api/uploads-cleanup", "schedule": "30 3 * * *" }
   ],
   "rewrites": [
     { "source": "/(.*)", "destination": "/index.html" }

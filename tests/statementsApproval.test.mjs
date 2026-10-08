@@ -7,7 +7,7 @@ import { evaluateApproval, ledgerFingerprintParts } from '../src/shared/statemen
 import { WORDING_STATUS, printedWordingKeys } from '../src/shared/statements/wording.js';
 import { assembleStatements } from '../src/shared/statements/assemble.js';
 import { uncoveredRanges, summariseSignoffs } from '../src/shared/signoffSummary.js';
-import { checkApproval, approve, listArchive, signedUrl, uploadSigned, ApprovalError, MAX_PDF_BYTES } from '../api/_statements-approval.js';
+import { checkApproval, approve, listArchive, signedUrl, ApprovalError } from '../api/_statements-approval.js';
 
 const CO = '5f4e4585-8937-4624-b0fc-079a8379a160';
 const sha = b => createHash('sha256').update(b).digest('hex');
@@ -238,21 +238,4 @@ test('signed URLs only for files named by a row the caller can see', async () =>
   const bo = fakes({ A, journals, inputs, approvals: [] });
   await assert.rejects(signedUrl(bo.deps, { companyId: CO, path: a.full_pdf_path }), e => e.status === 404);
   assert.deepEqual((await listArchive(f.deps, { companyId: CO })).approvals.map(x => x.id), ['a1']);
-});
-
-test('signed copies: PDF only, 10 MB, current approval only, numbered, never replacing', async () => {
-  const { A, journals, inputs } = assembled();
-  const a = { id: 'a1', company_id: CO, period_end: '2026-12-31', status: 'approved', abridged_pdf_path: null };
-  const f = fakes({ A, journals, inputs, approvals: [a, { id: 'old', company_id: CO, period_end: '2026-12-31', status: 'superseded' }] });
-  const pdf = Buffer.from('%PDF-1.7 signed');
-  const up = args => uploadSigned(f.deps, { companyId: CO, approvalId: 'a1', kind: 'full', pdf, userId: 'u', userName: 'Peter', ...args });
-  await assert.rejects(up({ pdf: Buffer.from('hello') }), e => e.status === 415);
-  await assert.rejects(up({ pdf: Buffer.alloc(MAX_PDF_BYTES + 1, 0x25) }), e => e.status === 413);
-  await assert.rejects(up({ kind: 'abridged' }), e => e.status === 400);
-  await assert.rejects(up({ approvalId: 'old' }), e => e.status === 409);
-  await assert.rejects(up({ approvalId: 'nope' }), e => e.status === 404);
-  const one = await up(), two = await up();
-  assert.deepEqual([one.n, two.n], [1, 2]);
-  assert.deepEqual([...f.store.keys()], [`${CO}/2026-12-31/a1/signed-full-1.pdf`, `${CO}/2026-12-31/a1/signed-full-2.pdf`]);
-  assert.equal(one.sha256, sha(pdf));
 });
