@@ -49,7 +49,7 @@ export async function chunkPdf(buf, size = CHUNK_PAGES) {
 export const READ_PROMPT = `You are reading pages of a bank statement. Copy what is printed; never calculate, round, reformat or infer a figure.
 
 Return ONLY a JSON object of this shape:
-{"statement": {"bank": string, "period_start_text": string|null, "period_end_text": string|null},
+{"statement": {"bank": string, "document_type": "transactions" | "fees" | "other", "period_start_text": string|null, "period_end_text": string|null},
  "sections": [{"key": string, "account_label": string, "currency": string|null,
    "opening_balance_text": string|null, "closing_balance_text": string|null,
    "total_in_text": string|null, "total_out_text": string|null, "count_text": string|null,
@@ -58,6 +58,7 @@ Return ONLY a JSON object of this shape:
      "balance_text": string|null, "status_text": string|null}]}]}
 
 Rules:
+- document_type: "transactions" for an account statement listing transactions; "fees" for a statement of fees, charges or interest; "other" for anything else (then return no sections).
 - Every *_text value is copied character for character from the page (keep currency signs, commas, minus signs, CR/DR). Use null when nothing is printed.
 - One section per account, currency or pocket, in the order printed. "key" is short and identical for the same account in every part of the statement (for example "EUR main" or "GBP"). In account_label write only the account's name or type and at most the last 4 digits of any account number or IBAN.
 - One row per transaction line, in the order printed, with the page number (1 = the first page you were given). Join a description that wraps onto several lines.
@@ -91,9 +92,22 @@ export async function readStatementPdf(deps, { buf, model, chunkPages = CHUNK_PA
     if (!r.ok) throw new Error(`model call failed for pages ${part.firstPage}-${part.lastPage}: ${r.data?.error?.message || r.status}`);
     chunks.push({ firstPage: part.firstPage, lastPage: part.lastPage, ms: Date.now() - t0, usage: r.data?.usage || {}, stop_reason: r.data?.stop_reason, result: parseJson(r.text) });
   }
+  // A statement of fees, or any other document, is not a statement of transactions: refused with
+  // its reason, not imported.
+  const docType = chunks[0]?.result?.statement?.document_type;
+  if (docType && docType !== 'transactions') {
+    return { kind: 'text', pages: texts.length, chunks, refused: docType === 'fees'
+      ? 'This PDF is a statement of fees or charges, not a statement of transactions'
+      : 'This PDF does not look like a bank statement of transactions', document_type: docType, ...costOf(chunks, model, texts.length) };
+  }
   const result = verifyStatement({ chunks, pageTexts: texts });
-  const tokens = chunks.reduce((t, c) => ({ input: t.input + (c.usage.input_tokens || 0), output: t.output + (c.usage.output_tokens || 0) }), { input: 0, output: 0 });
+  return { kind: 'text', pages: texts.length, chunks, result, ...costOf(chunks, model, texts.length) };
+}
+
+// Tokens, cost (USD at the published rates) and model time for a set of chunk reads.
+export function costOf(chunks, model, pages) {
+  const tokens = chunks.reduce((t, c) => ({ input: t.input + (c.usage?.input_tokens || 0), output: t.output + (c.usage?.output_tokens || 0) }), { input: 0, output: 0 });
   const price = PRICE_PER_MTOK[model];
   const usd = price ? (tokens.input * price.input + tokens.output * price.output) / 1e6 : null;
-  return { kind: 'text', pages: texts.length, chunks, result, tokens, cost: { usd, per_page: usd == null ? null : usd / texts.length }, ms: chunks.reduce((t, c) => t + c.ms, 0) };
+  return { tokens, cost: { usd, per_page: usd == null ? null : usd / pages }, ms: chunks.reduce((t, c) => t + (c.ms || 0), 0) };
 }

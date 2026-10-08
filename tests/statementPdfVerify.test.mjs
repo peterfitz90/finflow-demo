@@ -23,7 +23,7 @@ const pageText = p => [
 const TEXTS = [1, 2, 3].map(pageText);
 const row = (l, page = l.page) => ({ page, date_text: l.date, description: l.desc, money_in_text: l.in ? `€${l.in}` : null, money_out_text: l.out ? `€${l.out}` : null, amount_text: null, balance_text: `€${l.bal}`, status_text: null });
 const section = (rows, extra = {}) => ({ key: 'EUR main', account_label: 'Current ··1234', currency: 'EUR', opening_balance_text: null, closing_balance_text: null, total_in_text: null, total_out_text: null, count_text: null, rows, ...extra });
-const statement = { bank: 'TEST BANK', period_start_text: '01 Jul 2026', period_end_text: '31 Jul 2026' };
+const statement = { bank: 'TEST BANK', document_type: 'transactions', period_start_text: '01 Jul 2026', period_end_text: '31 Jul 2026' };
 const oneChunk = (rows, extra) => [{ firstPage: 1, result: { statement, sections: [section(rows, { opening_balance_text: '€100.00', closing_balance_text: '€125.00', total_in_text: '€1,050.00', total_out_text: '€1,025.00', ...extra })] } }];
 
 test('a correct read passes every check', () => {
@@ -135,4 +135,14 @@ test('a scanned file is refused before any model call', async () => {
   const out = await readStatementPdf({ callClaude: async () => { called++; return {}; } }, { buf: Buffer.from(await doc.save()), model: 'claude-sonnet-5-5' });
   assert.deepEqual([out.kind, called], ['scanned', 0]);
   assert.match(out.refused, /Scanned or photographed/);
+});
+
+test('a statement of fees (or any other document) is refused with its reason after one read', async () => {
+  const doc = await PDFDocument.create(); const font = await doc.embedFont(StandardFonts.Helvetica);
+  doc.addPage([595, 842]).drawText('TEST BANK Statement of Fees 01/07/2026 to 30/09/2026 Fees paid on the account', { x: 40, y: 800, size: 9, font });
+  const callClaude = async () => ({ ok: true, status: 200, text: JSON.stringify({ statement: { bank: 'TEST BANK', document_type: 'fees' }, sections: [] }), data: { usage: { input_tokens: 900, output_tokens: 40 } } });
+  const out = await readStatementPdf({ callClaude }, { buf: Buffer.from(await doc.save()), model: 'claude-sonnet-5-5' });
+  assert.match(out.refused, /statement of fees/);
+  assert.equal(out.result, undefined);
+  assert.deepEqual(out.tokens, { input: 900, output: 40 });
 });
