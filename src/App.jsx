@@ -11924,7 +11924,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
 
     // STEP 1: Render the table immediately — don't wait for Supabase
     const quickNom = {}, quickConf = {};
-    parsed.forEach(r => { quickNom[r.revolut_id] = suggestNominalFallback(r.description, r.amount); quickConf[r.revolut_id] = "low"; });
+    parsed.forEach(r => { quickNom[r.revolut_id] = r.nominal_hint || suggestNominalFallback(r.description, r.amount); quickConf[r.revolut_id] = r.nominal_hint ? "high" : "low"; });
     setRows(parsed.map(r => ({ ...r, imported: false })));
     setNominals(quickNom);
     setConfidence(quickConf);
@@ -12016,7 +12016,12 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
     const needFuzzy = [];
     const updNom = {}, updConf = {};
     newTxns.forEach(r => {
-      if (pastCats[r.description]) {
+      if (r.nominal_hint) {
+        // A fixed coding from the parser (a Revolut fee is bank charges): never matched against
+        // learned payees, the rules or the AI.
+        updNom[r.revolut_id] = r.nominal_hint; updConf[r.revolut_id] = "high";
+        fuzzyMatched.add(r.revolut_id);
+      } else if (pastCats[r.description]) {
         updNom[r.revolut_id] = pastCats[r.description]; updConf[r.revolut_id] = "high";
         fuzzyMatched.add(r.revolut_id);
       } else {
@@ -12024,8 +12029,6 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
         needFuzzy.push(r);
       }
     });
-    // Fixed codings from the parser (a Revolut fee is bank charges) win, and skip the rules and the AI.
-    newTxns.forEach(r => { if (r.nominal_hint) { updNom[r.revolut_id] = r.nominal_hint; updConf[r.revolut_id] = "high"; fuzzyMatched.add(r.revolut_id); } });
     setRows(withStatus);
     setNominals(updNom);
     setConfidence(updConf);
