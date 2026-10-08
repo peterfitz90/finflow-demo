@@ -13,6 +13,7 @@ import { computeDeadlines } from './shared/computeDeadlines.js';
 import { isAccountantFor, portfolioTotals, crossClientDeadlines } from './shared/practicePortfolio.js';
 import { fetchAllRows } from './shared/fetchAllRows.js';
 import { findContentDuplicates, postImportBatch } from './shared/importDedup.js';
+import { parseStatement, FORMAT_LABEL } from './shared/bankStatementParse.js';
 import { localDateStr, monthEnd, monthStart, todayStr as localToday, thisMonthStr, addDaysStr, sanitiseDate } from './shared/dates.js';
 import { useSavedViews, ViewsMenu } from './shared/SavedViews.jsx';
 import { useCompanyContext, resolvePendingAccess } from './shared/useCompanyContext.js';
@@ -11170,140 +11171,50 @@ function Journals({ period, selPeriod, companyName, companyId: propCompanyId, re
 }
 
 // ─── BANK IMPORT HELPERS ──────────────────────────────────────────────────────
-function parseCsvLine(line) {
-  const result = [];
-  let cur = "";
-  let inQ = false;
-  for (let i = 0; i < line.length; i++) {
-    const c = line[i];
-    if (c === '"') { inQ = !inQ; continue; }
-    if (c === "," && !inQ) { result.push(cur.trim()); cur = ""; continue; }
-    cur += c;
+// BNK-14: what the statement's own checks found. Rows that could not be read are never posted;
+// balance breaks mean a parsed amount does not match the statement. Either needs the accountant's
+// acknowledgement before anything posts.
+function StatementCheckPanel({ check, ack, onAck }) {
+  const { errors, balance, label } = check;
+  const issues = errors.length > 0 || balance.breaks.length > 0;
+  if (!issues) {
+    return balance.mode === 'none'
+      ? <div className="bi-alert" style={{ fontSize: 12 }}>This {label} file prints no running balance, so its amounts could not be checked against it.</div>
+      : <div className="bi-alert bi-alert-ok" style={{ fontSize: 12 }}>Statement check passed: the printed balance follows every {balance.mode === 'day' ? 'day' : 'row'} ({balance.checked} checked).</div>;
   }
-  result.push(cur.trim());
-  return result;
+  return (
+    <div className="bi-alert bi-alert-err" role="alert" style={{ fontSize: 12 }}>
+      {errors.length > 0 && (
+        <div style={{ marginBottom: 8 }}>
+          <div style={{ fontWeight: 700 }}>{errors.length} row{errors.length === 1 ? '' : 's'} could not be read and will not be imported</div>
+          <ul style={{ margin: "4px 0 0 18px", padding: 0 }}>
+            {errors.slice(0, 20).map(e => (
+              <li key={e.line}>Line {e.line}: {e.message}{e.raw?.date || e.raw?.description ? ` (${[e.raw.date, e.raw.description].filter(Boolean).join(', ')})` : ''}</li>
+            ))}
+            {errors.length > 20 && <li>and {errors.length - 20} more</li>}
+          </ul>
+        </div>
+      )}
+      {balance.breaks.length > 0 && (
+        <div style={{ marginBottom: 8 }}>
+          <div style={{ fontWeight: 700 }}>The printed balance does not follow the amounts on {balance.breaks.length} {balance.mode === 'day' ? 'day' : 'line'}{balance.breaks.length === 1 ? '' : 's'}</div>
+          <ul style={{ margin: "4px 0 0 18px", padding: 0, fontFamily: "Source Code Pro, monospace" }}>
+            {balance.breaks.slice(0, 20).map((b, i) => (
+              <li key={`${b.date}-${i}`}>{fmtIE(b.date)}: the amounts give {fmtEUR(b.expected)}, the statement prints {fmtEUR(b.printed)} (difference {fmtEUR(Math.round((b.printed - b.expected) * 100) / 100)})</li>
+            ))}
+            {balance.breaks.length > 20 && <li>and {balance.breaks.length - 20} more</li>}
+          </ul>
+        </div>
+      )}
+      <label style={{ display: "flex", gap: 8, alignItems: "flex-start", cursor: "pointer" }}>
+        <input type="checkbox" checked={ack} onChange={e => onAck(e.target.checked)} style={{ marginTop: 2 }} />
+        <span>I have checked these against the statement.{errors.length > 0 ? " The rows that could not be read are not imported, and I will enter them by hand." : ""}</span>
+      </label>
+    </div>
+  );
 }
 
-// Revolut Business "Date completed (UTC)" column is DD/MM/YYYY HH:MM:SS (Irish/EU format).
-// Some older exports use ISO (YYYY-MM-DD...) instead — handle both explicitly, never guess via Date().
-function parseRevolutDate(raw) {
-  const s = (raw || "").trim();
-  const datePart = s.split(" ")[0];
-  const iso = datePart.match(/^(\d{4})-(\d{2})-(\d{2})$/);
-  if (iso) return iso[0];
-  const dmy = datePart.match(/^(\d{1,2})\/(\d{1,2})\/(\d{4})$/);
-  if (dmy) {
-    const day = parseInt(dmy[1], 10), month = parseInt(dmy[2], 10), year = dmy[3];
-    if (month < 1 || month > 12 || day < 1 || day > 31) {
-      console.warn("[parseRevolutDate] invalid date (expected DD/MM/YYYY):", JSON.stringify(s));
-      return "";
-    }
-    return `${year}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-  }
-  if (s) console.warn("[parseRevolutDate] could not parse date:", JSON.stringify(s));
-  return "";
-}
-
-function parseRevolutCSV(text) {
-  const lines = text.split("\n").filter(l => l.trim());
-  if (lines.length < 2) return [];
-  const headers = parseCsvLine(lines[0]);
-  const idx = name => headers.findIndex(h => h === name);
-  const idI = idx("ID"), stateI = idx("State"), dateI = idx("Date completed (UTC)");
-  const descI = idx("Description"), amtI = idx("Amount"), currI = idx("Currency");
-  const balI = idx("Balance"), typeI = idx("Type");
-  const rows = [];
-  for (let i = 1; i < lines.length; i++) {
-    const c = parseCsvLine(lines[i]);
-    if (!c.length || c.every(x => !x)) continue;
-    if ((c[stateI] || "").trim().toUpperCase() !== "COMPLETED") continue;
-    const date = parseRevolutDate(c[dateI]);
-    if (!date) { console.warn("[parseRevolutCSV] row", i, "skipped — bad date:", JSON.stringify(c[dateI])); continue; }
-    rows.push({
-      revolut_id: (c[idI] || `ROW-${i}`).trim(),
-      date,
-      description: (c[descI] || "").trim(),
-      amount: parseFloat((c[amtI] || "0").trim()) || 0,
-      currency: (c[currI] || "EUR").trim(),
-      balance: parseFloat((c[balI] || "0").trim()) || 0,
-      type: (c[typeI] || "").trim(),
-    });
-  }
-  return rows;
-}
-
-
-function detectCSVFormat(text) {
-  const first = text.split("\n")[0].replace(/\r/g, "") || "";
-  console.log("[detectCSVFormat] first line:", JSON.stringify(first));
-  if (first.includes("Posted Account") || first.includes("Posted Transactions Date")) {
-    console.log("[detectCSVFormat] detected: aib");
-    return "aib";
-  }
-  if (first.includes("Date completed (UTC)")) {
-    console.log("[detectCSVFormat] detected: revolut");
-    return "revolut";
-  }
-  console.warn("[detectCSVFormat] unrecognised header — could not detect format");
-  return null;
-}
-
-function parseAIBDate(raw) {
-  const s = (raw || "").trim();
-  const parts = s.split("/");
-  if (parts.length !== 3) {
-    if (s) console.warn("[parseAIBDate] could not parse date:", JSON.stringify(s));
-    return "";
-  }
-  const day   = parseInt(parts[0], 10); // AIB Ireland always uses DD/MM/YYYY
-  const month = parseInt(parts[1], 10);
-  if (month < 1 || month > 12 || day < 1 || day > 31) {
-    console.warn("[parseAIBDate] invalid date (expected DD/MM/YYYY):", JSON.stringify(s));
-    return "";
-  }
-  return `${parts[2]}-${String(month).padStart(2, '0')}-${String(day).padStart(2, '0')}`;
-}
-
-function aibHash(str) {
-  let h = 5381;
-  for (let i = 0; i < str.length; i++) h = ((h << 5) + h) ^ str.charCodeAt(i);
-  return "AIB-" + (h >>> 0).toString(16).padStart(8, "0");
-}
-
-function parseAIBCSV(text) {
-  console.log("[parseAIBCSV] starting, text length:", text.length);
-  // Normalise line endings
-  const lines = text.replace(/\r\n/g, "\n").replace(/\r/g, "\n").split("\n").filter(l => l.trim());
-  console.log("[parseAIBCSV] total lines (incl header):", lines.length);
-  if (lines.length < 2) { console.warn("[parseAIBCSV] not enough lines"); return []; }
-  const headers = parseCsvLine(lines[0]);
-  console.log("[parseAIBCSV] headers:", headers);
-  const idx = name => headers.findIndex(h => h.trim() === name);
-  const dateI = idx("Posted Transactions Date");
-  const d1I   = idx("Description1"), d2I = idx("Description2"), d3I = idx("Description3");
-  const debI  = idx("Debit Amount"), crI = idx("Credit Amount");
-  const balI  = idx("Balance"), currI = idx("Posted Currency"), typeI = idx("Transaction Type");
-  console.log("[parseAIBCSV] column indices — date:", dateI, "desc1:", d1I, "debit:", debI, "credit:", crI, "balance:", balI);
-  if (dateI === -1) { console.error("[parseAIBCSV] 'Posted Transactions Date' column not found — headers don't match expected AIB format"); return []; }
-  const rows = [];
-  for (let i = 1; i < lines.length; i++) {
-    const c = parseCsvLine(lines[i]);
-    if (!c.length || c.every(x => !x)) continue;
-    const date = parseAIBDate(c[dateI] || "");
-    if (!date) { console.warn("[parseAIBCSV] row", i, "skipped — bad date:", JSON.stringify(c[dateI])); continue; }
-    const desc = [c[d1I], c[d2I], c[d3I]].map(s => (s || "").trim()).filter(Boolean).join(" ");
-    const credit = parseFloat((c[crI] || "0").replace(/,/g, "")) || 0;
-    const debit  = parseFloat((c[debI] || "0").replace(/,/g, "")) || 0;
-    const amount  = credit - debit;
-    const balance = parseFloat((c[balI] || "0").replace(/,/g, "")) || 0;
-    const currency = (c[currI] || "EUR").trim();
-    const type = (c[typeI] || "").trim();
-    const revolut_id = aibHash(`${date}|${desc}|${amount}|${i}`);
-    rows.push({ revolut_id, date, description: desc, amount, currency, balance, type });
-  }
-  console.log("[parseAIBCSV] parsed", rows.length, "rows. First row:", rows[0]);
-  return rows;
-}
+// Statement parsing (AIB, Bank of Ireland, Revolut, Wise) lives in src/shared/bankStatementParse.js (BNK-14).
 
 function cleanPayee(description) {
   let s = (description || "").trim();
@@ -11594,6 +11505,12 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
   const [alert, setAlert] = useState(null);
   const [toast, setToast] = useState(null);
   const [posting, setPosting] = useState(false);
+  // BNK-14: the statement's own checks (unreadable rows, balance breaks), the accountant's
+  // acknowledgement of them, and rows dated inside a filed VAT return found before posting.
+  const [stmtCheck, setStmtCheck] = useState(null);
+  const [stmtAck, setStmtAck] = useState(false);
+  const [lockPrompt, setLockPrompt] = useState(null);
+  const stmtIssues = !!stmtCheck && (stmtCheck.errors.length > 0 || stmtCheck.balance.breaks.length > 0);
   const [catProgress, setCatProgress] = useState(null); // null | { done, total, msg }
   const cancelCatRef = useRef(false);
   const [history, setHistory] = useState([]);
@@ -11985,22 +11902,24 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
     console.log("[loadFile] file selected:", file?.name, "size:", file?.size);
     try {
     if (!file || !file.name.toLowerCase().endsWith(".csv")) {
-      setAlert({ type: "err", msg: "Please upload a Revolut Business or AIB CSV file." }); return;
+      setAlert({ type: "err", msg: "Please upload a bank statement CSV: AIB, Bank of Ireland, Revolut or Wise." }); return;
     }
-    setFileName(file.name); setAlert(null);
+    setFileName(file.name); setAlert(null); setStmtCheck(null); setStmtAck(false); setLockPrompt(null);
     const text = await file.text();
-    console.log("[loadFile] file read, length:", text.length, "first 120 chars:", JSON.stringify(text.slice(0, 120)));
-    const fmt = detectCSVFormat(text);
-    console.log("[loadFile] detected format:", fmt);
-    if (!fmt) {
-      setAlert({ type: "err", msg: "Unrecognised CSV format. Please upload a Revolut Business or AIB export." }); return;
-    }
+    // BNK-14: one parser for every layout (src/shared/bankStatementParse.js), with the statement's
+    // own checks: an unreadable row is listed, never posted as 0 or dropped silently, and the
+    // printed running balance must follow the parsed amounts.
+    const statement = parseStatement(text);
+    if (!statement.format) { setAlert({ type: "err", msg: statement.refused }); return; }
+    const fmt = statement.format;
     setBankFormat(fmt);
-    console.log("[loadFile] starting parse for format:", fmt);
-    const parsed = fmt === "aib" ? parseAIBCSV(text) : parseRevolutCSV(text);
-    console.log("[loadFile] parse complete, rows:", parsed.length);
+    const parsed = statement.rows;
+    setStmtCheck({ errors: statement.errors, balance: statement.balance, label: statement.label });
     if (!parsed.length) {
-      setAlert({ type: "err", msg: fmt === "aib" ? "No transactions found in this AIB file." : "No COMPLETED transactions found in this file." }); return;
+      setAlert({ type: "err", msg: statement.errors.length
+        ? `None of the rows in this ${statement.label} file could be read: see the list below.`
+        : `No completed transactions found in this ${statement.label} file.` });
+      return;
     }
 
     // STEP 1: Render the table immediately — don't wait for Supabase
@@ -12069,8 +11988,10 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
     // importedIds. Same date + amount + account + similar description (the live feed's Tier-2
     // logic, shared via src/shared/importDedup.js) catches it; one-to-one, so two genuine
     // identical same-day charges only skip as many as are already in the ledger.
+    // BNK-14: run for every layout, not only AIB. Bank of Ireland lines carry no bank id, and a CSV
+    // line can repeat one the live feed already brought in under the feed's own id.
     const contentDupIds = new Set();
-    if (fmt === "aib" && existingRows.length) {
+    if (existingRows.length) {
       const parsedIds = new Set(parsed.map(r => r.revolut_id));
       const candidates = parsed.filter(r => !importedIds.has(r.revolut_id));
       // Existing rows this file already matched by id are spoken for — keep them out of the pool.
@@ -12086,7 +12007,10 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
     }
 
     // STEP 3: Apply exact matches immediately; keyword fallback for everything else — render now
-    const withStatus = parsed.map(r => ({ ...r, imported: importedIds.has(r.revolut_id) || contentDupIds.has(r.revolut_id) }));
+    // A Revolut fee line is new only with its payment: fees of payments imported before BNK-14 are
+    // covered by correcting journals, so re-importing an old file must not post them again.
+    const isDup = id => importedIds.has(id) || contentDupIds.has(id);
+    const withStatus = parsed.map(r => ({ ...r, imported: isDup(r.revolut_id) || (!!r.fee_of && isDup(r.fee_of)) }));
     const newTxns = withStatus.filter(r => !r.imported);
     const fuzzyMatched = new Set();
     const needFuzzy = [];
@@ -12100,6 +12024,8 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
         needFuzzy.push(r);
       }
     });
+    // Fixed codings from the parser (a Revolut fee is bank charges) win, and skip the rules and the AI.
+    newTxns.forEach(r => { if (r.nominal_hint) { updNom[r.revolut_id] = r.nominal_hint; updConf[r.revolut_id] = "high"; fuzzyMatched.add(r.revolut_id); } });
     setRows(withStatus);
     setNominals(updNom);
     setConfidence(updConf);
@@ -12377,12 +12303,33 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
     setSelected(allChk ? new Set() : new Set(newRows.map(r => r.revolut_id)));
   };
 
-  const post = async () => {
-    const toPost = rows.filter(r => selected.has(r.revolut_id));
+  const post = async ({ skipLocked = false } = {}) => {
+    let toPost = rows.filter(r => selected.has(r.revolut_id));
     if (!toPost.length) return;
     setPosting(true); setAlert(null);
     try {
       const cid = getCid();
+      // BNK-14: a row dated inside a filed VAT return makes the database refuse the whole batch.
+      // Find them first and ask: skip them and post the rest, or cancel.
+      const { data: filed, error: filedErr } = await supabase.from('vat_returns')
+        .select('period_start, period_end').eq('company_id', cid).eq('status', 'filed');
+      if (filedErr) throw new Error(`Couldn't check for filed VAT periods, so nothing was posted: ${filedErr.message}`);
+      const filedFor = r => (filed || []).find(v => r.date >= v.period_start && r.date <= v.period_end);
+      const lockedRows = toPost.filter(filedFor);
+      if (lockedRows.length && !skipLocked) {
+        const periods = [...new Map(lockedRows.map(r => { const v = filedFor(r); return [`${v.period_start}|${v.period_end}`, v]; })).values()];
+        setLockPrompt({ rows: lockedRows, periods });
+        setPosting(false);
+        return;
+      }
+      setLockPrompt(null);
+      if (lockedRows.length) {
+        const skip = new Set(lockedRows.map(r => r.revolut_id));
+        toPost = toPost.filter(r => !skip.has(r.revolut_id));
+        setSelected(s => { const n = new Set(s); skip.forEach(id => n.delete(id)); return n; });
+        if (!toPost.length) { setAlert({ type: "err", msg: "Every selected row is in a filed VAT period, so nothing was posted." }); setPosting(false); return; }
+      }
+      const postedIds = new Set(toPost.map(r => r.revolut_id));
       // ── Monthly transaction limit check ──────────────────────────────────────
       const txLimit = limit(company, 'bank_txns_per_month');
       if (txLimit !== null) {
@@ -12470,7 +12417,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
           if (mErr) console.warn('[post] bank_matches insert skipped (migration may not have run):', mErr.message);
         }
       }
-      setRows(prev => prev.map(r => selected.has(r.revolut_id) ? { ...r, imported: true } : r));
+      setRows(prev => prev.map(r => postedIds.has(r.revolut_id) ? { ...r, imported: true } : r));
       setSelected(new Set());
       sessionStorage.removeItem('ledgrly_import_session');
       sessionStorage.removeItem('ledgrly_import_nominals');
@@ -12937,7 +12884,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
           onClick={() => fileRef.current?.click()}
         >
           <div className="bi-drop-icon">⇅</div>
-          <div className="bi-drop-label">Drop your Revolut Business or AIB CSV here</div>
+          <div className="bi-drop-label">Drop a bank statement CSV here: AIB, Bank of Ireland, Revolut or Wise</div>
           <div className="bi-drop-sub">Auto-detects format · AI categorises automatically · checks for duplicates</div>
           <div className="bi-drop-btn">Choose File</div>
           <input ref={fileRef} type="file" accept=".csv" style={{ display: "none" }}
@@ -12947,6 +12894,24 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
       )}  {/* end activeTab === 'import' drop zone */}
 
       {activeTab === 'import' && alert && <div className={`bi-alert ${alert.type === "ok" ? "bi-alert-ok" : "bi-alert-err"}`}>{alert.msg}</div>}
+      {activeTab === 'import' && stmtCheck && (
+        <StatementCheckPanel check={stmtCheck} ack={stmtAck} onAck={setStmtAck} />
+      )}
+      {activeTab === 'import' && lockPrompt && (
+        <div className="bi-alert bi-alert-err" role="alert">
+          <div style={{ fontWeight: 700, marginBottom: 4 }}>
+            {lockPrompt.rows.length} selected row{lockPrompt.rows.length === 1 ? ' is' : 's are'} dated inside a filed VAT return
+          </div>
+          <div style={{ marginBottom: 8 }}>
+            Filed period{lockPrompt.periods.length === 1 ? '' : 's'}: {lockPrompt.periods.map(v => `${fmtIE(v.period_start)} to ${fmtIE(v.period_end)}`).join('; ')}.
+            The ledger is locked for those dates, so these rows cannot be posted unless the return is unfiled first.
+          </div>
+          <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            <button className="btn btn-p btn-sm" disabled={posting} onClick={() => post({ skipLocked: true })}>Skip them and post the rest</button>
+            <button className="btn btn-s btn-sm" disabled={posting} onClick={() => setLockPrompt(null)}>Cancel</button>
+          </div>
+        </div>
+      )}
 
       {/* ── Import History (shown when no file is loaded and import tab active) ── */}
       {activeTab === 'import' && !rows.length && (
@@ -13007,7 +12972,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
                             background: batch.bank_format === "revolut" ? "rgba(22,163,74,0.1)" : "rgba(29,107,114,0.1)",
                             color: batch.bank_format === "revolut" ? "var(--green)" : "var(--teal)",
                           }}>
-                            {batch.bank_format === "aib" ? "AIB" : "Revolut"}
+                            {FORMAT_LABEL[batch.bank_format] || batch.bank_format}
                           </span>
                         ) : <span style={{ color: "var(--dim)", fontSize: 11 }}>—</span>}
                       </td>
@@ -13069,7 +13034,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
                 color: bankFormat === "revolut" ? "var(--green)" : "var(--teal)",
                 border: bankFormat === "revolut" ? "1px solid rgba(22,163,74,0.25)" : "1px solid rgba(29,107,114,0.25)",
               }}>
-                {bankFormat === "revolut" ? "Revolut" : "AIB"}
+                {FORMAT_LABEL[bankFormat] || bankFormat}
               </span>
             )}
             <span className="bi-count">
@@ -13086,13 +13051,13 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
                   ...rows.map(r => {
                     const code = nominals[r.revolut_id] || "6600";
                     const name = GL_ACCOUNTS.find(a => a.code === code)?.name || code;
-                    return [fmtIE(r.date), r.description, r.revolut_id, fmtEUR(r.amount), fmtEUR(r.balance), `${code} — ${name}`, "—"];
+                    return [fmtIE(r.date), r.description, r.revolut_id, fmtEUR(r.amount), r.balance == null ? "" : fmtEUR(r.balance), `${code} — ${name}`, "—"];
                   }),
                 ]
               )}>
                 ⬇ CSV
               </button>
-              <button className="btn btn-s btn-sm" onClick={() => { setRows([]); setFileName(""); setAlert(null); setSelected(new Set()); setCatProgress(null); setBankFormat(null); sessionStorage.removeItem('ledgrly_import_session'); sessionStorage.removeItem('ledgrly_import_nominals'); }}>
+              <button className="btn btn-s btn-sm" onClick={() => { setRows([]); setFileName(""); setAlert(null); setSelected(new Set()); setCatProgress(null); setBankFormat(null); setStmtCheck(null); setStmtAck(false); setLockPrompt(null); sessionStorage.removeItem('ledgrly_import_session'); sessionStorage.removeItem('ledgrly_import_nominals'); }}>
                 Clear
               </button>
               {bankAccounts.length > 1 && (
@@ -13105,7 +13070,8 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
                   {bankAccounts.map(a => <option key={a.id} value={a.id}>{a.display_name}</option>)}
                 </select>
               )}
-              <button className="btn btn-p btn-sm" onClick={post} disabled={posting || selected.size === 0 || !!catProgress}>
+              <button className="btn btn-p btn-sm" onClick={() => post()} disabled={posting || selected.size === 0 || !!catProgress || (stmtIssues && !stmtAck)}
+                title={stmtIssues && !stmtAck ? "Check the statement problems listed above first" : undefined}>
                 {posting ? "Posting…" : `Post ${selected.size > 0 ? selected.size + " " : ""}Selected to Ledger`}
               </button>
             </div>
@@ -13174,7 +13140,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
                       </span>
                     </td>
                     <td className="r">
-                      <span className="bi-bal">{(r.balance ?? 0).toLocaleString("en-IE", { minimumFractionDigits: 2 })}</span>
+                      <span className="bi-bal">{r.balance == null ? "—" : r.balance.toLocaleString("en-IE", { minimumFractionDigits: 2 })}</span>
                     </td>
                     <td onClick={e => e.stopPropagation()}>
                       {!r.imported ? (
