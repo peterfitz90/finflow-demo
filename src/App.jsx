@@ -11183,8 +11183,36 @@ async function callStatementRead(body) {
 }
 
 // Whether a statement's own checks found anything the accountant must look at before posting.
-const statementHasIssues = c => !!c && (c.errors.length > 0 || c.balance.breaks.length > 0 || (c.failed || []).length > 0
+const statementHasIssues = c => !!c && (!!c.imageRead || c.errors.length > 0 || c.balance.breaks.length > 0 || (c.failed || []).length > 0
   || (c.flagged || []).length > 0 || (c.dates?.outOfSequence || []).length > 0);
+
+// Local OCR (BNK-14 step 3b), in the browser: the page images never leave the accountant's machine.
+// Returns the text of each page that has rows. onProgress(done, total).
+async function ocrPages(pdf, pages, onProgress) {
+  const { createWorker } = await import('tesseract.js');
+  const worker = await createWorker('eng');
+  const out = {};
+  try {
+    let done = 0;
+    for (const n of pages) {
+      const page = await pdf.getPage(n);
+      const v = page.getViewport({ scale: 2 });
+      const c = document.createElement('canvas');
+      c.width = v.width; c.height = v.height;
+      await page.render({ canvasContext: c.getContext('2d'), viewport: v }).promise;
+      out[n] = (await worker.recognize(c)).data.text;
+      onProgress(++done, pages.length);
+    }
+  } finally { await worker.terminate(); }
+  return out;
+}
+// A line is confirmed when the OCR text of its page shows its amount and, if printed, its balance.
+const ocrConfirms = (row, text) => {
+  if (text == null) return null;
+  const t = text.replace(/\s+/g, '');
+  const shows = v => { const a = Math.abs(v); return t.includes(a.toLocaleString('en-IE', { minimumFractionDigits: 2, maximumFractionDigits: 2 })) || t.includes(a.toFixed(2)); };
+  return shows(row.amount) && (row.balance == null || shows(row.balance));
+};
 
 function PdfStatementReview({ company, read, doc, bankAccounts, onUse, onClose }) {
   const sections = read.sections || [];
@@ -11195,6 +11223,19 @@ function PdfStatementReview({ company, read, doc, bankAccounts, onUse, onClose }
   const [pdf, setPdf] = useState(null);
   const [pdfErr, setPdfErr] = useState(null);
   const canvasRef = useRef(null);
+  const imageRead = read.mode === 'image';
+  const [ocr, setOcr] = useState(null); // { done, total, texts, error }
+  useEffect(() => {
+    if (!imageRead || !pdf) return;
+    let off = false;
+    const pages = [...new Set(sections.flatMap(s => s.rows.map(r => r.page)))].sort((a, b) => a - b);
+    setOcr({ done: 0, total: pages.length, texts: null });
+    ocrPages(pdf, pages, (done, total) => { if (!off) setOcr(o => ({ ...(o || {}), done, total })); })
+      .then(texts => { if (!off) setOcr(o => ({ ...(o || {}), texts })); })
+      .catch(e => { if (!off) setOcr(o => ({ ...(o || {}), error: e.message })); });
+    return () => { off = true; };
+  }, [imageRead, pdf]); // eslint-disable-line react-hooks/exhaustive-deps
+  const confirmed = r => (ocr?.texts ? ocrConfirms(r, ocr.texts[r.page]) : null);
   useEffect(() => {
     let off = false;
     (async () => {
@@ -11243,6 +11284,15 @@ function PdfStatementReview({ company, read, doc, bankAccounts, onUse, onClose }
           </div>
           <button className="btn btn-s btn-sm" onClick={onClose}>Close</button>
         </div>
+        {imageRead && (
+          <div className="bi-alert" style={{ fontSize: 12, borderLeft: "4px solid var(--warn)" }}>
+            <b>Read from the page images.</b> This PDF has no usable text, so its figures could not be checked against the PDF's own text. The balance and total checks still apply, and every line must be checked against the page before posting.
+            {ocr && !ocr.texts && !ocr.error && <div style={{ marginTop: 4, color: "var(--muted)" }}>Checking the figures on this computer (OCR): page {ocr.done} of {ocr.total}…</div>}
+            {ocr?.texts && (() => { const all = sections.flatMap(s => s.rows); const bad = all.filter(r => confirmed(r) === false).length;
+              return <div style={{ marginTop: 4 }}>Local OCR confirmed {all.length - bad} of {all.length} lines; {bad ? <b>{bad} marked ? to check first</b> : 'none to check first'}.</div>; })()}
+            {ocr?.error && <div style={{ marginTop: 4, color: "var(--red)" }}>Local OCR did not run ({ocr.error}); check every line against the page.</div>}
+          </div>
+        )}
         {sections.length > 1 && (
           <div style={{ display: "flex", gap: 4, flexWrap: "wrap", marginBottom: 8 }}>
             {sections.map(s => (
@@ -11283,7 +11333,7 @@ function PdfStatementReview({ company, read, doc, bankAccounts, onUse, onClose }
             <tbody>
               {sec.rows.map(r => (
                 <tr key={r.revolut_id} onClick={() => setPage(r.page)} style={r.flags ? { background: "rgba(220,38,38,0.08)" } : undefined} title={r.flags ? r.flags.join('; ') : undefined}>
-                  <td style={{ whiteSpace: "nowrap" }}>{fmtIE(r.date)}{r.flags ? ' ⚑' : ''}</td>
+                  <td style={{ whiteSpace: "nowrap" }}>{fmtIE(r.date)}{r.flags ? ' ⚑' : ''}{confirmed(r) === false ? <span title="Local OCR could not confirm this line's figures: check it against the page" style={{ color: "var(--red)", fontWeight: 700 }}> ?</span> : ''}</td>
                   <td>{r.description}</td>
                   <td className="r" style={{ textAlign: "right" }}>{r.amount > 0 ? fmt(r.amount) : ''}</td>
                   <td className="r" style={{ textAlign: "right" }}>{r.amount < 0 ? fmt(r.amount) : ''}</td>
@@ -11295,7 +11345,8 @@ function PdfStatementReview({ company, read, doc, bankAccounts, onUse, onClose }
           </table>
         </div>
         <div style={{ display: "flex", gap: 8, alignItems: "center", marginTop: 10, flexWrap: "wrap" }}>
-          <button className="btn btn-p btn-sm" disabled={!account || currencyMismatch || !sec.rows.length} onClick={() => onUse(sec, account.id)}>
+          <button className="btn btn-p btn-sm" disabled={!account || currencyMismatch || !sec.rows.length} onClick={() => onUse(sec, account.id, {
+            mode: read.mode, ocrUnconfirmed: ocr?.texts ? sec.rows.filter(r => confirmed(r) === false).map(r => r.revolut_id) : null, ocrRan: !!ocr?.texts })}>
             Preview the import of {sec.rows.length} line{sec.rows.length === 1 ? '' : 's'}
           </button>
           <span style={{ fontSize: 11, color: "var(--muted)" }}>Next: coding, the duplicate check and the statement checks, as for a CSV. Nothing is posted until you post it.</span>
@@ -11324,6 +11375,12 @@ function StatementCheckPanel({ check, ack, onAck }) {
   const { errors, balance, label } = check;
   const failed = check.failed || [], flagged = check.flagged || [], outOfSeq = check.dates?.outOfSequence || [];
   const issues = statementHasIssues(check);
+  const imageNote = check.imageRead && (
+    <div style={{ marginBottom: 8 }}>
+      <div style={{ fontWeight: 700 }}>Read from the page images</div>
+      These lines were read from the statement's page images, not its text, so they are never posted without your check against the page{check.ocrRan ? '' : ' (local OCR did not run)'}.
+    </div>
+  );
   if (!issues) {
     return balance.mode === 'none'
       ? <div className="bi-alert" style={{ fontSize: 12 }}>This {label} file prints no running balance, so its amounts could not be checked against it.</div>
@@ -11331,6 +11388,7 @@ function StatementCheckPanel({ check, ack, onAck }) {
   }
   return (
     <div className="bi-alert bi-alert-err" role="alert" style={{ fontSize: 12 }}>
+      {imageNote}
       {errors.length > 0 && (
         <div style={{ marginBottom: 8 }}>
           <div style={{ fontWeight: 700 }}>{errors.length} row{errors.length === 1 ? '' : 's'} could not be read and will not be imported</div>
@@ -11370,7 +11428,7 @@ function StatementCheckPanel({ check, ack, onAck }) {
       )}
       <label style={{ display: "flex", gap: 8, alignItems: "flex-start", cursor: "pointer" }}>
         <input type="checkbox" checked={ack} onChange={e => onAck(e.target.checked)} style={{ marginTop: 2 }} />
-        <span>I have checked these against the statement.{errors.length > 0 ? " The rows that could not be read are not imported, and I will enter them by hand." : ""}</span>
+        <span>I have checked {check.imageRead ? 'every line against the page images' : 'these against the statement'}.{errors.length > 0 ? " The rows that could not be read are not imported, and I will enter them by hand." : ""}</span>
       </label>
     </div>
   );
@@ -11962,6 +12020,13 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
         (a, b) => new Date(b.imported_at) - new Date(a.imported_at)
       );
       console.log("[loadHistory] final history:", sorted.length, "entries");
+      // BNK-14: the read each PDF batch came from (mode and cost), from statement_reads
+      if (sorted.some(g => /^pdf/.test(g.bank_format || ''))) {
+        const { data: reads } = await db.from('statement_reads').select('mode, cost_usd, imports').eq('company_id', cid).not('imports', 'eq', '[]');
+        const byBatch = {};
+        for (const r of reads || []) for (const i of r.imports || []) byBatch[i.import_batch_id] = { mode: r.mode, cost_usd: Number(r.cost_usd) };
+        sorted.forEach(g => { if (byBatch[g.import_batch_id]) g.read = byBatch[g.import_batch_id]; });
+      }
       setHistory(sorted);
     } catch (err) {
       console.error("[BankImport] loadHistory threw:", err);
@@ -12415,9 +12480,24 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
     try {
       setPdfStage(`Uploading ${file.name}…`);
       const up = await uploadDocument(company.id, 'bank_statement', file);
-      setPdfStage(`Reading ${file.name}: this takes about 10 to 30 seconds…`);
+      setPdfStage(`Reading ${file.name}: this takes about 10 to 60 seconds…`);
+      // progress: the server records the read as it goes (statement_reads.chunks_done)
+      let polling = true;
+      const poll = async () => {
+        while (polling) {
+          await new Promise(r => setTimeout(r, 2000));
+          if (!polling) break;
+          const { data } = await supabase.from('statement_reads').select('mode, status, chunks, chunks_done')
+            .eq('company_id', company.id).eq('source_document_id', up.destination.id).order('created_at', { ascending: false }).limit(1);
+          const r = data?.[0];
+          if (polling && r?.status === 'reading') setPdfStage(r.mode === 'image'
+            ? `Reading ${file.name} from its page images (it has no usable text): ${r.chunks_done} of ${r.chunks} parts done…`
+            : `Reading ${file.name}: ${r.chunks_done} of ${r.chunks} parts done…`);
+        }
+      };
+      poll();
       const read = await callStatementRead({ action: 'read', company_id: company.id, source_document_id: up.destination.id,
-        reader_name: window.Clerk?.user?.fullName || null });
+        reader_name: window.Clerk?.user?.fullName || null }).finally(() => { polling = false; });
       if (read.refused) setPdfErr(read.refused);
       else setPdfRead({ read, doc: { id: up.destination.id, filename: file.name } });
     } catch (e) {
@@ -12428,26 +12508,30 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
   };
 
   // A reviewed section enters the same preview as a CSV.
-  const usePdfSection = async (sec, accountId) => {
+  const usePdfSection = async (sec, accountId, extra = {}) => {
+    const imageRead = extra.mode === 'image';
+    const ocrBad = new Set(extra.ocrUnconfirmed || []);
     if (loadingRef.current) return;
     const runCheck = sec.checks.find(c => /running balance/.test(c.check));
     setSelectedBankAccountId(accountId);
     setPdfContext({ read_id: pdfRead.read.read_id, section_key: sec.key });
     setFileName(`${pdfRead.doc.filename} · ${sec.label}`);
-    setBankFormat('pdf');
+    setBankFormat(imageRead ? 'pdf-image' : 'pdf');
     setStmtCheck({
-      label: 'PDF statement',
+      label: imageRead ? 'PDF statement read from page images' : 'PDF statement',
+      imageRead, ocrRan: !!extra.ocrRan,
       errors: sec.errors.map(e => ({ line: `page ${e.page}`, message: e.message })),
       balance: runCheck ? { mode: /per day/.test(runCheck.check) ? 'day' : 'row', checked: Number((runCheck.detail.match(/(\d+) checked/) || [])[1]) || 0, breaks: runCheck.breaks || [] }
         : { mode: 'none', checked: 0, breaks: [] },
       failed: sec.checks.filter(c => !c.ok && !/running balance/.test(c.check)).map(c => `${c.check}: ${c.detail}`),
-      flagged: sec.rows.filter(r => r.flags).map(r => ({ date: r.date, description: r.description, flags: r.flags })),
+      flagged: sec.rows.filter(r => r.flags || ocrBad.has(r.revolut_id)).map(r => ({ date: r.date, description: r.description,
+        flags: [...(r.flags || []), ...(ocrBad.has(r.revolut_id) ? ['not confirmed by local OCR'] : [])] })),
     });
     setStmtAck(false); setLockPrompt(null); setAlert(null);
     loadingRef.current = true;
     try {
       await runPreview(sec.rows.map(r => ({ revolut_id: r.revolut_id, date: r.date, description: r.description, amount: r.amount,
-        currency: r.currency || 'EUR', balance: r.balance, type: '' })), 'pdf', `${pdfRead.doc.filename} · ${sec.label}`);
+        currency: r.currency || 'EUR', balance: r.balance, type: '' })), imageRead ? 'pdf-image' : 'pdf', `${pdfRead.doc.filename} · ${sec.label}`);
     } finally { loadingRef.current = false; }
   };
 
@@ -13208,7 +13292,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
                         )}
                       </td>
                       <td>
-                        {batch.bank_format ? (
+                        {batch.bank_format ? (<>
                           <span style={{
                             fontSize: 10, fontFamily: "Source Code Pro, monospace", fontWeight: 700,
                             padding: "2px 8px", borderRadius: 20, textTransform: "uppercase",
@@ -13217,7 +13301,8 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
                           }}>
                             {FORMAT_LABEL[batch.bank_format] || batch.bank_format}
                           </span>
-                        ) : <span style={{ color: "var(--dim)", fontSize: 11 }}>—</span>}
+                          {batch.read && <span style={{ marginLeft: 6, fontSize: 10, color: "var(--muted)" }}>read cost US${batch.read.cost_usd.toFixed(2)}</span>}
+                        </>) : <span style={{ color: "var(--dim)", fontSize: 11 }}>—</span>}
                       </td>
                       <td className="r mono" style={{ color: batch.journalOnly ? "var(--dim)" : undefined, fontSize: batch.journalOnly ? 11 : undefined }}>
                         {batch.journalOnly ? "journals only" : batch.count}

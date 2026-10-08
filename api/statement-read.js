@@ -79,22 +79,36 @@ export default withSentry(async function handler(req, res) {
   if (dl.error || !dl.data) return res.status(404).json({ error: 'The stored statement could not be read' });
   const buf = Buffer.from(await dl.data.arrayBuffer());
   const model = AI_MODEL.readStatement;
-  const base = { company_id: b.company_id, source_document_id: doc.id, mode: 'text', model, created_by: userId, created_by_name: (b.reader_name || '').slice(0, 120) || null };
+  const base = { company_id: b.company_id, source_document_id: doc.id, model, created_by: userId, created_by_name: (b.reader_name || '').slice(0, 120) || null };
+  // The read is recorded when it starts (status 'reading') and updated as each part finishes, so the
+  // screen can show progress; image reads (no usable text layer) are read in parallel parts.
+  let readId = null;
+  const deps = {
+    callClaude,
+    onStart: async s => {
+      const rec = must(await serviceDb.from('statement_reads').insert({ ...base, mode: s.mode, status: 'reading', pages: s.pages, chunks: s.chunks, chunks_done: 0 }).select('id').single(), 'record the read');
+      readId = rec.id;
+    },
+    onProgress: async p => { if (readId) await serviceDb.from('statement_reads').update({ chunks_done: p.done }).eq('id', readId); },
+  };
+  const finish = async fields => {
+    if (readId) { must(await serviceDb.from('statement_reads').update(fields).eq('id', readId), 'record the read'); return readId; }
+    return must(await serviceDb.from('statement_reads').insert({ ...base, mode: fields.mode || 'text', ...fields }).select('id').single(), 'record the read').id;
+  };
   let out;
   try {
-    out = await readStatementPdf({ callClaude }, { buf, model, companyId: b.company_id });
+    out = await readStatementPdf(deps, { buf, model, companyId: b.company_id, allowImage: true });
   } catch (e) {
-    must(await serviceDb.from('statement_reads').insert({ ...base, status: 'failed', refused_reason: e.message.slice(0, 500) }), 'record the read');
+    await finish({ status: 'failed', refused_reason: e.message.slice(0, 500) });
     return res.status(502).json({ error: `The statement could not be read: ${e.message}` });
   }
-  const cost = { tokens_in: out.tokens?.input || 0, tokens_out: out.tokens?.output || 0, cost_usd: Number((out.cost?.usd || 0).toFixed(4)), ms: out.ms || null, pages: out.pages, chunks: out.chunks?.length || 0 };
+  const cost = { mode: out.mode, tokens_in: out.tokens?.input || 0, tokens_out: out.tokens?.output || 0, cost_usd: Number((out.cost?.usd || 0).toFixed(4)), ms: out.ms || null, pages: out.pages, chunks: out.chunks?.length || 0, chunks_done: out.chunks?.length || 0 };
   if (out.refused) {
-    const rec = must(await serviceDb.from('statement_reads').insert({ ...base, ...cost, status: 'refused', refused_reason: out.refused }).select('id').single(), 'record the read');
-    return res.status(200).json({ read_id: rec.id, refused: out.refused, kind: out.kind, pages: out.pages, cost_usd: cost.cost_usd });
+    const id = await finish({ ...cost, status: 'refused', refused_reason: out.refused });
+    return res.status(200).json({ read_id: id, refused: out.refused, mode: out.mode, kind: out.kind, pages: out.pages, cost_usd: cost.cost_usd });
   }
   const screen = forScreen(out);
-  const rec = must(await serviceDb.from('statement_reads').insert({ ...base, ...cost, status: 'read', period_start: screen.period.start, period_end: screen.period.end,
-    summary: screen.summary, result: screen }).select('id').single(), 'record the read');
+  const rec = { id: await finish({ ...cost, status: 'read', period_start: screen.period.start, period_end: screen.period.end, summary: screen.summary, result: { ...screen, mode: out.mode } }) };
   // the document's period and retention date: six years after the financial year that contains the
   // statement's last day ends (Peter, 8 Oct 2026). Filled in once, never moved.
   if (screen.period.end && !doc.period_end) {
@@ -103,5 +117,5 @@ export default withSentry(async function handler(req, res) {
     const fy = fiscalYearContaining(screen.period.end, fiscalConfig(company, periods));
     must(await serviceDb.from('source_documents').update({ period_start: screen.period.start, period_end: screen.period.end, retain_until: addYears(fy.end, 6) }).eq('id', doc.id), 'retention');
   }
-  return res.status(200).json({ read_id: rec.id, kind: 'text', pages: out.pages, chunks: out.chunks.length, cost_usd: cost.cost_usd, ms: cost.ms, ...screen });
+  return res.status(200).json({ read_id: rec.id, mode: out.mode, kind: out.kind, pages: out.pages, chunks: out.chunks.length, cost_usd: cost.cost_usd, ms: cost.ms, ...screen });
 });

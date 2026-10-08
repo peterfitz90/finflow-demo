@@ -165,5 +165,9 @@ export async function cleanupStaging(deps) {
   }
   if (remove.length) must(await store.remove(remove), 'remove staging');
   const expired = must(await deps.serviceDb.from('uploads').update({ status: 'expired' }).eq('status', 'pending').lt('expires_at', new Date(deps.now()).toISOString()).select('id'), 'expire') || [];
-  return { examined: candidates.length, removed: remove.length, kept_archive_unconfirmed: kept.length, expired: expired.length };
+  // a statement read still 'reading' after 10 minutes stopped (a function timeout): close it as failed
+  const stale = new Date(new Date(deps.now()).getTime() - 10 * 60 * 1000).toISOString();
+  const stuck = must(await deps.serviceDb.from('statement_reads').update({ status: 'failed', refused_reason: 'The read stopped before it finished (timed out)' })
+    .eq('status', 'reading').lt('created_at', stale).select('id'), 'stuck reads') || [];
+  return { examined: candidates.length, removed: remove.length, kept_archive_unconfirmed: kept.length, expired: expired.length, stuck_reads_closed: stuck.length };
 }

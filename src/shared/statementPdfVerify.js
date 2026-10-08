@@ -86,16 +86,27 @@ export function classifyPage(text) {
 // ── Assemble and verify ───────────────────────────────────────────────────────────────────────
 // chunks: [{ firstPage (1-based in the whole PDF), result (model JSON) }]; pageTexts: text by page
 // (0-based). Returns { sections: [{ key, label, currency, rows, checks, errors }], issues, summary }.
-export function verifyStatement({ chunks, pageTexts }) {
-  const first = chunks.find(c => c.result?.statement)?.result.statement || {};
-  const period = {
-    start: first.period_start_text ? readPrintedDate(first.period_start_text).value ?? null : null,
-    end: first.period_end_text ? readPrintedDate(first.period_end_text).value ?? null : null,
-  };
+// textCheck: false for an image read (the PDF has no usable text layer to check figures against;
+// the arithmetic checks still apply, and local OCR marks figures it cannot confirm on the screen).
+export function verifyStatement({ chunks, pageTexts, textCheck = true }) {
+  // The period: from the earliest start to the latest end printed in any part (a PDF can hold
+  // several consecutive statement periods, each with its own header).
+  const dateOf = t => (t ? readPrintedDate(t).value ?? null : null);
+  const starts = chunks.map(c => dateOf(c.result?.statement?.period_start_text)).filter(Boolean).sort();
+  const ends = chunks.map(c => dateOf(c.result?.statement?.period_end_text)).filter(Boolean).sort();
+  const period = { start: starts[0] || null, end: ends[ends.length - 1] || null };
   const byKey = new Map();
   for (const c of chunks) {
-    for (const s of c.result?.sections || []) {
-      const key = String(s.key || s.account_label || s.currency || 'main');
+    const own = c.result?.sections || [];
+    for (const s of own) {
+      let key = String(s.key || s.account_label || s.currency || 'main');
+      // the same account named differently in another part of the statement: when this part has
+      // one section in a currency and the statement so far has exactly one in that currency, they
+      // are the same account, so the balance carries across the boundary
+      if (!byKey.has(key)) {
+        const sameCur = [...byKey.values()].filter(x => (x.currency || null) === (s.currency || null) || !x.currency || !s.currency);
+        if (sameCur.length === 1 && own.filter(o => (o.currency || null) === (s.currency || null)).length === 1) key = sameCur[0].key;
+      }
       if (!byKey.has(key)) byKey.set(key, { key, label: s.account_label || key, currency: s.currency || null, raw: [], printed: {} });
       const sec = byKey.get(key);
       for (const f of ['opening_balance_text', 'closing_balance_text', 'total_in_text', 'total_out_text', 'count_text']) {
@@ -116,7 +127,7 @@ export function verifyStatement({ chunks, pageTexts }) {
       const pageText = pageTexts[r.absPage - 1] ?? '';
       const errs = [];
       const fields = { date_text: r.date_text, money_in_text: r.money_in_text, money_out_text: r.money_out_text, amount_text: r.amount_text, balance_text: r.balance_text };
-      for (const [f, v] of Object.entries(fields)) if (v != null && v !== '' && !onPage(v, pageText)) errs.push(`${f.replace('_text', '')} "${v}" is not on page ${r.absPage}`);
+      if (textCheck) for (const [f, v] of Object.entries(fields)) if (v != null && v !== '' && !onPage(v, pageText)) errs.push(`${f.replace('_text', '')} "${v}" is not on page ${r.absPage}`);
       const date = readPrintedDate(r.date_text, { periodStart: period.start, periodEnd: period.end });
       const inn = readPrintedAmount(r.money_in_text), out = readPrintedAmount(r.money_out_text), amt = readPrintedAmount(r.amount_text), bal = readPrintedAmount(r.balance_text);
       for (const x of [date, inn, out, amt, bal]) if (x.error) errs.push(x.error);
@@ -137,7 +148,7 @@ export function verifyStatement({ chunks, pageTexts }) {
     // printed opening / closing / totals / count, each also on its page
     const pv = f => { const p = sec.printed[f]; if (!p) return null; const a = f === 'count_text' ? { value: Number(String(p.text).replace(/[^\d]/g, '')) || null } : readPrintedAmount(p.text); return { ...a, text: p.text }; };
     const opening = pv('opening_balance_text'), closing = pv('closing_balance_text'), tin = pv('total_in_text'), tout = pv('total_out_text'), cnt = pv('count_text');
-    for (const [f, v] of Object.entries(sec.printed)) {
+    if (textCheck) for (const [f, v] of Object.entries(sec.printed)) {
       const onAny = pageTexts.some(t => onPage(v.text, t));
       if (!onAny) checks.push({ check: `${f.replace('_text', '')} is printed`, ok: false, detail: `"${v.text}" is not on any page` });
     }

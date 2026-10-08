@@ -14,7 +14,8 @@ export function irishDayStart(now = new Date()) {
   return new Date(Date.parse(`${ymd}T00:00:00Z`) - offsetH * 3600 * 1000).toISOString();
 }
 
-const counts = r => r.status === 'read' || r.status === 'failed' || (r.tokens_in || 0) > 0;
+// a read in progress counts too (it is calling the model)
+const counts = r => r.status === 'read' || r.status === 'failed' || r.status === 'reading' || (r.tokens_in || 0) > 0;
 
 // reads: today's statement_reads rows ({ status, tokens_in, cost_usd }); limits: an override row or null.
 export function readCapStatus(reads, limits = null) {

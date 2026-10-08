@@ -174,3 +174,24 @@ test('dates: a row out of sequence fails the check and is flagged for review', (
   assert.deepEqual(v.sections[0].rows.filter(r => r.flags).map(r => [r.date, r.flags]), [['2026-07-02', ['date out of sequence']]]);
   assert.equal(v.summary.ok, false);
 });
+
+test('chunks: the same account named differently in another part is merged, and the balance carries across', () => {
+  const names = ['EUR Explore', 'Explore Account', 'Explore'];
+  const chunks = [1, 2, 3].map((p, i) => ({ firstPage: p, result: { statement: { ...statement, period_start_text: i === 0 ? '01 Jul 2026' : null, period_end_text: i === 2 ? '31 Jul 2026' : null },
+    sections: [section(LINES.filter(l => l.page === p).map(l => row(l, 1)), { key: names[i], ...(p === 1 ? { opening_balance_text: '€100.00' } : p === 3 ? { closing_balance_text: '€125.00' } : {}) })] } }));
+  const v = verifyStatement({ chunks, pageTexts: TEXTS });
+  assert.equal(v.sections.length, 1);
+  assert.equal(v.summary.ok, true, JSON.stringify(v.sections.map(s => s.checks)));
+  // two accounts in the same currency in one part are not merged
+  const two = [{ firstPage: 1, result: { statement, sections: [section([row(LINES[0])], { key: 'EUR 1111' }), section([row(LINES[1])], { key: 'EUR 2222' })] } },
+    { firstPage: 2, result: { sections: [section([row(LINES[2], 1)], { key: 'EUR 3333' })] } }];
+  assert.equal(verifyStatement({ chunks: two, pageTexts: TEXTS }).sections.length, 3);
+});
+
+test('period: from the earliest start to the latest end printed in any part', () => {
+  const chunks = [{ firstPage: 1, result: { statement: { ...statement, period_start_text: '01 Jul 2026', period_end_text: '10 Jul 2026' }, sections: [section(LINES.filter(l => l.page === 1).map(l => row(l)), { opening_balance_text: '€100.00' })] } },
+    { firstPage: 2, result: { statement: { period_start_text: '11 Jul 2026', period_end_text: '31 Jul 2026' }, sections: [section(LINES.filter(l => l.page > 1).map(l => row(l, l.page - 1)), { closing_balance_text: '€125.00' })] } }];
+  const v = verifyStatement({ chunks, pageTexts: TEXTS });
+  assert.deepEqual(v.period, { start: '2026-07-01', end: '2026-07-31' });
+  assert.ok(v.sections[0].checks.some(c => c.check === 'dates within the statement period' && c.ok));
+});

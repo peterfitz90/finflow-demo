@@ -8,6 +8,8 @@ import { classifyPage, verifyStatement } from '../src/shared/statementPdfVerify.
 
 export const CHUNK_PAGES = 10;
 export const CONCURRENCY = 3;
+// image mode (BNK-14 step 3b): about 3 pages a chunk, read in parallel (Peter, 10 Oct 2026)
+export const IMAGE_CHUNK_PAGES = 3;
 // Published rates, USD per million tokens (platform.claude.com pricing, checked 9 Oct 2026).
 export const PRICE_PER_MTOK = { 'claude-sonnet-5-5': { input: 2, output: 10 }, 'claude-haiku-4-5-20251001': { input: 1, output: 5 } };
 
@@ -61,11 +63,16 @@ Return ONLY a JSON object of this shape:
 Rules:
 - document_type: "transactions" for an account statement listing transactions; "fees" for a statement of fees, charges or interest; "other" for anything else (then return no sections).
 - Every *_text value is copied character for character from the page (keep currency signs, commas, minus signs, CR/DR). Use null when nothing is printed.
-- One section per account, currency or pocket, in the order printed. "key" is short and identical for the same account in every part of the statement (for example "EUR main" or "GBP"). In account_label write only the account's name or type and at most the last 4 digits of any account number or IBAN.
+- One section per account, currency or pocket, in the order printed. "key" is the currency code and the last 4 digits of the account number (for example "EUR 1234"), or the currency code and "main" when no number is printed; it must be identical for the same account in every part of the statement. In account_label write only the account's name or type and at most the last 4 digits of any account number or IBAN.
 - One row per transaction line, in the order printed, with the page number (1 = the first page you were given). Join a description that wraps onto several lines.
 - Use money_in_text and money_out_text when the statement has separate in/out (or credit/debit) columns; use amount_text when it prints one signed amount. Never both.
 - Do not output as rows: column headers, page totals, "balance brought forward" or "carried forward" lines, opening or closing balance lines, or summaries. Put the statement's opening and closing balance, total in, total out and transaction count in the section fields when printed.
 - status_text: only if the statement marks the line (for example "Pending" or "Reverted").`;
+
+// Added to the prompt when the PDF has no usable text layer.
+export const IMAGE_NOTE = `
+
+This PDF has no usable text layer: any embedded text may be garbled, so ignore it and read only what is printed on the page images. Copy each figure exactly as printed on the page.`;
 
 function parseJson(text) {
   const t = String(text || '').trim().replace(/^```(?:json)?\s*/i, '').replace(/\s*```$/, '');
@@ -74,14 +81,22 @@ function parseJson(text) {
   return JSON.parse(t.slice(a, b + 1));
 }
 
-// -> { kind, pages, refused?, chunks: [{ firstPage, lastPage, ms, usage, stop_reason }], result, cost }
-export async function readStatementPdf(deps, { buf, model, chunkPages = CHUNK_PAGES, companyId = null }) {
+// mode 'text': the PDF's own text layer is usable; every figure is checked against it.
+// mode 'image' (BNK-14 step 3b): pages with no usable text layer (scanned, or text that cannot be
+// decoded) are read from the page images, in chunks of IMAGE_CHUNK_PAGES; the arithmetic checks
+// still apply, there is no text layer to check figures against, and the result is always held for
+// the accountant's review. allowImage: false keeps the step 3a behaviour (refuse such files).
+// deps.onStart({ mode, pages, chunks }) and deps.onProgress({ done, total, pages }) report progress.
+// -> { mode, kind, pages, refused?, chunks: [{ firstPage, lastPage, ms, usage, stop_reason }], result, tokens, cost, ms }
+export async function readStatementPdf(deps, { buf, model, chunkPages = null, companyId = null, allowImage = false }) {
   const texts = await pageTexts(buf);
   const cls = classifyFile(texts);
-  if (cls.kind !== 'text') return { kind: cls.kind, pages: texts.length, refused: cls.kind === 'scanned'
+  const mode = cls.kind === 'text' ? 'text' : 'image';
+  if (mode === 'image' && !allowImage) return { mode, kind: cls.kind, pages: texts.length, refused: cls.kind === 'scanned'
     ? 'Ledgrly cannot read photographed or scanned statements yet. Ask for the PDF downloaded from online banking.'
     : "This PDF's text cannot be read (its characters are encoded so they can't be decoded). Reading such statements from the page images is coming; for now ask for the bank's CSV export or another download." };
-  const parts = await chunkPdf(buf, chunkPages);
+  const parts = await chunkPdf(buf, chunkPages || (mode === 'image' ? IMAGE_CHUNK_PAGES : CHUNK_PAGES));
+  await deps.onStart?.({ mode, kind: cls.kind, pages: texts.length, chunks: parts.length });
   // chunks are read in parallel (CONCURRENCY at a time) and kept in page order; the balance is
   // carried across each boundary by the verification, which sees them joined
   const chunks = new Array(parts.length);
@@ -92,7 +107,7 @@ export async function readStatementPdf(deps, { buf, model, chunkPages = CHUNK_PA
       model, max_tokens: 32000, operation: 'read-statement-pdf', company_id: companyId,
       messages: [{ role: 'user', content: [
         { type: 'document', source: { type: 'base64', media_type: 'application/pdf', data: part.base64 } },
-        { type: 'text', text: READ_PROMPT },
+        { type: 'text', text: mode === 'image' ? READ_PROMPT + IMAGE_NOTE : READ_PROMPT },
       ] }],
     });
     if (!r.ok) throw new Error(`model call failed for pages ${part.firstPage}-${part.lastPage}: ${r.data?.error?.message || r.status}`);
@@ -100,7 +115,7 @@ export async function readStatementPdf(deps, { buf, model, chunkPages = CHUNK_PA
     if (r.data?.stop_reason === 'max_tokens') throw new Error(`the read of pages ${part.firstPage}-${part.lastPage} was cut off before the end; read it in smaller parts`);
     chunks[i] = { firstPage: part.firstPage, lastPage: part.lastPage, ms: Date.now() - t0, usage: r.data?.usage || {}, stop_reason: r.data?.stop_reason, result: parseJson(r.text) };
     done++;
-    deps.onProgress?.({ done, total: parts.length, pages: `${part.firstPage}-${part.lastPage}` });
+    await deps.onProgress?.({ done, total: parts.length, pages: `${part.firstPage}-${part.lastPage}` });
   };
   const queue = parts.map((p, i) => [p, i]);
   await Promise.all(Array.from({ length: Math.min(CONCURRENCY, queue.length) }, async () => {
@@ -110,12 +125,14 @@ export async function readStatementPdf(deps, { buf, model, chunkPages = CHUNK_PA
   // its reason, not imported.
   const docType = chunks[0]?.result?.statement?.document_type;
   if (docType && docType !== 'transactions') {
-    return { kind: 'text', pages: texts.length, chunks, refused: docType === 'fees'
+    return { mode, kind: cls.kind, pages: texts.length, chunks, refused: docType === 'fees'
       ? 'This PDF is a statement of fees or charges, not a statement of transactions'
       : 'This PDF does not look like a bank statement of transactions', document_type: docType, ...costOf(chunks, model, texts.length) };
   }
-  const result = verifyStatement({ chunks, pageTexts: texts });
-  return { kind: 'text', pages: texts.length, chunks, result, ...costOf(chunks, model, texts.length) };
+  const result = mode === 'text'
+    ? verifyStatement({ chunks, pageTexts: texts })
+    : verifyStatement({ chunks, pageTexts: texts.map(() => ''), textCheck: false });
+  return { mode, kind: cls.kind, pages: texts.length, chunks, result, ...costOf(chunks, model, texts.length) };
 }
 
 // Tokens, cost (USD at the published rates) and model time for a set of chunk reads.

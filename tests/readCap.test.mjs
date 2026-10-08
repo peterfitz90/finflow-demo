@@ -29,3 +29,7 @@ test('the Irish day starts at midnight in Dublin, summer and winter', () => {
   assert.equal(irishDayStart(new Date('2026-12-15T10:00:00Z')), '2026-12-15T00:00:00.000Z'); // GMT
   assert.equal(irishDayStart(new Date('2026-07-14T23:30:00Z')), '2026-07-14T23:00:00.000Z'); // 00:30 Irish time
 });
+
+test('a read still in progress counts towards the cap (it is calling the model)', () => {
+  assert.equal(readCapStatus([{ status: 'reading', tokens_in: 0, cost_usd: 0 }]).reads_today, 1);
+});

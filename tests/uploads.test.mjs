@@ -54,7 +54,7 @@ function fakeTable(rows) {
   };
 }
 function fakes({ approvals = [], files = [], now = '2026-10-09T10:00:00.000Z' } = {}) {
-  const t = { uploads: fakeTable([]), source_documents: fakeTable([]), fs_approval_files: fakeTable(files), fs_approvals: fakeTable(approvals) };
+  const t = { uploads: fakeTable([]), source_documents: fakeTable([]), fs_approval_files: fakeTable(files), fs_approvals: fakeTable(approvals), statement_reads: fakeTable([]) };
   const buckets = { [STAGING_BUCKET]: new Map(), [SOURCE_BUCKET]: new Map(), [ARCHIVE_BUCKET]: new Map() };
   const removed = [];
   const storage = name => ({
@@ -216,7 +216,7 @@ test('clean-up removes old temporary files only; an accepted one only once its a
   f.removed.length = 0;
 
   const out = await cleanupStaging(f.deps);
-  assert.deepEqual(out, { examined: 4, removed: 3, kept_archive_unconfirmed: 1, expired: 1 });
+  assert.deepEqual(out, { examined: 4, removed: 3, kept_archive_unconfirmed: 1, expired: 1, stuck_reads_closed: 0 });
   assert.ok(f.removed.every(p => p.startsWith(`${STAGING_BUCKET}/staging/`)), 'deletes only temporary paths');
   assert.deepEqual(f.removed.sort(), [`${STAGING_BUCKET}/${acc.path}`, `${STAGING_BUCKET}/${pend.path}`, `${STAGING_BUCKET}/staging/${CO}/stray`].sort());
   assert.ok(f.buckets[STAGING_BUCKET].has(lost.path) && f.buckets[STAGING_BUCKET].has(recent.path));
@@ -224,4 +224,12 @@ test('clean-up removes old temporary files only; an accepted one only once its a
   assert.ok(f.buckets[SOURCE_BUCKET].has(accDone.destination.path));
   assert.equal(f.t.uploads.rows.find(r => r.id === pend.upload_id).status, 'expired');
   assert.equal(f.t.uploads.rows.find(r => r.id === acc.upload_id).status, 'accepted');
+});
+
+test('clean-up closes a statement read still "reading" after 10 minutes, and only that one', async () => {
+  const f = fakes();
+  f.t.statement_reads.rows.push({ id: 'r1', status: 'reading', created_at: '2026-10-09T09:40:00.000Z' }, { id: 'r2', status: 'reading', created_at: '2026-10-09T09:55:00.000Z' }, { id: 'r3', status: 'read', created_at: '2026-10-09T08:00:00.000Z' });
+  const out = await cleanupStaging(f.deps);
+  assert.equal(out.stuck_reads_closed, 1);
+  assert.deepEqual(f.t.statement_reads.rows.map(r => r.status), ['failed', 'reading', 'read']);
 });
