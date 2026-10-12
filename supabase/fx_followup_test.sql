@@ -3,7 +3,8 @@
 -- (the migration's DDL included). The error's first line reads "N failure(s)".
 BEGIN;
 
--- Follow-up to fx_guard_db.sql (12 Oct 2026).
+-- Follow-up to fx_guard_db.sql (12 Oct 2026). Safe to re-run. Do not re-run fx_guard_db.sql after
+-- this: its older categorise_bank_line (no VAT code) would replace the one below.
 --
 -- 1. categorise_bank_line takes the account's default VAT code, as the bank import does: the
 --    journal's vat_code is chart_of_accounts.default_vat_code of the categorised account (the
@@ -23,6 +24,13 @@ BEGIN;
 --       key, being one of several tables): a trigger, run as the caller, that refuses an entry
 --       not found in the match's company, with one message for "elsewhere" and "nowhere". A
 --       caller with no access to the match's company gets the table's own RLS refusal first.
+--
+-- 3. A held transfer stops being held once it is reconciled, however that happens: a trigger
+--    clears hold_reason when a line becomes reconciled. Covers Categorise (categorise_bank_line)
+--    and Settle (confirm_settlement), which left it set, and the transfer release, which already
+--    cleared it from the app; also confirming a suggested match. A line that is not becoming
+--    reconciled keeps its hold. Existing rows are not changed (one on 12 Oct 2026: a TEST line
+--    on Fitzsimons Test, reconciled with hold_reason still 'transfer').
 
 -- ── 1 ─────────────────────────────────────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION public.categorise_bank_line(
@@ -72,6 +80,10 @@ BEGIN
 END $$;
 
 -- ── 2a ────────────────────────────────────────────────────────────────────────────────────
+-- re-runnable: the constraints are dropped first if present (sections 2a and 2b were applied
+-- on their own once, on 12 Oct 2026)
+ALTER TABLE public.bank_matches DROP CONSTRAINT IF EXISTS bank_matches_line_same_company;
+ALTER TABLE public.bank_transactions DROP CONSTRAINT IF EXISTS bank_transactions_company_id_id_key;
 ALTER TABLE public.bank_transactions
   ADD CONSTRAINT bank_transactions_company_id_id_key UNIQUE (company_id, id);
 ALTER TABLE public.bank_matches
@@ -107,13 +119,30 @@ DROP TRIGGER IF EXISTS bank_matches_entry_same_company ON public.bank_matches;
 CREATE TRIGGER bank_matches_entry_same_company BEFORE INSERT OR UPDATE ON public.bank_matches
   FOR EACH ROW EXECUTE FUNCTION public.bank_match_entry_same_company();
 
+-- ── 3 ─────────────────────────────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION public.bank_line_clear_hold_on_reconcile()
+RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path = public AS $$
+BEGIN
+  -- reads only the row being written: no lookup
+  IF NEW.reconciled AND NOT coalesce(OLD.reconciled, false) AND NEW.hold_reason IS NOT NULL THEN
+    NEW.hold_reason := NULL;
+  END IF;
+  RETURN NEW;
+END $$;
+REVOKE EXECUTE ON FUNCTION public.bank_line_clear_hold_on_reconcile() FROM PUBLIC, anon, authenticated, service_role;
+
+DROP TRIGGER IF EXISTS bank_transactions_clear_hold_on_reconcile ON public.bank_transactions;
+CREATE TRIGGER bank_transactions_clear_hold_on_reconcile BEFORE UPDATE ON public.bank_transactions
+  FOR EACH ROW EXECUTE FUNCTION public.bank_line_clear_hold_on_reconcile();
+
 -- ── Tests (same transaction as the migration above; all undone) ───────────────────────────
 -- Matches: as Fitzsimons' accountant and business owner, S&P's accountant, and anon. VAT: as
 -- an accountant of Fitzsimons and Elevate, Categorise on unreconciled copies of real lines.
+-- Holds: as Fitzsimons' accountant and business owner, each path on a fresh held line.
 -- Nothing persists: the block ends by raising its results, which aborts the transaction.
 DO $fu$
 DECLARE
-  r jsonb := '[]'::jsonb; msg text; who record; t record; n bigint; exp text; fails int := 0; tgt uuid; res jsonb;
+  r jsonb := '[]'::jsonb; msg text; who record; t record; n bigint; exp text; fails int := 0; tgt uuid; res jsonb; stmt text;
 BEGIN
   INSERT INTO user_company_access(user_id, company_id, role) VALUES
     ('fxtest_accountant', '5f4e4585-8937-4624-b0fc-079a8379a160', 'accountant'), ('fxtest_owner', '5f4e4585-8937-4624-b0fc-079a8379a160', 'business_owner'),
@@ -176,6 +205,41 @@ BEGIN
     RESET ROLE;
     IF msg IS DISTINCT FROM coalesce(t.expected, '(null)') THEN fails := fails + 1; END IF;
     r := r || jsonb_build_object('t', split_part(t.name, ' ', 1), 'case', t.name, 'vat_code', msg, 'pass', msg = coalesce(t.expected, '(null)'));
+  END LOOP;
+  FOR who IN SELECT * FROM (VALUES ('accountant','fxtest_accountant'), ('business_owner','fxtest_owner')) v(label, sub) LOOP
+    FOR t IN SELECT * FROM (VALUES
+      ('H1 Categorise (categorise_bank_line)', 'EUR', $q$SELECT categorise_bank_line('5f4e4585-8937-4624-b0fc-079a8379a160','__L__',current_date,'x','6600','1000',12.5,'REC-H1')$q$, 'reconciled=true hold=(null)'),
+      ('H2 Settle on account (confirm_settlement)', 'EUR', $q$SELECT confirm_settlement('5f4e4585-8937-4624-b0fc-079a8379a160','__L__','on_account',NULL,'supplier','Hold test')$q$, 'reconciled=true hold=(null)'),
+      ('H3 Release as the app does (journal, match, update with hold_reason null)', 'EUR', $q$INSERT INTO journals(company_id, date, description, debit_account, credit_account, amount, reference) VALUES ('5f4e4585-8937-4624-b0fc-079a8379a160', current_date, 'x', '1001', '1000', 12.5, '__R__');;INSERT INTO bank_matches(company_id, bank_transaction_id, matched_type, matched_id, confidence, status, matched_by, confirmed_at, suggestion_kept) SELECT '5f4e4585-8937-4624-b0fc-079a8379a160', '__L__', 'journal', j.id, 100, 'confirmed', 'user', now(), false FROM journals j WHERE j.company_id = '5f4e4585-8937-4624-b0fc-079a8379a160' AND j.reference = '__R__';;UPDATE bank_transactions SET reconciled = true, reconciled_at = now(), settlement_type = 'categorise', nominal_account = '1001', hold_reason = NULL WHERE id = '__L__'$q$, 'reconciled=true hold=(null)'),
+      ('H4 Release whose update leaves hold_reason out', 'EUR', $q$UPDATE bank_transactions SET reconciled = true, reconciled_at = now(), settlement_type = 'categorise' WHERE id = '__L__'$q$, 'reconciled=true hold=(null)'),
+      ('H5 Confirm a suggested match (confirm_journal_match)', 'EUR', $q$INSERT INTO journals(company_id, date, description, debit_account, credit_account, amount, reference) VALUES ('5f4e4585-8937-4624-b0fc-079a8379a160', current_date, 'x', '1001', '1000', 12.5, '__R__');;INSERT INTO bank_matches(company_id, bank_transaction_id, matched_type, matched_id, confidence, status, matched_by) SELECT '5f4e4585-8937-4624-b0fc-079a8379a160', '__L__', 'journal', j.id, 80, 'suggested', 'user' FROM journals j WHERE j.company_id = '5f4e4585-8937-4624-b0fc-079a8379a160' AND j.reference = '__R__';;SELECT confirm_journal_match('5f4e4585-8937-4624-b0fc-079a8379a160', (SELECT id FROM bank_matches WHERE bank_transaction_id = '__L__' AND status = 'suggested'), '__L__')$q$, 'reconciled=true hold=(null)'),
+      ('H6 An edit that does not reconcile keeps the hold', 'EUR', $q$UPDATE bank_transactions SET description = 'edited' WHERE id = '__L__'$q$, 'reconciled=false hold=transfer'),
+      ('H7 A held GBP line: Categorise refused, hold kept', 'GBP', $q$SELECT categorise_bank_line('5f4e4585-8937-4624-b0fc-079a8379a160','__L__',current_date,'x','6600','1000',12.5,'REC-H7')$q$, 'refused; reconciled=false hold=transfer')
+    ) v(name, cur, q, expected) LOOP
+      tgt := gen_random_uuid();
+      INSERT INTO bank_transactions(id, company_id, revolut_id, date, description, amount, currency, bank_account_id, reconciled, hold_reason)
+      VALUES (tgt, '5f4e4585-8937-4624-b0fc-079a8379a160', 'FXT-HOLD-' || left(tgt::text, 8), current_date, 'held transfer test', -12.50, t.cur, '0ee960c9-9889-4bb8-8369-8746784a328b', false, 'transfer');
+      BEGIN
+        PERFORM set_config('request.jwt.claims', json_build_object('sub', who.sub, 'role', 'authenticated')::text, true);
+        SET LOCAL ROLE authenticated;
+        BEGIN
+          FOREACH stmt IN ARRAY string_to_array(replace(replace(t.q, '__L__', tgt::text), '__R__', 'FXT-HOLD-' || left(tgt::text, 8)), ';;') LOOP
+            EXECUTE stmt;
+          END LOOP;
+          msg := '';
+        EXCEPTION WHEN OTHERS THEN
+          msg := 'refused; ';
+        END;
+        RESET ROLE;
+        msg := msg || (SELECT 'reconciled=' || reconciled || ' hold=' || coalesce(hold_reason, '(null)') FROM bank_transactions WHERE id = tgt);
+        RAISE EXCEPTION 'undo:%', msg;
+      EXCEPTION WHEN OTHERS THEN
+        msg := regexp_replace(SQLERRM, '^undo:', '');
+      END;
+      RESET ROLE;
+      IF msg IS DISTINCT FROM t.expected THEN fails := fails + 1; END IF;
+      r := r || jsonb_build_object('who', who.label, 't', split_part(t.name, ' ', 1), 'result', msg, 'pass', msg = t.expected);
+    END LOOP;
   END LOOP;
   RAISE EXCEPTION 'ROLLED BACK. % failure(s). results=%', fails, r::text;
 END $fu$;

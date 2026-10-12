@@ -1,4 +1,5 @@
--- Follow-up to fx_guard_db.sql (12 Oct 2026).
+-- Follow-up to fx_guard_db.sql (12 Oct 2026). Safe to re-run. Do not re-run fx_guard_db.sql after
+-- this: its older categorise_bank_line (no VAT code) would replace the one below.
 --
 -- 1. categorise_bank_line takes the account's default VAT code, as the bank import does: the
 --    journal's vat_code is chart_of_accounts.default_vat_code of the categorised account (the
@@ -18,6 +19,13 @@
 --       key, being one of several tables): a trigger, run as the caller, that refuses an entry
 --       not found in the match's company, with one message for "elsewhere" and "nowhere". A
 --       caller with no access to the match's company gets the table's own RLS refusal first.
+--
+-- 3. A held transfer stops being held once it is reconciled, however that happens: a trigger
+--    clears hold_reason when a line becomes reconciled. Covers Categorise (categorise_bank_line)
+--    and Settle (confirm_settlement), which left it set, and the transfer release, which already
+--    cleared it from the app; also confirming a suggested match. A line that is not becoming
+--    reconciled keeps its hold. Existing rows are not changed (one on 12 Oct 2026: a TEST line
+--    on Fitzsimons Test, reconciled with hold_reason still 'transfer').
 
 -- ── 1 ─────────────────────────────────────────────────────────────────────────────────────
 CREATE OR REPLACE FUNCTION public.categorise_bank_line(
@@ -67,6 +75,10 @@ BEGIN
 END $$;
 
 -- ── 2a ────────────────────────────────────────────────────────────────────────────────────
+-- re-runnable: the constraints are dropped first if present (sections 2a and 2b were applied
+-- on their own once, on 12 Oct 2026)
+ALTER TABLE public.bank_matches DROP CONSTRAINT IF EXISTS bank_matches_line_same_company;
+ALTER TABLE public.bank_transactions DROP CONSTRAINT IF EXISTS bank_transactions_company_id_id_key;
 ALTER TABLE public.bank_transactions
   ADD CONSTRAINT bank_transactions_company_id_id_key UNIQUE (company_id, id);
 ALTER TABLE public.bank_matches
@@ -101,3 +113,19 @@ REVOKE EXECUTE ON FUNCTION public.bank_match_entry_same_company() FROM PUBLIC, a
 DROP TRIGGER IF EXISTS bank_matches_entry_same_company ON public.bank_matches;
 CREATE TRIGGER bank_matches_entry_same_company BEFORE INSERT OR UPDATE ON public.bank_matches
   FOR EACH ROW EXECUTE FUNCTION public.bank_match_entry_same_company();
+
+-- ── 3 ─────────────────────────────────────────────────────────────────────────────────────
+CREATE OR REPLACE FUNCTION public.bank_line_clear_hold_on_reconcile()
+RETURNS trigger LANGUAGE plpgsql SECURITY INVOKER SET search_path = public AS $$
+BEGIN
+  -- reads only the row being written: no lookup
+  IF NEW.reconciled AND NOT coalesce(OLD.reconciled, false) AND NEW.hold_reason IS NOT NULL THEN
+    NEW.hold_reason := NULL;
+  END IF;
+  RETURN NEW;
+END $$;
+REVOKE EXECUTE ON FUNCTION public.bank_line_clear_hold_on_reconcile() FROM PUBLIC, anon, authenticated, service_role;
+
+DROP TRIGGER IF EXISTS bank_transactions_clear_hold_on_reconcile ON public.bank_transactions;
+CREATE TRIGGER bank_transactions_clear_hold_on_reconcile BEFORE UPDATE ON public.bank_transactions
+  FOR EACH ROW EXECUTE FUNCTION public.bank_line_clear_hold_on_reconcile();

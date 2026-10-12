@@ -1,3 +1,7 @@
+-- APPLIED 12 Oct 2026. Do not re-run: fx_followup_vat_and_match_scope.sql replaces
+-- categorise_bank_line with a newer version (VAT code), and re-running this file would put the
+-- older one back (this happened once, on 12 Oct 2026).
+--
 -- GEO-02 interim, defence in depth: the database itself refuses to post, reconcile or match a
 -- foreign-currency bank line as euro, whatever the client does. The app already blocks every
 -- path (src/shared/fxGuard.js); these triggers catch a path that is missed or added later.

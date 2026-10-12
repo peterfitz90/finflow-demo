@@ -35,15 +35,33 @@ V = [
  ("V5 Elevate, both legs replaced, money out: debit 6500", "6e7fc2de-70bd-445a-a784-2d3ee19cccf9", "6500", "2000", "EXEMPT"),
  ("V6 Elevate, legs entered the other way round: bank on the debit", "6e7fc2de-70bd-445a-a784-2d3ee19cccf9", "1000", "6600", "STD23"),
 ]
+# hold_reason cases, as Fitzsimons' accountant and business owner, each on a fresh held line
+# (__L__ = its id, __R__ = its revolut_id): SQL run as the caller, expected "reconciled=... hold=..."
+JRN = "INSERT INTO journals(company_id, date, description, debit_account, credit_account, amount, reference) VALUES ('__FZ__', current_date, 'x', '1001', '1000', 12.5, '__R__')"
+H = [
+ ("H1 Categorise (categorise_bank_line)", "EUR", "SELECT categorise_bank_line('__FZ__','__L__',current_date,'x','6600','1000',12.5,'REC-H1')", "reconciled=true hold=(null)"),
+ ("H2 Settle on account (confirm_settlement)", "EUR", "SELECT confirm_settlement('__FZ__','__L__','on_account',NULL,'supplier','Hold test')", "reconciled=true hold=(null)"),
+ ("H3 Release as the app does (journal, match, update with hold_reason null)", "EUR",
+  JRN + ";;" + "INSERT INTO bank_matches(company_id, bank_transaction_id, matched_type, matched_id, confidence, status, matched_by, confirmed_at, suggestion_kept) SELECT '__FZ__', '__L__', 'journal', j.id, 100, 'confirmed', 'user', now(), false FROM journals j WHERE j.company_id = '__FZ__' AND j.reference = '__R__'" + ";;UPDATE bank_transactions SET reconciled = true, reconciled_at = now(), settlement_type = 'categorise', nominal_account = '1001', hold_reason = NULL WHERE id = '__L__'",
+  "reconciled=true hold=(null)"),
+ ("H4 Release whose update leaves hold_reason out", "EUR", "UPDATE bank_transactions SET reconciled = true, reconciled_at = now(), settlement_type = 'categorise' WHERE id = '__L__'", "reconciled=true hold=(null)"),
+ ("H5 Confirm a suggested match (confirm_journal_match)", "EUR",
+  JRN + ";;INSERT INTO bank_matches(company_id, bank_transaction_id, matched_type, matched_id, confidence, status, matched_by) SELECT '__FZ__', '__L__', 'journal', j.id, 80, 'suggested', 'user' FROM journals j WHERE j.company_id = '__FZ__' AND j.reference = '__R__';;SELECT confirm_journal_match('__FZ__', (SELECT id FROM bank_matches WHERE bank_transaction_id = '__L__' AND status = 'suggested'), '__L__')",
+  "reconciled=true hold=(null)"),
+ ("H6 An edit that does not reconcile keeps the hold", "EUR", "UPDATE bank_transactions SET description = 'edited' WHERE id = '__L__'", "reconciled=false hold=transfer"),
+ ("H7 A held GBP line: Categorise refused, hold kept", "GBP", "SELECT categorise_bank_line('__FZ__','__L__',current_date,'x','6600','1000',12.5,'REC-H7')", "refused; reconciled=false hold=transfer"),
+]
+hrows = ",\n      ".join(f"({e(n)}, '{c}', {q(sql)}, {e(x)})" for n, c, sql, x in H)
 vrows = ",\n      ".join(f"({e(n)}, '{src}'::uuid, '{dr}', '{cr}', {e(x) if x else 'NULL'})" for n, src, dr, cr, x in V)
 tests = """
 -- ── Tests (same transaction as the migration above; all undone) ───────────────────────────
 -- Matches: as Fitzsimons' accountant and business owner, S&P's accountant, and anon. VAT: as
 -- an accountant of Fitzsimons and Elevate, Categorise on unreconciled copies of real lines.
+-- Holds: as Fitzsimons' accountant and business owner, each path on a fresh held line.
 -- Nothing persists: the block ends by raising its results, which aborts the transaction.
 DO $fu$
 DECLARE
-  r jsonb := '[]'::jsonb; msg text; who record; t record; n bigint; exp text; fails int := 0; tgt uuid; res jsonb;
+  r jsonb := '[]'::jsonb; msg text; who record; t record; n bigint; exp text; fails int := 0; tgt uuid; res jsonb; stmt text;
 BEGIN
   INSERT INTO user_company_access(user_id, company_id, role) VALUES
     ('fxtest_accountant', '__FZ__', 'accountant'), ('fxtest_owner', '__FZ__', 'business_owner'),
@@ -93,10 +111,40 @@ BEGIN
     IF msg IS DISTINCT FROM coalesce(t.expected, '(null)') THEN fails := fails + 1; END IF;
     r := r || jsonb_build_object('t', split_part(t.name, ' ', 1), 'case', t.name, 'vat_code', msg, 'pass', msg = coalesce(t.expected, '(null)'));
   END LOOP;
+  FOR who IN SELECT * FROM (VALUES ('accountant','fxtest_accountant'), ('business_owner','fxtest_owner')) v(label, sub) LOOP
+    FOR t IN SELECT * FROM (VALUES
+      __HROWS__
+    ) v(name, cur, q, expected) LOOP
+      tgt := gen_random_uuid();
+      INSERT INTO bank_transactions(id, company_id, revolut_id, date, description, amount, currency, bank_account_id, reconciled, hold_reason)
+      VALUES (tgt, '__FZ__', 'FXT-HOLD-' || left(tgt::text, 8), current_date, 'held transfer test', -12.50, t.cur, '__FZEURACCT__', false, 'transfer');
+      BEGIN
+        PERFORM set_config('request.jwt.claims', json_build_object('sub', who.sub, 'role', 'authenticated')::text, true);
+        SET LOCAL ROLE authenticated;
+        BEGIN
+          FOREACH stmt IN ARRAY string_to_array(replace(replace(t.q, '__L__', tgt::text), '__R__', 'FXT-HOLD-' || left(tgt::text, 8)), ';;') LOOP
+            EXECUTE stmt;
+          END LOOP;
+          msg := '';
+        EXCEPTION WHEN OTHERS THEN
+          msg := 'refused; ';
+        END;
+        RESET ROLE;
+        msg := msg || (SELECT 'reconciled=' || reconciled || ' hold=' || coalesce(hold_reason, '(null)') FROM bank_transactions WHERE id = tgt);
+        RAISE EXCEPTION 'undo:%', msg;
+      EXCEPTION WHEN OTHERS THEN
+        msg := regexp_replace(SQLERRM, '^undo:', '');
+      END;
+      RESET ROLE;
+      IF msg IS DISTINCT FROM t.expected THEN fails := fails + 1; END IF;
+      r := r || jsonb_build_object('who', who.label, 't', split_part(t.name, ' ', 1), 'result', msg, 'pass', msg = t.expected);
+    END LOOP;
+  END LOOP;
   RAISE EXCEPTION 'ROLLED BACK. % failure(s). results=%', fails, r::text;
 END $fu$;
 """
-for k, v in {'__FZ__': FZ, '__SP__': SP, '__EL__': EL, '__EURL__': EURL, '__AP__': AP, '__ROWS__': rows, '__VROWS__': vrows}.items():
+tests = tests.replace('__HROWS__', hrows)
+for k, v in {'__FZEURACCT__': '0ee960c9-9889-4bb8-8369-8746784a328b', '__FZ__': FZ, '__SP__': SP, '__EL__': EL, '__EURL__': EURL, '__AP__': AP, '__ROWS__': rows, '__VROWS__': vrows}.items():
     tests = tests.replace(k, v)
 out = ("-- Rolled-back test of supabase/fx_followup_vat_and_match_scope.sql against the live schema.\n"
        "-- Nothing persists: the test block ends by raising its results, aborting the whole transaction\n"
