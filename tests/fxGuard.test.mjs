@@ -151,3 +151,10 @@ test('Choose account on a held non-EUR transfer is blocked, with the Settle mess
   const btn = src.split('\n').find(l => /setTransferFor\(transferFor\?\.id === bt\.id \? null : bt\)/.test(l));
   assert.match(btn, /disabled=\{isForeignLine\(bt\)\} title=\{isForeignLine\(bt\) \? SETTLE_FX_MESSAGE : undefined\}/);
 });
+
+test('a reference-only line has no nominal dropdown and is never offered as a sibling to code', async () => {
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8');
+  assert.match(src, /\{!r\.imported && !refOnly \? \(\s*<div style=\{\{ display: "flex", alignItems: "center", gap: 6 \}\}>/);
+  assert.match(src, /!fx\.blockedIds\.has\(r\.revolut_id\) && \/\/ a reference-only line is not coded/);
+});

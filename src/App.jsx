@@ -12627,6 +12627,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
       const siblings = rows.filter(r =>
         r.revolut_id !== revolut_id &&
         !r.imported &&
+        !fx.blockedIds.has(r.revolut_id) && // a reference-only line is not coded
         r.description != null &&
         isSiblingMatch(changedRow.description, r.description)
       ).slice(0, 50);
@@ -12659,7 +12660,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
         console.error("[handleNominalChange] fallback state update also failed:", innerErr);
       }
     }
-  }, [rows]);
+  }, [rows, fx]);
 
   const applyToSiblings = () => {
     if (!siblingPrompt) return;
@@ -13596,7 +13597,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
                       <span className="bi-bal">{r.balance == null ? "—" : r.balance.toLocaleString("en-IE", { minimumFractionDigits: 2 })}</span>
                     </td>
                     <td onClick={e => e.stopPropagation()}>
-                      {!r.imported ? (
+                      {!r.imported && !refOnly ? (
                         <div style={{ display: "flex", alignItems: "center", gap: 6 }}>
                           {confidence[r.revolut_id] && (
                             <span
