@@ -8,7 +8,8 @@
 // euro amount. If any line in the section lacks one, the whole section stays blocked.
 
 export const FX_BLOCK_MESSAGE = "Foreign-currency lines can't be posted yet; multi-currency posting is planned.";
-// Reconciliation: a foreign-currency line is not settled against a euro invoice or bill (or on account).
+// Reconciliation: a foreign-currency line is not settled against a euro invoice or bill (or on
+// account), nor categorised to a new journal; both would post its amount as euro.
 export const SETTLE_FX_MESSAGE = "Foreign-currency lines can't be settled against an invoice or bill yet; multi-currency posting is planned.";
 
 export const isEurCurrency = c => c == null || c === '' || String(c).toUpperCase() === 'EUR';

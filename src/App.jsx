@@ -18333,7 +18333,7 @@ function ReconWorksheet({
                 ) : (
                   <>
                     <button className="btn btn-s btn-sm" style={{ fontSize: 11 }} disabled={isForeignLine(row.bt)} title={isForeignLine(row.bt) ? SETTLE_FX_MESSAGE : undefined} onClick={() => onOpenSettleModal(row.bt)}>Settle…</button>
-                    <button className="btn btn-s btn-sm" style={{ fontSize: 11 }} onClick={() => createJnlFor?.id === row.bt.id ? onCancelCreateJnl() : onOpenCreateJnl(row.bt)}>
+                    <button className="btn btn-s btn-sm" style={{ fontSize: 11 }} disabled={isForeignLine(row.bt)} title={isForeignLine(row.bt) ? SETTLE_FX_MESSAGE : undefined} onClick={() => createJnlFor?.id === row.bt.id ? onCancelCreateJnl() : onOpenCreateJnl(row.bt)}>
                       {createJnlFor?.id === row.bt.id ? 'Close' : 'Categorise'}
                     </button>
                     <button className="btn btn-s btn-sm" style={{ fontSize: 11 }} onClick={() => findFor?.id === row.bt.id ? onCloseFindMatch() : onOpenFindMatch(row.bt)}>
@@ -18774,6 +18774,8 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
   };
 
   const openCreateJnl = (bt) => {
+    // GEO-02: categorising would post a foreign amount as euro, like settling
+    if (isForeignLine(bt)) { showToast(SETTLE_FX_MESSAGE); return; }
     const absAmt = Math.abs(Number(bt.amount));
     const isOut  = Number(bt.amount) < 0;
     const bankNominal = bankAccounts.find(a => a.id === bt.bank_account_id)?.nominal_code || '1000';
@@ -18783,6 +18785,7 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
 
   const saveJnl = async () => {
     if (!jnlForm || !createJnlFor || savingJnl) return;
+    if (isForeignLine(createJnlFor)) { showToast(SETTLE_FX_MESSAGE); return; }
     try { assertDistinctAccounts(jnlForm); } catch (e) { showToast(e.message); return; }
     setSavingJnl(true);
     const ref = jnlForm.reference.trim() || `REC-${Date.now().toString(36).toUpperCase().slice(-5)}`;
@@ -19026,7 +19029,7 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
                 </button>
               )}
               <button className={`btn ${bt.hold_reason === 'transfer' ? 'btn-s' : 'btn-p'} btn-sm`} disabled={isForeignLine(bt)} title={isForeignLine(bt) ? SETTLE_FX_MESSAGE : undefined} onClick={() => openSettleModal(bt)}>Settle…</button>
-              <button className="btn btn-s btn-sm" onClick={() => createJnlFor?.id === bt.id ? setCreateJnlFor(null) : openCreateJnl(bt)}>
+              <button className="btn btn-s btn-sm" disabled={isForeignLine(bt)} title={isForeignLine(bt) ? SETTLE_FX_MESSAGE : undefined} onClick={() => createJnlFor?.id === bt.id ? setCreateJnlFor(null) : openCreateJnl(bt)}>
                 {createJnlFor?.id === bt.id ? 'Close' : 'Categorise'}
               </button>
               <button className="btn btn-s btn-sm" onClick={() => findFor?.id === bt.id ? setFindFor(null) : openFindMatch(bt)}>

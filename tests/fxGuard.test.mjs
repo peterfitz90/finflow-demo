@@ -91,3 +91,19 @@ test('the PDF reader keeps a printed euro amount only for a non-EUR section, sig
   assert.ok(eur.rows.every(r => r.eur_amount === undefined));
   assert.equal(fxPlan(eur.rows).sections.length, 0);
 });
+
+// Reconciliation lives inside App.jsx, so its two guarded actions are checked in the source:
+// Settle and Categorise each refuse a non-EUR line when opened and when saved, and each button
+// is disabled for one, all with the same message.
+test('Reconciliation blocks Settle and Categorise on a non-EUR line, with the same message', async () => {
+  const { readFileSync } = await import('node:fs');
+  const { SETTLE_FX_MESSAGE } = await import('../src/shared/fxGuard.js');
+  const src = readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8');
+  const body = name => { const i = src.indexOf(`const ${name} = `); assert.ok(i > 0, name); return src.slice(i, i + 400); };
+  for (const fn of ['openSettleModal', 'openCreateJnl', 'saveJnl']) assert.match(body(fn), /isForeignLine\((bt|createJnlFor)\)\) \{ showToast\(SETTLE_FX_MESSAGE\); return; \}/, fn);
+  assert.match(body('confirmSettlement'), /if \(isForeignLine\(bt\)\) throw new Error\(SETTLE_FX_MESSAGE\)/);
+  const buttons = src.split('\n').filter(l => /Settle…<\/button>|[oO]penCreateJnl\(/.test(l) && /<button/.test(l));
+  assert.equal(buttons.length, 6, 'four Settle and two Categorise buttons');
+  for (const b of buttons) assert.match(b, /disabled=\{isForeignLine\((row\.bt|item\.bt|bt)\)\} title=\{isForeignLine\(\1\) \? SETTLE_FX_MESSAGE : undefined\}/, b.trim().slice(0, 80));
+  assert.match(SETTLE_FX_MESSAGE, /^Foreign-currency lines can't be settled/);
+});
