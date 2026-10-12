@@ -18802,20 +18802,20 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
     try { assertDistinctAccounts(jnlForm); } catch (e) { showToast(e.message); return; }
     setSavingJnl(true);
     const ref = jnlForm.reference.trim() || `REC-${Date.now().toString(36).toUpperCase().slice(-5)}`;
-    const { data: jnl, error } = await supabase.from('journals').insert({
-      company_id: companyId, date: sanitiseDate(jnlForm.date),
-      description: jnlForm.description, debit_account: jnlForm.debit_account,
-      credit_account: jnlForm.credit_account, amount: parseFloat(jnlForm.amount), reference: ref,
-    }).select().single();
-    if (error) { showToast('Error: ' + error.message); setSavingJnl(false); return; }
-    const now = new Date().toISOString();
-    await supabase.from('bank_matches').insert({
-      company_id: companyId, bank_transaction_id: createJnlFor.id,
-      matched_type: 'journal', matched_id: jnl.id,
-      confidence: 100, status: 'confirmed', matched_by: 'user', confirmed_at: now,
-      suggestion_kept: false,
+    // One transaction (supabase/fx_guard_db.sql): the journal, its confirmed match and the line
+    // reconciled together, or none of them. Was three separate writes, so a failure after the
+    // first left a journal with no line.
+    const { error } = await supabase.rpc('categorise_bank_line', {
+      p_company_id: companyId, p_bt_id: createJnlFor.id, p_date: sanitiseDate(jnlForm.date),
+      p_description: jnlForm.description, p_debit_account: jnlForm.debit_account,
+      p_credit_account: jnlForm.credit_account, p_amount: parseFloat(jnlForm.amount), p_reference: ref,
     });
-    await supabase.from('bank_transactions').update({ reconciled: true, reconciled_at: now, settlement_type: 'categorise' }).eq('id', createJnlFor.id);
+    if (error) {
+      // a refusal the accountant can act on (filed period, foreign line, already reconciled) is not an incident
+      if (!/period is locked|Foreign-currency|already reconciled/i.test(error.message))
+        captureError(error, { company_id: companyId, operation: 'categorise-bank-line' });
+      showToast('Error: ' + error.message); setSavingJnl(false); return;
+    }
     setCreateJnlFor(null); setJnlForm(null);
     showToast('Journal posted and transaction reconciled');
     await refreshCurrentView();

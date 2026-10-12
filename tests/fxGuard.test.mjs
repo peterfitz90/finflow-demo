@@ -158,3 +158,16 @@ test('a reference-only line has no nominal dropdown and is never offered as a si
   assert.match(src, /\{!r\.imported && !refOnly \? \(\s*<div style=\{\{ display: "flex", alignItems: "center", gap: 6 \}\}>/);
   assert.match(src, /!fx\.blockedIds\.has\(r\.revolut_id\) && \/\/ a reference-only line is not coded/);
 });
+
+test('Categorise posts through categorise_bank_line in one call, not three client writes', async () => {
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8');
+  const i = src.indexOf('const saveJnl = async');
+  const body = src.slice(i, src.indexOf('const saveTransfer = async', i));
+  assert.match(body, /supabase\.rpc\('categorise_bank_line', \{/);
+  for (const p of ['p_company_id', 'p_bt_id', 'p_date', 'p_description', 'p_debit_account', 'p_credit_account', 'p_amount', 'p_reference']) assert.match(body, new RegExp(`${p}:`), p);
+  assert.doesNotMatch(body, /from\('journals'\)|from\('bank_matches'\)|from\('bank_transactions'\)/);
+  const sql = readFileSync(new URL('../supabase/fx_guard_db.sql', import.meta.url), 'utf8');
+  assert.match(sql, /GRANT\s+EXECUTE ON FUNCTION public\.categorise_bank_line\([^)]*\) TO authenticated;/);
+  assert.match(sql, /REVOKE EXECUTE ON FUNCTION public\.categorise_bank_line\([^)]*\) FROM PUBLIC, anon, service_role;/);
+});
