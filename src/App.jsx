@@ -1863,7 +1863,8 @@ function CashFlow({ selPeriod, setSelPeriod, onNavigate, companyId, company }) {
         db.from('invoices').select('*').eq('company_id', companyId)
           .in('status', ['pending', 'chased']).order('due_date', { ascending: true }),
       ]);
-      if (txRes.data)  setTxns(txRes.data);
+      // GEO-02: Cash Flow is in euro; non-EUR bank lines are left out of its figures
+      if (txRes.data)  setTxns(txRes.data.filter(t => !isForeignLine(t)));
       if (invRes.data) setAllInvoices(invRes.data);
       setLoading(false);
     })();
@@ -6098,7 +6099,7 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
         fetchNominalBalanceAsOf(companyId, activeBankNominals, dayBeforeChartStart).catch(() => 0),
         // Sparkline: rows within the selected window (month, or YTD when ytdMode is on), chronological
         supabase.from('bank_transactions')
-          .select('date, amount, balance, nominal_account')
+          .select('date, amount, balance, nominal_account, currency')
           .eq('company_id', companyId)
           .gte('date', chartRangeStart)
           .lte('date', periodEnd)
@@ -6146,7 +6147,8 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
       if (btRecent.data && btRecent.data.length > 0) {
         // Running balance, oldest → newest: opening anchor + each transaction's amount.
         let running = openingForPeriod;
-        const asc = [...btRecent.data].reverse();
+        // GEO-02: the chart is the euro ledger's balance; a non-EUR line is not added to it
+        const asc = [...btRecent.data].filter(r => !isForeignLine(r)).reverse();
         const withRunningBalance = asc.map(r => { running += Number(r.amount); return { ...r, balance: running }; });
         setBtSparkline(withRunningBalance);
         setUncategorised(btRecent.data.filter(r => r.nominal_account === '6600').length);
@@ -6200,10 +6202,11 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
     if (!companyId) return;
     Promise.all([
       supabase.from('bank_matches').select('*', { count: 'exact', head: true }).eq('company_id', companyId).eq('status', 'suggested'),
-      supabase.from('bank_transactions').select('amount').eq('company_id', companyId).eq('reconciled', false).gte('date', periodStart).lte('date', periodEnd),
+      supabase.from('bank_transactions').select('amount, currency').eq('company_id', companyId).eq('reconciled', false).gte('date', periodStart).lte('date', periodEnd),
       supabase.from('bank_matches').select('confidence').eq('company_id', companyId).eq('status', 'confirmed').eq('matched_by', 'auto').gte('confirmed_at', periodStart).lte('confirmed_at', periodEnd + 'T23:59:59'),
     ]).then(([{ count: suggested }, { data: unrecTxns }, { data: autoMatches }]) => {
-      const balance   = (unrecTxns   || []).reduce((s, t) => s + Math.abs(Number(t.amount || 0)), 0);
+      // a euro figure: non-EUR lines are left out, as in Reconciliation (GEO-02)
+      const balance   = (unrecTxns   || []).filter(t => !isForeignLine(t)).reduce((s, t) => s + Math.abs(Number(t.amount || 0)), 0);
       const autoCount = (autoMatches || []).length;
       const avgConf   = autoCount > 0 ? Math.round((autoMatches || []).reduce((s, m) => s + Number(m.confidence || 0), 0) / autoCount) : 0;
       setReconcStats({ suggested: suggested || 0, balance, autoCount, avgConf });
@@ -6225,7 +6228,7 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
     (async () => {
       const [{ data }, openingBal] = await Promise.all([
         supabase.from('bank_transactions')
-          .select('date, amount, balance')
+          .select('date, amount, balance, currency')
           .eq('company_id', companyId)
           .gte('date', start)
           .lte('date', end)
@@ -6235,7 +6238,8 @@ function Overview({ period, selPeriod, setSelPeriod, appCurPeriod, companyId, co
       ]);
       if (!data) return;
       let running = openingBal;
-      const withRunningBalance = [...data].reverse().map(r => { running += Number(r.amount); return { ...r, balance: running }; });
+      // GEO-02: a euro balance; non-EUR lines are not added to it
+      const withRunningBalance = [...data].filter(r => !isForeignLine(r)).reverse().map(r => { running += Number(r.amount); return { ...r, balance: running }; });
       setChartData(withRunningBalance);
     })();
   }, [companyId, selPeriod, activeBankNominals]); // eslint-disable-line react-hooks/exhaustive-deps
@@ -10411,7 +10415,7 @@ function GLReclassModal({ companyId, company, coaAccounts, journal, side, onClos
                       <input type="checkbox" checked={bulkSelected.has(bt.revolut_id)} onChange={() => toggleBulkItem(bt.revolut_id)} />
                       <span style={{ color: 'var(--text-faint)', whiteSpace: 'nowrap' }}>{fmtIE(bt.date)}</span>
                       <span style={{ flex: 1, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={bt.description}>{bt.description}</span>
-                      <span style={{ fontFamily: 'monospace' }}>€{Math.abs(Number(bt.amount)).toLocaleString('en-IE', { minimumFractionDigits: 2 })}</span>
+                      <span style={{ fontFamily: 'monospace' }}>{fmtCurrencyFull(Math.abs(Number(bt.amount)), bt.currency || 'EUR')}</span>
                     </label>
                   ))}
                 </div>
@@ -12375,7 +12379,8 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
       const payeeMap = {};
       toAI.forEach(r => {
         const key = cleanPayee(r.description) || r.description.toLowerCase().slice(0, 40);
-        if (!payeeMap[key]) payeeMap[key] = { key, name: r.description, count: 0, totalAmount: 0, posCount: 0, txnIds: [] };
+        if (!payeeMap[key]) payeeMap[key] = { key, name: r.description, count: 0, totalAmount: 0, posCount: 0, txnIds: [], currencies: new Set() };
+        payeeMap[key].currencies.add(r.currency || 'EUR');
         payeeMap[key].count++;
         payeeMap[key].totalAmount += r.amount;
         if (r.amount > 0) payeeMap[key].posCount++;
@@ -12439,7 +12444,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
         const avgSize      = toAI.reduce((s, r) => s + Math.abs(r.amount), 0) / (toAI.length || 1);
         const topPayees    = Object.values(payeeMap)
           .sort((a, b) => b.count - a.count).slice(0, 10)
-          .map(p => `"${p.name}" (${p.count}×, €${Math.abs(Math.round(p.totalAmount)).toLocaleString("en-IE")})`);
+          .map(p => `"${p.name}" (${p.count}×, ${p.currencies.size === 1 ? (CURRENCY_SYMBOLS[[...p.currencies][0]] ?? [...p.currencies][0] + ' ') : 'mixed currencies '}${Math.abs(Math.round(p.totalAmount)).toLocaleString("en-IE")})`);
         const businessContext = {
           totalTransactions: toAI.length,
           dateRange: datesSorted.length ? `${datesSorted[0]} to ${datesSorted[datesSorted.length - 1]}` : null,
@@ -13198,7 +13203,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
                 {siblingPrompt.siblings.map(r => (
                   <div key={r.revolut_id} style={{ display: "flex", justifyContent: "space-between", padding: "3px 8px", background: "var(--surface)", borderRadius: 4, fontFamily: "'Source Code Pro', monospace", fontSize: 11 }}>
                     <span style={{ color: "var(--text-muted)", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap", maxWidth: "70%" }}>{r.description}</span>
-                    <span style={{ color: r.amount < 0 ? "var(--red)" : "var(--green)", marginLeft: 8, flexShrink: 0 }}>{fmtEUR(r.amount)}</span>
+                    <span style={{ color: r.amount < 0 ? "var(--red)" : "var(--green)", marginLeft: 8, flexShrink: 0 }}>{fmtCurrencyFull(r.amount, r.currency || 'EUR')}</span>
                   </div>
                 ))}
               </div>
@@ -13483,11 +13488,12 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
                 [
                   ["Ledgrly — Bank Import", `Exported ${fmtIE(localToday())}`],
                   [],
-                  ["Date", "Description", "Reference", "Amount (€)", "Balance (€)", "Nominal Account", "VAT Code"],
+                  ["Date", "Description", "Reference", "Currency", "Amount", "Balance", "Nominal Account", "VAT Code"],
                   ...rows.map(r => {
                     const code = nominals[r.revolut_id] || "6600";
                     const name = GL_ACCOUNTS.find(a => a.code === code)?.name || code;
-                    return [fmtIE(r.date), r.description, r.revolut_id, fmtEUR(r.amount), r.balance == null ? "" : fmtEUR(r.balance), `${code} — ${name}`, "—"];
+                    const cur = r.currency || "EUR";
+                    return [fmtIE(r.date), r.description, r.revolut_id, cur, fmtCurrencyFull(r.amount, cur), r.balance == null ? "" : fmtCurrencyFull(r.balance, cur), `${code} — ${name}`, "—"];
                   }),
                 ]
               )}>
@@ -18036,10 +18042,12 @@ function recScoreCandidate(bt, cand, btBankNominal, bankNominalSet) {
 
 async function runMatchingEngine(companyId) {
   // Paged — the engine must see every unreconciled transaction, not the first 1,000.
-  const { data: txns, error: txnErr } = await fetchAllRows(() => supabase
-    .from('bank_transactions').select('id,date,description,amount,bank_account_id')
+  const { data: allTxns, error: txnErr } = await fetchAllRows(() => supabase
+    .from('bank_transactions').select('id,date,description,amount,bank_account_id,currency')
     .eq('company_id', companyId).eq('reconciled', false).order('date', { ascending: false }).order('id'));
   if (txnErr) throw new Error(`Transactions: ${txnErr.message}`);
+  // GEO-02: a non-EUR line is not matched to a euro journal, invoice or bill
+  const txns = (allTxns || []).filter(t => !isForeignLine(t));
   if (!txns?.length) return 0;
 
   // Item 2 / roadmap Item 7: resolve each transaction's own bank nominal so journal
@@ -18315,7 +18323,7 @@ function ReconWorksheet({
                 <div style={{ fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{row.bt.description}</div>
               </div>
               <div style={{ fontSize: 12, fontWeight: 600, textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: Number(row.bt.amount) >= 0 ? 'var(--accent)' : 'var(--danger)' }}>
-                {Number(row.bt.amount) >= 0 ? '+' : ''}{fmtEUR(row.bt.amount)}
+                {Number(row.bt.amount) >= 0 ? '+' : ''}{fmtCurrencyFull(row.bt.amount, row.bt.currency || 'EUR')}
               </div>
               <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
                 {row.bt.reconciled ? (
@@ -18343,7 +18351,7 @@ function ReconWorksheet({
                 )}
               </div>
               <div style={{ fontSize: 12, textAlign: 'right', fontVariantNumeric: 'tabular-nums', color: 'var(--text-muted)' }}>
-                {fmtEUR(row.runningBalance)}
+                {row.runningBalance == null ? <span title="Not shown: the ledger is in euro and this account or line is not (multi-currency is planned)">—</span> : fmtEUR(row.runningBalance)}
               </div>
             </div>
             {createJnlFor?.id === row.bt.id && jnlForm && (
@@ -18423,7 +18431,7 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
   useEffect(() => { if (companyId) loadAll(); }, [companyId]); // eslint-disable-line
   useEffect(() => {
     if (!companyId) return;
-    supabase.from('bank_accounts').select('id, nominal_code, display_name').eq('company_id', companyId).eq('is_active', true)
+    supabase.from('bank_accounts').select('id, nominal_code, display_name, currency').eq('company_id', companyId).eq('is_active', true)
       .then(({ data }) => {
         setBankAccounts(data || []);
         setSelectedAccountId(prev => prev || data?.[0]?.id || null);
@@ -18472,12 +18480,16 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
     // transaction's live `reconciled` flag every load — no cached/stored running total, so
     // rejecting or un-reconciling a row is automatically reflected on the next refresh with
     // no special-case handling.
-    let running = startingBalance;
+    // GEO-02: the starting balance is the euro ledger's, so on a non-EUR account (or for a
+    // non-EUR line) a running balance would add foreign amounts to euro; none is shown.
+    const foreignAccount = isForeignLine({ currency: selectedAccount.currency });
+    let running = startingBalance, mixed = foreignAccount;
     const rows = (txns || []).map(bt => {
+      if (isForeignLine(bt)) mixed = true;
       if (bt.reconciled) running += Number(bt.amount);
       const match = matchByBt[bt.id] || null;
       const entity = match ? entMap[match.matched_id] || null : null;
-      return { bt, match, entity, runningBalance: running };
+      return { bt, match, entity, runningBalance: mixed ? null : running };
     });
     setWorksheetRows(rows);
     setWorksheetLoading(false);
@@ -18814,6 +18826,7 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
   const saveTransfer = async () => {
     const bt = transferFor;
     if (!bt || !transferTo || savingJnl) return;
+    if (isForeignLine(bt)) { showToast(SETTLE_FX_MESSAGE); return; }
     const thisNominal = bankAccounts.find(a => a.id === bt.bank_account_id)?.nominal_code || '1000';
     const isOut = Number(bt.amount) < 0;
     const row = {
@@ -19024,7 +19037,7 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
                 {bt.hold_reason === 'transfer' && <span style={{ display: 'inline-block', marginTop: 4, fontSize: 10, fontWeight: 700, color: 'var(--warn)', border: '1px solid rgba(251,191,36,0.3)', background: 'var(--warn-dim)', borderRadius: 'var(--radius-pill)', padding: '1px 8px' }}>Transfer: choose the other account</span>}
               </div>
               {bt.hold_reason === 'transfer' && (
-                <button className="btn btn-p btn-sm" onClick={() => { setTransferFor(transferFor?.id === bt.id ? null : bt); setTransferTo(''); }}>
+                <button className="btn btn-p btn-sm" disabled={isForeignLine(bt)} title={isForeignLine(bt) ? SETTLE_FX_MESSAGE : undefined} onClick={() => { setTransferFor(transferFor?.id === bt.id ? null : bt); setTransferTo(''); }}>
                   {transferFor?.id === bt.id ? 'Close' : 'Choose account…'}
                 </button>
               )}
@@ -22179,10 +22192,16 @@ function GlobalSearchPalette({ open, onClose, companyId, company, isBusinessOwne
         supabase.rpc('search_bank_transactions', { p_company_id: companyId, p_query: query }),
         supabase.rpc('search_customers', { p_company_id: companyId, p_query: query }),
       ]);
+      // search_bank_transactions returns no currency: look it up, so a GBP line shows £
+      const btRows = bt.data || [];
+      const { data: curs } = btRows.length
+        ? await supabase.from('bank_transactions').select('id, currency').in('id', btRows.map(r => r.id))
+        : { data: [] };
+      const curById = Object.fromEntries((curs || []).map(c => [c.id, c.currency]));
       if (cancelled) return;
       setResults({
         invoices: inv.data || [], journals: jnl.data || [],
-        bank_transactions: bt.data || [], customers: cust.data || [],
+        bank_transactions: btRows.map(r => ({ ...r, currency: curById[r.id] || 'EUR' })), customers: cust.data || [],
       });
       setSearching(false);
     }, 200);
@@ -22278,7 +22297,7 @@ function GlobalSearchPalette({ open, onClose, companyId, company, isBusinessOwne
             <Section label="Bank Transactions">
               {results.bank_transactions.map(r => (
                 <ResultRow key={r.id} onClick={() => selectEntity('reconciliation')}
-                  primary={r.description || 'Transaction'} secondary={r.bank_account_name} tertiary={fmtEUR(r.amount)} />
+                  primary={r.description || 'Transaction'} secondary={r.bank_account_name} tertiary={fmtCurrencyFull(r.amount, r.currency)} />
               ))}
             </Section>
           )}

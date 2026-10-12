@@ -15,6 +15,7 @@ import { daysFromToday, isLateDeadline, isCurrentDeadline, nextDeadline, applica
 import { monthEnd, todayStr as localToday, thisMonthStr } from './shared/dates.js';
 import { useHealthy } from './shared/useHealthy.js';
 import { fetchCashBalance } from './shared/bankBalance.js';
+import { CURRENCY_SYMBOLS } from './shared/currency.js';
 import { useChartOfAccounts } from './shared/chartOfAccounts.js';
 import { useTransactionRules } from './shared/txRules.js';
 import { suggestExpenseAccount, expenseAccountOptions, suggestExpenseVatCode, EXPENSE_VAT_CODES, VAT_SOURCE_LABEL } from './shared/expenseSuggest.js';
@@ -31,6 +32,8 @@ import {
 // ─── Constants ────────────────────────────────────────────────────────────────
 
 const fmt  = n => `€${Math.abs(Number(n)||0).toLocaleString("en-IE",{minimumFractionDigits:0,maximumFractionDigits:0})}`;
+// A bank line in its own currency (a GBP line shows £, not €).
+const fmtLine = (n, cur) => !cur || cur === 'EUR' ? fmt(n) : `${CURRENCY_SYMBOLS[cur] ?? cur + ' '}${Math.abs(Number(n)||0).toLocaleString("en-IE",{minimumFractionDigits:0,maximumFractionDigits:0})}`;
 const fmtD = d => d ? new Date(d).toLocaleDateString("en-IE",{day:"2-digit",month:"short"}) : "—";
 
 
@@ -360,7 +363,7 @@ function HomeTab({ companyId, company, setTab }) {
       fetchCashBalance(companyId, today).catch(() => null),
       fetchOverdueInvoices(companyId).catch(() => []),
       supabase.from('expenses').select('id').eq('company_id', companyId).eq('status','submitted'),
-      supabase.from('bank_transactions').select('date,description,amount').eq('company_id', companyId).order('date',{ascending:false}).limit(4),
+      supabase.from('bank_transactions').select('date,description,amount,currency').eq('company_id', companyId).order('date',{ascending:false}).limit(4),
     ]);
     setCash(bal);
     setOverdueInvs(overdue);
@@ -474,7 +477,7 @@ function HomeTab({ companyId, company, setTab }) {
                  <div className="m-txn-date">{fmtD(t.date)}</div>
                </div>
                <div className={`m-txn-amt ${pos ? 'c-green' : 'c-red'}`}>
-                 {pos ? '+' : '-'}{fmt(Math.abs(Number(t.amount)))}
+                 {pos ? '+' : '-'}{fmtLine(Math.abs(Number(t.amount)), t.currency)}
                </div>
              </div>
            );
@@ -503,7 +506,7 @@ function CashTab({ companyId, company }) {
     const [bal, balLm, recent] = await Promise.all([
       fetchCashBalance(companyId, localToday()).catch(() => null),
       fetchCashBalance(companyId, lmEnd).catch(() => null),
-      supabase.from('bank_transactions').select('date,description,amount').eq('company_id', companyId).order('date',{ascending:false}).limit(20),
+      supabase.from('bank_transactions').select('date,description,amount,currency').eq('company_id', companyId).order('date',{ascending:false}).limit(20),
     ]);
     setCash(bal);
     setCashLm(balLm);
@@ -566,7 +569,7 @@ function CashTab({ companyId, company }) {
                  <div className="m-txn-date">{fmtD(t.date)}</div>
                </div>
                <div className={`m-txn-amt ${pos ? 'c-green' : 'c-red'}`}>
-                 {pos ? '+' : '-'}{fmt(Math.abs(Number(t.amount)))}
+                 {pos ? '+' : '-'}{fmtLine(Math.abs(Number(t.amount)), t.currency)}
                </div>
              </div>
            );
@@ -810,7 +813,7 @@ function ApprovalCard({ item, approving, onApprove, onReview, acctOptions, canEd
           </div>
         </div>
         <div style={{ fontSize:14, fontWeight:700, fontFamily:'Source Code Pro,monospace', color: !isBill && !isIn ? 'var(--red)' : 'var(--mtx)', flexShrink:0 }}>
-          {!isBill && !isIn ? '-' : ''}{fmt(Math.abs(Number(item.amount)))}
+          {!isBill && !isIn ? '-' : ''}{isBill ? fmt(Math.abs(Number(item.amount))) : fmtLine(Math.abs(Number(item.amount)), item.currency)}
         </div>
       </div>
 
@@ -970,7 +973,7 @@ function ApprovalsTab({ companyId, user, isBusinessOwner, isAdmin }) {
         // Fetch the bank rows + open AP/AR invoices in parallel
         const [{ data: bts }, { data: openAP }, { data: openAR }] = await Promise.all([
           supabase.from('bank_transactions')
-            .select('id, date, description, amount')
+            .select('id, date, description, amount, currency')
             .in('id', btIds)
             .eq('company_id', companyId)
             .eq('reconciled', false), // safety guard: never show already-reconciled
@@ -1022,6 +1025,7 @@ function ApprovalsTab({ companyId, user, isBusinessOwner, isAdmin }) {
               description:     bt.description,
               subtitle:        fmtD(bt.date),
               amount:          bt.amount,
+              currency:        bt.currency || 'EUR',
               suggestedNominal:(isIn ? j?.credit_account : j?.debit_account) ?? '6600',
               vatCode:         j?.vat_code ?? null,
               confidence:      match.confidence,

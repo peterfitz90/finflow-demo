@@ -107,3 +107,47 @@ test('Reconciliation blocks Settle and Categorise on a non-EUR line, with the sa
   for (const b of buttons) assert.match(b, /disabled=\{isForeignLine\((row\.bt|item\.bt|bt)\)\} title=\{isForeignLine\(\1\) \? SETTLE_FX_MESSAGE : undefined\}/, b.trim().slice(0, 80));
   assert.match(SETTLE_FX_MESSAGE, /^Foreign-currency lines can't be settled/);
 });
+
+// A bank line, statement balance or import batch can be in GBP/USD: none may be formatted as
+// euro. The rule, checked over the whole app source: no fmtEUR or literal € on a bank line's
+// amount or balance; and the euro aggregates built from bank lines leave non-EUR lines out.
+test('no hard-coded € on a bank line, and euro sums of bank lines leave non-EUR lines out', async () => {
+  const { readFileSync } = await import('node:fs');
+  const app = readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8');
+  const mobile = readFileSync(new URL('../src/Mobile.jsx', import.meta.url), 'utf8');
+  const lines = (src, file) => src.split('\n').map((l, i) => ({ l, at: `${file}:${i + 1}` }));
+  const all = [...lines(app, 'App.jsx'), ...lines(mobile, 'Mobile.jsx')];
+  const btAmount = /\b(bt|row\.bt|item\.bt|settleFor|createJnlFor|transferFor)\.(amount|balance)\b/;
+  const bad = all.filter(({ l }) =>
+    /fmtEUR\(\s*(Math\.abs\()?\s*(Number\()?\s*(bt|row\.bt|item\.bt|settleFor|createJnlFor|transferFor)\.(amount|balance)/.test(l)
+    || (/€\{/.test(l) && btAmount.test(l)));
+  assert.deepEqual(bad.map(b => b.at), [], 'bank-line amount formatted as euro');
+
+  // each place fixed in this change, by its own wording
+  for (const [what, re] of [
+    ['Worksheet amount', /fmtCurrencyFull\(row\.bt\.amount, row\.bt\.currency \|\| 'EUR'\)/],
+    ['Worksheet running balance hidden when mixed', /runningBalance: mixed \? null : running/],
+    ['re-categorise related line', /fmtCurrencyFull\(Math\.abs\(Number\(bt\.amount\)\), bt\.currency \|\| 'EUR'\)/],
+    ['sibling prompt', /fmtCurrencyFull\(r\.amount, r\.currency \|\| 'EUR'\)/],
+    ['preview CSV export', /"Currency", "Amount", "Balance"/],
+    ['global search', /tertiary=\{fmtCurrencyFull\(r\.amount, r\.currency\)\}/],
+    ['Overview unreconciled sum', /unrecTxns\s+\|\| \[\]\)\.filter\(t => !isForeignLine\(t\)\)/],
+    ['Overview sparkline', /btRecent\.data\]\.filter\(r => !isForeignLine\(r\)\)/],
+    ['cash position chart', /\[\.\.\.data\]\.filter\(r => !isForeignLine\(r\)\)/],
+    ['Cash Flow', /setTxns\(txRes\.data\.filter\(t => !isForeignLine\(t\)\)\)/],
+    ['matching engine', /const txns = \(allTxns \|\| \[\]\)\.filter\(t => !isForeignLine\(t\)\)/],
+  ]) assert.match(app, re, what);
+  assert.equal((mobile.match(/fmtLine\(Math\.abs\(Number\(t\.amount\)\), t\.currency\)/g) || []).length, 2, 'mobile recent lines');
+  assert.match(mobile, /fmtLine\(Math\.abs\(Number\(item\.amount\)\), item\.currency\)/, 'mobile approval card');
+  // every mobile bank-line select that feeds a displayed amount fetches currency
+  for (const m of mobile.matchAll(/from\('bank_transactions'\)\s*\.select\('([^']*)'\)/g)) assert.match(m[1], /currency/, m[1]);
+});
+
+test('Choose account on a held non-EUR transfer is blocked, with the Settle message', async () => {
+  const { readFileSync } = await import('node:fs');
+  const src = readFileSync(new URL('../src/App.jsx', import.meta.url), 'utf8');
+  const i = src.indexOf('const saveTransfer = ');
+  assert.match(src.slice(i, i + 300), /if \(isForeignLine\(bt\)\) \{ showToast\(SETTLE_FX_MESSAGE\); return; \}/);
+  const btn = src.split('\n').find(l => /setTransferFor\(transferFor\?\.id === bt\.id \? null : bt\)/.test(l));
+  assert.match(btn, /disabled=\{isForeignLine\(bt\)\} title=\{isForeignLine\(bt\) \? SETTLE_FX_MESSAGE : undefined\}/);
+});
