@@ -132,6 +132,31 @@ for (const [fn, args] of Object.entries(fnArgs).sort()) {
   }
 }
 
+// ── GEO-02 guard: nothing about another company's lines ─────────────────────────────────────
+// The writes the guard checks (a journal referencing a line, a confirmed match on it, the line
+// reconciled), aimed at the test company's real GBP line. Anon must be refused by RLS or
+// permission, and must never get the guard's message (that would reveal the line is foreign).
+if (cat.fx_guard) {
+  const { bank_transaction_id: btId, revolut_id: ref } = cat.fx_guard;
+  const guardMsg = r => /can't be (posted|settled|matched|changed)/.test(`${r.json?.message ?? r.text ?? ''}`);
+  const probes = [
+    ['journal referencing the line', '/rest/v1/journals', 'POST', { company_id: TEST_CO, date: '2026-06-10', description: 'anon check', debit_account: '6600', credit_account: '1000', amount: 1, reference: ref }],
+    ['confirmed match on the line', '/rest/v1/bank_matches', 'POST', { company_id: TEST_CO, bank_transaction_id: btId, matched_type: 'journal', matched_id: btId, confidence: 100, status: 'confirmed', matched_by: 'user' }],
+    ['line reconciled', `/rest/v1/bank_transactions?id=eq.${btId}`, 'PATCH', { reconciled: true }],
+  ];
+  for (const [what, path, method, body] of probes) {
+    for (const [label, hdr] of [HEADER_VARIANTS[0], HEADER_VARIANTS[1]]) {
+      const r = await call(path, { method, headers: { ...hdr, Prefer: 'return=representation' }, body });
+      const rows = Array.isArray(r.json) ? r.json.length : null;
+      if (guardMsg(r)) record('FAIL', 'fx guard', what, `${label}: the guard's message reached anon: ${short(r)}`);
+      else if (refused(r)) record('PASS', 'fx guard', what, `${label}: refused ${short(r)}`);
+      else if (method === 'PATCH' && r.status >= 200 && r.status < 300 && rows === 0) record('PASS', 'fx guard', what, `${label}: 0 rows visible to update`);
+      else if (r.status >= 200 && r.status < 300) record('FAIL', 'fx guard', what, `${label}: WRITTEN (${r.status}) on Fitzsimons Test, remove it: ${short(r)}`);
+      else record('WARN', 'fx guard', what, `${label}: refused, but not by RLS/permission: ${short(r)}`);
+    }
+  }
+}
+
 // ── Storage ──────────────────────────────────────────────────────────────────────────────────
 {
   const r = await call('/storage/v1/bucket');

@@ -88,6 +88,19 @@
       ]
     },
     {
+      "name": "categorise_bank_line",
+      "args": [
+        "p_company_id",
+        "p_bt_id",
+        "p_date",
+        "p_description",
+        "p_debit_account",
+        "p_credit_account",
+        "p_amount",
+        "p_reference"
+      ]
+    },
+    {
       "name": "claim_invoice_number",
       "args": [
         "p_company_id",
@@ -411,5 +424,10 @@
         "contentType": "application/pdf"
       }
     ]
+  },
+  "_fx_guard_comment": "GEO-02 guard probe (supabase/fx_guard_db.sql): anon attempts the writes the guard checks, aimed at Fitzsimons Test's real unreconciled GBP line (TEST data, never changed). Each must be refused by RLS or permission and must never return the guard's own message, which would tell an outsider the line is foreign-currency.",
+  "fx_guard": {
+    "bank_transaction_id": "b208fa19-78a0-484b-a53c-7c75bbef056c",
+    "revolut_id": "PDF-00db5477"
   }
 }
