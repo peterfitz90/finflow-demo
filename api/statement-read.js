@@ -31,7 +31,7 @@ function forScreen(out) {
     period: out.result.period, summary: out.result.summary,
     sections: out.result.sections.map(s => ({ key: s.key, label: s.label, currency: s.currency, ok: s.ok, verifiable: s.verifiable,
       checks: s.checks.map(({ breaks, ...c }) => ({ ...c, breaks: (breaks || []).map(b => ({ date: b.date, expected: b.expected, printed: b.printed })) })),
-      errors: s.errors, rows: s.rows.map(r => ({ revolut_id: r.revolut_id, date: r.date, description: r.description, amount: r.amount, balance: r.balance, currency: r.currency, page: r.page, flags: r.flags || null, status: r.status })) })),
+      errors: s.errors, rows: s.rows.map(r => ({ revolut_id: r.revolut_id, date: r.date, description: r.description, amount: r.amount, balance: r.balance, currency: r.currency, eur_amount: r.eur_amount ?? null, page: r.page, flags: r.flags || null, status: r.status })) })),
   };
 }
 

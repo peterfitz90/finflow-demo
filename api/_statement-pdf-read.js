@@ -58,7 +58,7 @@ Return ONLY a JSON object of this shape:
    "total_in_text": string|null, "total_out_text": string|null, "count_text": string|null,
    "rows": [{"page": number, "date_text": string, "description": string,
      "money_in_text": string|null, "money_out_text": string|null, "amount_text": string|null,
-     "balance_text": string|null, "status_text": string|null}]}]}
+     "balance_text": string|null, "eur_amount_text": string|null, "status_text": string|null}]}]}
 
 Rules:
 - document_type: "transactions" for an account statement listing transactions; "fees" for a statement of fees, charges or interest; "other" for anything else (then return no sections).
@@ -67,6 +67,7 @@ Rules:
 - One row per transaction line, in the order printed, with the page number (1 = the first page you were given). Join a description that wraps onto several lines.
 - Use money_in_text and money_out_text when the statement has separate in/out (or credit/debit) columns; use amount_text when it prints one signed amount. Never both.
 - Do not output as rows: column headers, page totals, "balance brought forward" or "carried forward" lines, opening or closing balance lines, or summaries. Put the statement's opening and closing balance, total in, total out and transaction count in the section fields when printed.
+- eur_amount_text: only in a section that is not in euro, and only when the line itself prints a separate euro amount for that transaction (for example a euro-equivalent column); copy it as printed. Otherwise null. Never convert a figure yourself.
 - status_text: only if the statement marks the line (for example "Pending" or "Reverted").`;
 
 // Added to the prompt when the PDF has no usable text layer.

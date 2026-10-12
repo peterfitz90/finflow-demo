@@ -13,6 +13,7 @@ import { computeDeadlines } from './shared/computeDeadlines.js';
 import { isAccountantFor, portfolioTotals, crossClientDeadlines } from './shared/practicePortfolio.js';
 import { fetchAllRows } from './shared/fetchAllRows.js';
 import { findContentDuplicates, postImportBatch } from './shared/importDedup.js';
+import { FX_BLOCK_MESSAGE, SETTLE_FX_MESSAGE, fxPlan, toLedgerLine, isForeignLine } from './shared/fxGuard.js';
 import { parseStatement, FORMAT_LABEL } from './shared/bankStatementParse.js';
 import { localDateStr, monthEnd, monthStart, todayStr as localToday, thisMonthStr, addDaysStr, sanitiseDate } from './shared/dates.js';
 import { useSavedViews, ViewsMenu } from './shared/SavedViews.jsx';
@@ -11276,6 +11277,7 @@ function PdfStatementReview({ company, read, doc, bankAccounts, onUse, onClose }
   if (!sec) return null;
   const account = bankAccounts.find(a => a.id === acct[sec.key]);
   const currencyMismatch = account && sec.currency && account.currency && account.currency !== sec.currency;
+  const secFx = fxPlan(sec.rows).sections[0] || null; // GEO-02: a non-EUR section is reference only unless every line prints euro
   const fmt = v => (v == null ? '' : Math.abs(v).toLocaleString('en-IE', { minimumFractionDigits: 2, maximumFractionDigits: 2 }));
   const imported = new Set((read.imports || []).map(i => i.section_key));
   return (
@@ -11321,6 +11323,13 @@ function PdfStatementReview({ company, read, doc, bankAccounts, onUse, onClose }
           {currencyMismatch && <span style={{ color: "var(--red)", fontSize: 12 }}>This section is in {sec.currency}; that account is {account.currency}.</span>}
           {!bankAccounts.length && <span style={{ color: "var(--red)", fontSize: 12 }}>Add a bank account first (Accounts/Balances).</span>}
         </div>
+        {secFx && (
+          <div className={`bi-alert${secFx.mode === 'blocked' ? ' bi-alert-err' : ''}`} role="status" style={{ fontSize: 12 }}>
+            {secFx.mode === 'blocked'
+              ? <><b>{secFx.currency}: reference only.</b> {FX_BLOCK_MESSAGE}{secFx.missing < secFx.lines ? ` ${secFx.missing} of ${secFx.lines} lines print no euro amount.` : ''}</>
+              : <><b>{secFx.currency}: every line prints a euro amount.</b> The euro amounts post; each line records its {secFx.currency} amount and the printed euro amount.</>}
+          </div>
+        )}
         <ul style={{ listStyle: "none", margin: "0 0 8px", padding: 0, fontSize: 12 }}>
           {sec.checks.map(c => (
             <li key={c.check} style={{ display: "flex", gap: 6 }}>
@@ -11740,6 +11749,13 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
   const [stmtAck, setStmtAck] = useState(false);
   const [lockPrompt, setLockPrompt] = useState(null);
   const stmtIssues = statementHasIssues(stmtCheck);
+  // GEO-02: foreign-currency lines in this preview are reference only, unless their section
+  // prints a euro amount on every line (src/shared/fxGuard.js).
+  const fx = useMemo(() => fxPlan(rows.filter(r => !r.imported)), [rows]);
+  useEffect(() => {
+    if (!fx.blockedIds.size) return;
+    setSelected(s => [...s].some(id => fx.blockedIds.has(id)) ? new Set([...s].filter(id => !fx.blockedIds.has(id))) : s);
+  }, [fx, selected]);
   // BNK-14 step 3a: the PDF statement being imported (upload, read, review), and the read and
   // section the current preview came from (linked to the import batch after posting).
   const [pdfStage, setPdfStage] = useState(null);
@@ -12581,7 +12597,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
     loadingRef.current = true;
     try {
       await runPreview(sec.rows.map(r => ({ revolut_id: r.revolut_id, date: r.date, description: r.description, amount: r.amount,
-        currency: r.currency || 'EUR', balance: r.balance, type: '' })), imageRead ? 'pdf-image' : 'pdf', `${pdfRead.doc.filename} · ${sec.label}`);
+        currency: r.currency || 'EUR', eur_amount: r.eur_amount ?? null, balance: r.balance, type: '' })), imageRead ? 'pdf-image' : 'pdf', `${pdfRead.doc.filename} · ${sec.label}`);
     } finally { loadingRef.current = false; }
   };
 
@@ -12651,16 +12667,17 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
     toastTimer.current = setTimeout(() => setToast(null), 3000);
   };
 
-  const toggle = (id) => setSelected(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; });
+  const toggle = (id) => { if (fx.blockedIds.has(id)) return; setSelected(s => { const n = new Set(s); n.has(id) ? n.delete(id) : n.add(id); return n; }); };
 
   const toggleAll = () => {
-    const newRows = rows.filter(r => !r.imported);
+    const newRows = rows.filter(r => !r.imported && !fx.blockedIds.has(r.revolut_id));
     const allChk = newRows.length > 0 && newRows.every(r => selected.has(r.revolut_id));
     setSelected(allChk ? new Set() : new Set(newRows.map(r => r.revolut_id)));
   };
 
   const post = async ({ skipLocked = false } = {}) => {
-    let toPost = rows.filter(r => selected.has(r.revolut_id));
+    // GEO-02: reference-only lines never post; a euro-printed line posts its euro amount
+    let toPost = rows.filter(r => selected.has(r.revolut_id) && !fx.blockedIds.has(r.revolut_id)).map(r => toLedgerLine(r, fx));
     if (!toPost.length) return;
     setPosting(true); setAlert(null);
     try {
@@ -12735,6 +12752,7 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
           bank_format: bankFormat, import_batch_id: batchId,
           reconciled: !held, reconciled_at: held ? null : now,
           hold_reason: held ? 'transfer' : null,
+          ...(r.original_currency ? { original_currency: r.original_currency, original_amount: r.original_amount, printed_eur_amount: r.printed_eur_amount } : {}),
         };
       });
       assertDistinctAccounts(journals.filter(Boolean));
@@ -13069,7 +13087,8 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
   };
 
   const newRows = rows.filter(r => !r.imported);
-  const allNewChk = newRows.length > 0 && newRows.every(r => selected.has(r.revolut_id));
+  const postableNew = newRows.filter(r => !fx.blockedIds.has(r.revolut_id));
+  const allNewChk = postableNew.length > 0 && postableNew.every(r => selected.has(r.revolut_id));
 
   const fmtHistDate = d => {
     const dt = new Date(d);
@@ -13493,6 +13512,13 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
               </button>
             </div>
           </div>
+          {fx.sections.map(f => (
+            <div key={f.currency} className={`bi-alert${f.mode === 'blocked' ? ' bi-alert-err' : ''}`} role="status" style={{ fontSize: 12 }}>
+              {f.mode === 'blocked'
+                ? <><b>{f.currency}: reference only.</b> {FX_BLOCK_MESSAGE} {f.lines} line{f.lines === 1 ? '' : 's'} shown below cannot be selected{f.missing < f.lines ? ` (${f.missing} of them print no euro amount, so the whole ${f.currency} section stays blocked)` : ''}.</>
+                : <><b>{f.currency}: every line prints a euro amount.</b> The euro amounts post; each line records its {f.currency} amount and the printed euro amount.</>}
+            </div>
+          ))}
           {catProgress && (
             <div style={{ padding: "9px 14px 10px", background: "var(--surface2)", border: "1px solid var(--border)", borderRadius: 6, margin: "6px 0" }}>
               <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 6 }}>
@@ -13538,14 +13564,16 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
                 </tr>
               </thead>
               <tbody>
-                {rows.map(r => (
+                {rows.map(r => { const refOnly = !r.imported && fx.blockedIds.has(r.revolut_id); const viaEuro = !r.imported && fx.euroIds.has(r.revolut_id); return (
                   <tr
                     key={r.revolut_id}
                     className={`${r.imported ? "bi-imported" : ""} ${selected.has(r.revolut_id) ? "bi-sel" : ""}`}
                     onClick={() => !r.imported && toggle(r.revolut_id)}
+                    style={refOnly ? { opacity: 0.6, cursor: "default" } : undefined}
+                    title={refOnly ? FX_BLOCK_MESSAGE : undefined}
                   >
                     <td onClick={e => e.stopPropagation()}>
-                      {!r.imported && (
+                      {!r.imported && !refOnly && (
                         <input type="checkbox" className="bi-chk" checked={selected.has(r.revolut_id)} onChange={() => toggle(r.revolut_id)} />
                       )}
                     </td>
@@ -13553,8 +13581,10 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
                     <td>{r.description}</td>
                     <td className="r">
                       <span className={r.amount >= 0 ? "bi-amt-pos" : "bi-amt-neg"}>
-                        {r.amount >= 0 ? "+" : ""}{(r.amount ?? 0).toLocaleString("en-IE", { minimumFractionDigits: 2 })}
+                        {isForeignLine(r) ? `${r.amount >= 0 ? "+" : "-"}${fmtCurrencyFull(Math.abs(r.amount), r.currency)}`
+                          : `${r.amount >= 0 ? "+" : ""}${(r.amount ?? 0).toLocaleString("en-IE", { minimumFractionDigits: 2 })}`}
                       </span>
+                      {viaEuro && <div style={{ fontSize: 10, color: "var(--muted)" }}>posts {Number(r.eur_amount) >= 0 ? "+" : "-"}{fmtCurrencyFull(Math.abs(r.eur_amount), 'EUR')}</div>}
                     </td>
                     <td className="r">
                       <span className="bi-bal">{r.balance == null ? "—" : r.balance.toLocaleString("en-IE", { minimumFractionDigits: 2 })}</span>
@@ -13587,12 +13617,12 @@ const BankImport = React.memo(function BankImport({ companyId, isActive, company
                       ) : <span style={{ fontSize: 11, color: "var(--dim)" }}>—</span>}
                     </td>
                     <td>
-                      <span className={`bi-tag ${r.imported ? "bi-tag-imp" : "bi-tag-new"}`}>
-                        {r.imported ? "Imported" : "New"}
+                      <span className={`bi-tag ${r.imported ? "bi-tag-imp" : refOnly ? "" : "bi-tag-new"}`} style={refOnly ? { color: "var(--muted)", border: "1px solid var(--border)" } : undefined}>
+                        {r.imported ? "Imported" : refOnly ? "Reference only" : "New"}
                       </span>
                     </td>
                   </tr>
-                ))}
+                ); })}
               </tbody>
             </table>
           </div>
@@ -18297,12 +18327,12 @@ function ReconWorksheet({
                     <span style={{ fontSize: 11, maxWidth: 150, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>{row.entity ? row.entity._label : ''}</span>
                     {row.match.matched_type === 'journal'
                       ? <button className="btn btn-p btn-sm" style={{ fontSize: 11 }} onClick={() => onConfirmJournalMatch(row.match, row.bt)}>Accept</button>
-                      : <button className="btn btn-p btn-sm" style={{ fontSize: 11 }} onClick={() => onOpenSettleModal(row.bt, row.entity)}>Settle…</button>}
+                      : <button className="btn btn-p btn-sm" style={{ fontSize: 11 }} disabled={isForeignLine(row.bt)} title={isForeignLine(row.bt) ? SETTLE_FX_MESSAGE : undefined} onClick={() => onOpenSettleModal(row.bt, row.entity)}>Settle…</button>}
                     <button className="btn btn-s btn-sm" style={{ fontSize: 11, color: 'var(--danger)' }} onClick={() => onRejectMatch(row.match.id)}>Reject</button>
                   </>
                 ) : (
                   <>
-                    <button className="btn btn-s btn-sm" style={{ fontSize: 11 }} onClick={() => onOpenSettleModal(row.bt)}>Settle…</button>
+                    <button className="btn btn-s btn-sm" style={{ fontSize: 11 }} disabled={isForeignLine(row.bt)} title={isForeignLine(row.bt) ? SETTLE_FX_MESSAGE : undefined} onClick={() => onOpenSettleModal(row.bt)}>Settle…</button>
                     <button className="btn btn-s btn-sm" style={{ fontSize: 11 }} onClick={() => createJnlFor?.id === row.bt.id ? onCancelCreateJnl() : onOpenCreateJnl(row.bt)}>
                       {createJnlFor?.id === row.bt.id ? 'Close' : 'Categorise'}
                     </button>
@@ -18617,6 +18647,8 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
 
   // Open settlement modal — loads scored open invoices, optionally pre-fills a suggested match
   const openSettleModal = async (bt, preloadEntity = null) => {
+    // GEO-02: a foreign-currency line is not settled against a euro invoice or bill
+    if (isForeignLine(bt)) { showToast(SETTLE_FX_MESSAGE); return; }
     setSettleFor(bt); setSettleAllocs([]); setSettleMode('invoice'); setSettleErr(null);
     setSettleOnAcc({ party_type: Number(bt.amount) >= 0 ? 'customer' : 'supplier', party_name: '' });
     const bankAbs = Math.abs(Number(bt.amount));
@@ -18657,6 +18689,7 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
     setSettleSaving(true); setSettleErr(null);
     const bt = settleFor;
     try {
+      if (isForeignLine(bt)) throw new Error(SETTLE_FX_MESSAGE);
       // Client-side pre-validation for immediate UX feedback (RPC also validates server-side)
       if (settleMode === 'invoice') {
         if (!settleAllocs.length) throw new Error('Add at least one invoice to settle');
@@ -18965,7 +18998,7 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
             <div style={{ display: 'flex', gap: 6, flexShrink: 0 }}>
               {item.match.matched_type === 'journal'
                 ? <button className="btn btn-p btn-sm" onClick={() => confirmJournalMatch(item.match, item.bt)}>Confirm</button>
-                : <button className="btn btn-p btn-sm" onClick={() => openSettleModal(item.bt, item.entity)}>Settle…</button>
+                : <button className="btn btn-p btn-sm" disabled={isForeignLine(item.bt)} title={isForeignLine(item.bt) ? SETTLE_FX_MESSAGE : undefined} onClick={() => openSettleModal(item.bt, item.entity)}>Settle…</button>
               }
               <button className="btn btn-s btn-sm" style={{ color: 'var(--danger)', borderColor: 'rgba(248,113,113,0.35)' }} onClick={() => rejectMatch(item.match.id)}>Reject</button>
             </div>
@@ -18992,7 +19025,7 @@ function Reconciliation({ companyId, onNavigate, selPeriod }) {
                   {transferFor?.id === bt.id ? 'Close' : 'Choose account…'}
                 </button>
               )}
-              <button className={`btn ${bt.hold_reason === 'transfer' ? 'btn-s' : 'btn-p'} btn-sm`} onClick={() => openSettleModal(bt)}>Settle…</button>
+              <button className={`btn ${bt.hold_reason === 'transfer' ? 'btn-s' : 'btn-p'} btn-sm`} disabled={isForeignLine(bt)} title={isForeignLine(bt) ? SETTLE_FX_MESSAGE : undefined} onClick={() => openSettleModal(bt)}>Settle…</button>
               <button className="btn btn-s btn-sm" onClick={() => createJnlFor?.id === bt.id ? setCreateJnlFor(null) : openCreateJnl(bt)}>
                 {createJnlFor?.id === bt.id ? 'Close' : 'Categorise'}
               </button>

@@ -8,7 +8,8 @@
 //     sections: [{ key, account_label, currency, opening_balance_text, closing_balance_text,
 //                  total_in_text, total_out_text, count_text,
 //                  rows: [{ page, date_text, description, money_in_text, money_out_text, amount_text,
-//                           balance_text, status_text }] }] }
+//                           balance_text, eur_amount_text, status_text }] }] }
+//   eur_amount_text: a non-EUR section's own printed euro amount for the line (GEO-02, fxGuard.js)
 import { checkBalances, checkDates, hash32 } from './bankStatementParse.js';
 
 const MONTHS = { jan: 1, feb: 2, mar: 3, apr: 4, may: 5, jun: 6, jul: 7, aug: 8, sep: 9, sept: 9, oct: 10, nov: 11, dec: 12 };
@@ -126,10 +127,13 @@ export function verifyStatement({ chunks, pageTexts, textCheck = true }) {
     sec.raw.forEach((r, i) => {
       const pageText = pageTexts[r.absPage - 1] ?? '';
       const errs = [];
-      const fields = { date_text: r.date_text, money_in_text: r.money_in_text, money_out_text: r.money_out_text, amount_text: r.amount_text, balance_text: r.balance_text };
+      const fields = { date_text: r.date_text, money_in_text: r.money_in_text, money_out_text: r.money_out_text, amount_text: r.amount_text, balance_text: r.balance_text, eur_amount_text: r.eur_amount_text };
       if (textCheck) for (const [f, v] of Object.entries(fields)) if (v != null && v !== '' && !onPage(v, pageText)) errs.push(`${f.replace('_text', '')} "${v}" is not on page ${r.absPage}`);
       const date = readPrintedDate(r.date_text, { periodStart: period.start, periodEnd: period.end });
       const inn = readPrintedAmount(r.money_in_text), out = readPrintedAmount(r.money_out_text), amt = readPrintedAmount(r.amount_text), bal = readPrintedAmount(r.balance_text);
+      // a printed euro amount is read only for a section not in euro; an unreadable one is left
+      // out (the line then has none, and fxGuard keeps its section blocked)
+      const eur = sec.currency && sec.currency.toUpperCase() !== 'EUR' ? readPrintedAmount(r.eur_amount_text) : { value: null };
       for (const x of [date, inn, out, amt, bal]) if (x.error) errs.push(x.error);
       let amount = null;
       if (!errs.length) {
@@ -140,7 +144,10 @@ export function verifyStatement({ chunks, pageTexts, textCheck = true }) {
         else errs.push('no amount');
       }
       if (errs.length) { errors.push({ index: i, page: r.absPage, message: errs.join('; ') }); return; }
+      // the euro amount takes the line's direction (statements often print it unsigned)
+      const eurAmount = eur.value ? Math.sign(amount) * Math.abs(eur.value) : null;
       rows.push({ date: date.value, description: String(r.description || '').trim(), amount, balance: bal.value, currency: sec.currency || 'EUR',
+        ...(eurAmount ? { eur_amount: eurAmount } : {}),
         status: r.status_text || null, page: r.absPage, chunkStart: r.chunkStart, index: i });
     });
 

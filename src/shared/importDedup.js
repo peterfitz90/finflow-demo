@@ -1,5 +1,6 @@
 // Shared bank-import duplicate handling — used by BOTH the live feed (api/yapily/ingest.js)
 // and the CSV import (App.jsx BankImport). Pure module: no browser or server globals.
+import { FX_BLOCK_MESSAGE, foreignLinesIn } from './fxGuard.js';
 
 // ── Content-based (cross-file / cross-source) duplicate detection ─────────────
 // Moved verbatim from api/yapily/ingest.js's Tier-2 dedup. An id-only check can't catch the
@@ -83,6 +84,15 @@ export function findContentDuplicates(incoming, existing, {
 const UNIQUE_VIOLATION = '23505';
 
 export async function postImportBatch(db, companyId, pairs) {
+  // GEO-02: the ledger is EUR-only. A foreign-currency line reaching this step would post its
+  // face value as euro, so the whole batch is refused (a euro-printed line arrives here already
+  // converted to EUR by fxGuard.toLedgerLine).
+  const foreign = foreignLinesIn(pairs.map(p => p.bt));
+  if (foreign.length) {
+    const curs = [...new Set(foreign.map(b => String(b.currency).toUpperCase()))].join(', ');
+    return { insertedBts: [], insertedJournals: [], skippedDuplicates: 0,
+      error: Object.assign(new Error(`${FX_BLOCK_MESSAGE} ${foreign.length} line${foreign.length === 1 ? '' : 's'} in ${curs}`), { code: 'FOREIGN_CURRENCY' }) };
+  }
   let todo = pairs;
   let skippedDuplicates = 0;
   let insertedBts = null;
